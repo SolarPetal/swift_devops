@@ -23,3 +23,10 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# TypeScript 增量编译缓存
+*.tsbuildinfo
+
+# Vite 配置 tsc 编译产物（tsc -b 生成）
+web/vite.config.d.ts
+web/vite.config.js
