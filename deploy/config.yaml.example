@@ -1,0 +1,40 @@
+server:
+  port: 8088
+  mode: release           # release / debug
+
+database:
+  driver: sqlite
+  dsn: ./data/swift-devops.db
+
+security:
+  # 32 字节随机 base64，丢失则历史加密数据无法解密
+  master_key: "REPLACE_ME_WITH_BASE64_32B"
+  jwt_secret: "REPLACE_ME_WITH_BASE64_32B"
+  jwt_ttl: 24h
+
+admin:
+  username: admin
+  # 用 `swift-devops hash-pwd <password>` 生成
+  password_bcrypt: "$2a$10$REPLACE_ME"
+
+storage:
+  artifact_dir: ./data/artifacts
+  build_workspace: ./data/build
+  max_history: 30
+
+builder:
+  docker_enabled: false   # 装了 docker 再开
+  maven_cache_dir: ./data/.m2
+
+ssh:
+  pool_size_per_host: 2
+  idle_timeout: 5m
+  connect_timeout: 10s
+
+monitor:
+  interval: 5s
+  retention: 24h
+
+log:
+  level: info
+  dir: ./logs

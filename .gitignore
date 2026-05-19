@@ -1,0 +1,25 @@
+# Go binaries (项目根目录的构建输出)
+/dist/
+*.exe
+
+# Web build & deps
+web/node_modules/
+web/.vite/
+# Vite 真实构建产物（assets/<hash>.js|css），但保留占位 web/dist/index.html
+web/dist/assets/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Local data / logs
+data/
+logs/
+*.db
+*.db-*
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
