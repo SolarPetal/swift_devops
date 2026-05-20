@@ -109,7 +109,8 @@ func runServe(args []string) {
 	}
 
 	gin.SetMode(cfg.Server.Mode)
-	r := api.NewRouter(cfg, db, aes, dist)
+	r, cleanup := api.NewRouter(cfg, db, aes, dist)
+	defer cleanup()
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	srv := &http.Server{

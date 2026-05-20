@@ -13,10 +13,13 @@ import (
 	"swift-devops/internal/api/middleware"
 	"swift-devops/internal/config"
 	"swift-devops/internal/pkg/crypto"
+	wspkg "swift-devops/internal/pkg/ws"
 	"swift-devops/internal/service"
 )
 
-func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS) *gin.Engine {
+// NewRouter 装配 gin 路由。
+// 返回 Cleanup，main 应 defer 调一次（关 WS ticket GC 等）。
+func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS) (*gin.Engine, func()) {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(middleware.Logger())
@@ -29,12 +32,21 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	loginRL := middleware.NewRateLimiter(time.Minute, 10)
 	r.POST("/api/v1/auth/login", middleware.LoginRateLimit(loginRL), authH.Login)
 
+	// WebSocket 一次性 ticket 仓库（进程级单例）
+	wsTickets := wspkg.NewTicketStore(wspkg.DefaultTicketTTL)
+	wsHub := wspkg.NewHub()
+	_ = wsHub // hub 当前在 Sprint 2.4 polish 阶段尚未串到业务，#14 接 pipeline 时启用
+
 	// 受保护 API（写操作自动审计）
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.JWT(cfg))
 	v1.Use(middleware.Audit(db))
 	{
 		v1.GET("/me", authH.Me)
+
+		// WebSocket ticket 颁发
+		wsTH := handler.NewWSTicketHandler(wsTickets)
+		v1.POST("/ws-tickets", wsTH.Issue)
 
 		// 主机管理
 		hostSvc := service.NewHostService(db, aes)
@@ -101,5 +113,8 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		fileServer.ServeHTTP(c.Writer, c.Request)
 	})
 
-	return r
+	cleanup := func() {
+		wsTickets.Close()
+	}
+	return r, cleanup
 }
