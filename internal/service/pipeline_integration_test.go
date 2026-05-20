@@ -136,6 +136,7 @@ func setupForIntegration(t *testing.T) (*service.PipelineService, uint, uint) {
 
 	// app：deploy_path 用 /tmp/swift-devops-test，端口用 nginx 暴露的 18080（host 角度）
 	// 这里 deployment.Port=0 → effectivePort=app.Port=18080
+	// systemd_user=root：容器里 root 一定在；同时端到端验证 SystemdUser 透传到 unit
 	appM := &model.Application{
 		AppCode:        "demo-it",
 		Name:           "Demo Integration",
@@ -143,6 +144,7 @@ func setupForIntegration(t *testing.T) (*service.PipelineService, uint, uint) {
 		DeployPath:     "/tmp/swift-devops-test",
 		Port:           parsePortOr(itHTTPPort, 18080),
 		HealthCheckURL: "/actuator/health",
+		SystemdUser:    "root",
 	}
 	if err := db.Create(appM).Error; err != nil {
 		t.Fatalf("app create: %v", err)
@@ -232,7 +234,7 @@ func TestPipeline_E2E_Integration(t *testing.T) {
 
 	// 验证 systemd unit 被写入
 	unitOut := dockerExec(t, "cat /etc/systemd/system/devops-demo-it.service")
-	for _, kw := range []string{"WorkingDirectory=/tmp/swift-devops-test", "ExecStart=/usr/bin/java", "--server.port=" + itHTTPPort} {
+	for _, kw := range []string{"WorkingDirectory=/tmp/swift-devops-test", "ExecStart=/usr/bin/java", "--server.port=" + itHTTPPort, "User=root"} {
 		if !strings.Contains(unitOut, kw) {
 			t.Errorf("unit 缺少 %q\n---\n%s", kw, unitOut)
 		}

@@ -32,6 +32,7 @@ type Application struct {
 	HealthCheckURL string `gorm:"size:255;default:'/actuator/health'" json:"health_check_url"`
 	JvmArgs        string `gorm:"type:text" json:"jvm_args"`
 	EnvVars        string `gorm:"type:text" json:"env_vars"` // JSON
+	SystemdUser    string `gorm:"size:32" json:"systemd_user"` // 空=root；非空写入 unit 的 User= 字段
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

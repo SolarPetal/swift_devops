@@ -187,3 +187,68 @@ func TestAppService_GetNotFound(t *testing.T) {
 		t.Fatalf("应 NOT_FOUND，得 %v", err)
 	}
 }
+
+func TestAppService_SystemdUserValidation(t *testing.T) {
+	svc, _ := setupAppSvc(t)
+	cases := []struct {
+		name string
+		user string
+		ok   bool
+	}{
+		{"空值放行 (沿用 SSH 账号)", "", true},
+		{"小写字母开头", "deployer", true},
+		{"下划线开头", "_svc", true},
+		{"含数字", "app1", true},
+		{"含连字符", "spring-user", true},
+		{"两边空格被裁剪后空值", "   ", true},
+		{"大写非法", "Root", false},
+		{"数字开头非法", "1user", false},
+		{"超过 32 位非法", "u" + string(make([]byte, 33)), false},
+		{"含非法字符", "user@host", false},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := validInput()
+			in.AppCode = fmt.Sprintf("app-su-%d", i)
+			in.SystemdUser = c.user
+			_, err := svc.Create(in)
+			if c.ok && err != nil {
+				t.Fatalf("应通过但失败：%v", err)
+			}
+			if !c.ok && err == nil {
+				t.Fatal("应失败但通过")
+			}
+		})
+	}
+}
+
+func TestAppService_SystemdUserRoundtrip(t *testing.T) {
+	svc, _ := setupAppSvc(t)
+	in := validInput()
+	in.SystemdUser = "deployer"
+	a, err := svc.Create(in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if a.SystemdUser != "deployer" {
+		t.Fatalf("create 返回 systemd_user 应为 deployer，得 %q", a.SystemdUser)
+	}
+	got, err := svc.Get(a.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.SystemdUser != "deployer" {
+		t.Fatalf("get 返回 systemd_user 应为 deployer，得 %q", got.SystemdUser)
+	}
+
+	// 更新清空：留空 ⇒ 沿用 SSH 账号
+	in2 := validInput()
+	in2.SystemdUser = ""
+	updated, err := svc.Update(a.ID, in2)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.SystemdUser != "" {
+		t.Fatalf("update 清空 systemd_user 失败：%q", updated.SystemdUser)
+	}
+}

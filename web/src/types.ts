@@ -52,6 +52,7 @@ export type App = {
   health_check_url: string
   jvm_args: string
   env_vars: string
+  systemd_user: string
   created_at: string
   updated_at: string
 }

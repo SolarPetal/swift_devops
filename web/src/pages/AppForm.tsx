@@ -31,6 +31,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         health_check_url: editing.health_check_url,
         jvm_args: editing.jvm_args,
         env_vars: editing.env_vars,
+        systemd_user: editing.systemd_user,
       })
     } else {
       form.setFieldsValue({
@@ -105,6 +106,19 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         </Form.Item>
         <Form.Item name="jvm_args" label="JVM 启动参数">
           <Input placeholder="-Xms512m -Xmx512m -XX:+UseG1GC" />
+        </Form.Item>
+        <Form.Item
+          name="systemd_user"
+          label="systemd 运行用户（可选）"
+          tooltip="留空则用 SSH 登录账号（一般 root）；填写后写入 unit 的 User= 字段，比如 deployer / java"
+          rules={[
+            {
+              pattern: /^[a-z_][a-z0-9_-]{0,31}$/,
+              message: '小写字母/下划线开头，1-32 位，仅含小写字母/数字/下划线/连字符',
+            },
+          ]}
+        >
+          <Input placeholder="留空 = 用 SSH 账号；如：deployer / java" />
         </Form.Item>
         <Form.Item
           name="env_vars"

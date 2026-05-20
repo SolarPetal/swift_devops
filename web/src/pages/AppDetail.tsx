@@ -71,6 +71,11 @@ export default function AppDetail() {
           <Descriptions.Item label="端口">{app.port}</Descriptions.Item>
           <Descriptions.Item label="部署路径" span={2}><code>{app.deploy_path}</code></Descriptions.Item>
           <Descriptions.Item label="健康检查">{app.health_check_url}</Descriptions.Item>
+          <Descriptions.Item label="systemd 用户">
+            {app.systemd_user
+              ? <code>{app.systemd_user}</code>
+              : <Typography.Text type="secondary">（沿用 SSH 账号）</Typography.Text>}
+          </Descriptions.Item>
           <Descriptions.Item label="JVM 参数"><code>{app.jvm_args || '-'}</code></Descriptions.Item>
           <Descriptions.Item label="环境变量" span={2}><code>{app.env_vars || '-'}</code></Descriptions.Item>
         </Descriptions>

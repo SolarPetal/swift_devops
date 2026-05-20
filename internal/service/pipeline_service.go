@@ -269,6 +269,7 @@ func (s *PipelineService) deployOne(ctx context.Context, app *model.Application,
 		Port:           effectivePort(dep, app),
 		HealthCheckURL: app.HealthCheckURL,
 		EnvVars:        envMap,
+		User:           app.SystemdUser,
 	}
 
 	// 阶段 2：上传 jar

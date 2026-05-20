@@ -26,6 +26,7 @@ type AppInput struct {
 	HealthCheckURL string `json:"health_check_url,omitempty"`
 	JvmArgs        string `json:"jvm_args,omitempty"`
 	EnvVars        string `json:"env_vars,omitempty"` // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
+	SystemdUser    string `json:"systemd_user,omitempty"` // 留空 = 用启动 sshd 的账号（一般 root）
 }
 
 // AppView 应用响应
@@ -41,6 +42,7 @@ type AppView struct {
 	HealthCheckURL string `json:"health_check_url"`
 	JvmArgs        string `json:"jvm_args"`
 	EnvVars        string `json:"env_vars"`
+	SystemdUser    string `json:"systemd_user"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
 }
@@ -51,14 +53,20 @@ func toAppView(a *model.Application) AppView {
 		AppType: a.AppType, GitURL: a.GitURL, GitCredID: a.GitCredID,
 		DeployPath: a.DeployPath, Port: a.Port,
 		HealthCheckURL: a.HealthCheckURL, JvmArgs: a.JvmArgs, EnvVars: a.EnvVars,
-		CreatedAt: a.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: a.UpdatedAt.Format(time.RFC3339),
+		SystemdUser: a.SystemdUser,
+		CreatedAt:   a.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   a.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
 // appCodeRE 限制 app_code 命名风格：小写字母开头，2-50 位，仅含小写字母/数字/连字符。
 // 这是后续 systemd 单元名（devops-<app_code>.service）的安全约束。
 var appCodeRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,49}$`)
+
+// systemdUserRE 限制 systemd User= 值：POSIX 用户名风格（小写字母/下划线开头，
+// 含小写字母/数字/下划线/连字符，长度 1-32）。够覆盖 java、nobody、deployer 这些常见用户。
+// 不接 UID 数字，强制走可读名，省得 unit 里出现魔法数字。
+var systemdUserRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
 // AppService 应用业务编排
 type AppService struct {
@@ -80,6 +88,7 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 		DeployPath: in.DeployPath, Port: in.Port,
 		HealthCheckURL: defaultHealthURL(in.HealthCheckURL),
 		JvmArgs:        in.JvmArgs, EnvVars: in.EnvVars,
+		SystemdUser:    strings.TrimSpace(in.SystemdUser),
 	}
 	if err := s.db.Create(a).Error; err != nil {
 		if isUniqueConstraint(err) {
@@ -132,6 +141,7 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.HealthCheckURL = defaultHealthURL(in.HealthCheckURL)
 	a.JvmArgs = in.JvmArgs
 	a.EnvVars = in.EnvVars
+	a.SystemdUser = strings.TrimSpace(in.SystemdUser)
 	if err := s.db.Save(a).Error; err != nil {
 		if isUniqueConstraint(err) {
 			return AppView{}, apperr.New("CONFLICT",
@@ -189,6 +199,10 @@ func validateAppInput(in AppInput) error {
 		if err := json.Unmarshal([]byte(in.EnvVars), &m); err != nil {
 			return apperr.New("BAD_REQUEST", "env_vars 必须是 JSON 对象（key=value 字符串）", 400)
 		}
+	}
+	if u := strings.TrimSpace(in.SystemdUser); u != "" && !systemdUserRE.MatchString(u) {
+		return apperr.New("BAD_REQUEST",
+			"systemd_user 必须是 POSIX 用户名（小写字母/下划线开头，长度 1-32，仅含小写字母/数字/下划线/连字符）", 400)
 	}
 	return nil
 }
