@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Typography, Card, Button, Space, Table, Tag, Modal,
@@ -14,6 +14,7 @@ import { listHosts } from '../api/host'
 import { bindHost, listDeployments, unbindDeployment, updateDeploymentGroup } from '../api/deployment'
 import { createArtifact, deleteArtifact, listArtifacts } from '../api/artifact'
 import { deployApp, getPipeline, listPipelines } from '../api/pipeline'
+import { buildWSURL, issueWSTicket, type PipelineWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
 
 // 状态色
@@ -314,12 +315,13 @@ function PipelineTab({ app }: { app: App }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [list])
 
-  // drawer 内若 run 仍在跑，自动刷新
+  // drawer 内若 run 仍在跑，自动刷新（WS 失败时的兜底）
+  // 实时事件优先由 PipelineDetailDrawer 内部 WS 处理；这里只做兜底防止 WS 完全断开
   useEffect(() => {
     if (!drawerRun || drawerRun.status !== 'running') return
     const t = setInterval(async () => {
       try { setDrawerRun(await getPipeline(drawerRun.id)) } catch {}
-    }, 2000)
+    }, 8000)
     return () => clearInterval(t)
   }, [drawerRun])
 
@@ -391,10 +393,83 @@ const stageLabel: Record<PipelineStage, string> = {
 }
 
 function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClose: () => void }) {
+  // 当 WS snapshot/step 事件到达后，用本地 state 覆盖 props.run 的快照与状态
+  const [liveSnap, setLiveSnap] = useState<RunSnapshot | null>(null)
+  const [liveStatus, setLiveStatus] = useState<PipelineRun['status'] | null>(null)
+  const [wsState, setWsState] = useState<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle')
+  const wsRef = useRef<WebSocket | null>(null)
+
+  // 切换 run 时重置实时状态
+  useEffect(() => {
+    setLiveSnap(null)
+    setLiveStatus(null)
+    setWsState('idle')
+  }, [run?.id])
+
+  // 建立 WebSocket：拿 ticket → 升级 → onmessage 累积事件
+  useEffect(() => {
+    if (!run) return
+    let cancelled = false
+    setWsState('connecting')
+
+    ;(async () => {
+      try {
+        const { ticket } = await issueWSTicket(`pipeline:${run.id}`)
+        if (cancelled) return
+        const url = buildWSURL(`/api/v1/ws/pipelines/${run.id}`, ticket)
+        const ws = new WebSocket(url)
+        wsRef.current = ws
+
+        ws.onopen = () => { if (!cancelled) setWsState('open') }
+        ws.onerror = () => { if (!cancelled) setWsState('error') }
+        ws.onclose = () => { if (!cancelled) setWsState((s) => (s === 'error' ? s : 'closed')) }
+        ws.onmessage = (ev) => {
+          if (cancelled) return
+          try {
+            const e: PipelineWSEvent = JSON.parse(ev.data)
+            if (e.type === 'snapshot') {
+              setLiveSnap(e.snapshot)
+              setLiveStatus(e.status)
+            } else if (e.type === 'status') {
+              setLiveStatus(e.status)
+            } else if (e.type === 'step') {
+              setLiveSnap((prev) => {
+                const base: RunSnapshot = prev ?? {
+                  strategy: run.strategy, artifact_id: run.artifact_id,
+                  started_at: run.started_at ?? '', steps: [],
+                }
+                return { ...base, steps: [...(base.steps ?? []), e.step] }
+              })
+            }
+          } catch {
+            // ignore malformed frame
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setWsState('error')
+          // ticket 失败一般是 401，提示一下
+          message.error(`实时通道连接失败：${formatError(err)}（已回退轮询）`)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      const ws = wsRef.current
+      wsRef.current = null
+      if (ws && ws.readyState <= WebSocket.OPEN) ws.close()
+    }
+  }, [run?.id])
+
+  // 优先用 live snapshot，否则回退到 run.state_snapshot（适合首屏未连 WS 的瞬间）
   const snap: RunSnapshot | null = useMemo(() => {
+    if (liveSnap) return liveSnap
     if (!run?.state_snapshot) return null
     try { return JSON.parse(run.state_snapshot) } catch { return null }
-  }, [run?.state_snapshot])
+  }, [liveSnap, run?.state_snapshot])
+
+  const displayStatus = liveStatus ?? run?.status ?? 'pending'
 
   // 按 host 聚合 step
   const byHost = useMemo(() => {
@@ -413,11 +488,12 @@ function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClo
       open={!!run}
       onClose={onClose}
       width={720}
+      extra={<WSStatusTag state={wsState} />}
     >
       {run && (
         <>
           <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
-            <Descriptions.Item label="状态">{pipeStatusTag(run.status)}</Descriptions.Item>
+            <Descriptions.Item label="状态">{pipeStatusTag(displayStatus)}</Descriptions.Item>
             <Descriptions.Item label="策略">{run.strategy}</Descriptions.Item>
             <Descriptions.Item label="制品">#{run.artifact_id}</Descriptions.Item>
             <Descriptions.Item label="触发人">{run.triggered_by}</Descriptions.Item>
@@ -447,10 +523,18 @@ function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClo
             </Card>
           ))}
           {(!snap || (snap.steps?.length ?? 0) === 0) && (
-            <Typography.Text type="secondary">还没有步骤记录{run.status === 'running' ? '，正在执行…' : ''}</Typography.Text>
+            <Typography.Text type="secondary">还没有步骤记录{displayStatus === 'running' ? '，正在执行…' : ''}</Typography.Text>
           )}
         </>
       )}
     </Drawer>
   )
+}
+
+function WSStatusTag({ state }: { state: 'idle' | 'connecting' | 'open' | 'closed' | 'error' }) {
+  if (state === 'open') return <Tag color="green">● 实时</Tag>
+  if (state === 'connecting') return <Tag color="processing">○ 连接中</Tag>
+  if (state === 'error') return <Tag color="red">⚠ 连接失败 (轮询兜底)</Tag>
+  if (state === 'closed') return <Tag>○ 已断开</Tag>
+  return null
 }

@@ -32,12 +32,19 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	loginRL := middleware.NewRateLimiter(time.Minute, 10)
 	r.POST("/api/v1/auth/login", middleware.LoginRateLimit(loginRL), authH.Login)
 
-	// WebSocket 一次性 ticket 仓库（进程级单例）
+	// --- 服务装配（提到 group 外，便于 ws group 复用 pipeSvc 这种共享单例）---
 	wsTickets := wspkg.NewTicketStore(wspkg.DefaultTicketTTL)
 	wsHub := wspkg.NewHub()
-	_ = wsHub // hub 当前在 Sprint 2.4 polish 阶段尚未串到业务，#14 接 pipeline 时启用
+	wsUpgrader := wspkg.NewUpgrader(nil) // 允许任意 origin（内网部署够用）
 
-	// 受保护 API（写操作自动审计）
+	hostSvc := service.NewHostService(db, aes)
+	appSvc := service.NewAppService(db)
+	depSvc := service.NewDeploymentService(db)
+	artSvc := service.NewArtifactService(db)
+	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
+	pipeSvc.SetPublisher(wsHub) // 异步推送 step/status 到 hub
+
+	// --- 受保护 API（JWT + 审计）---
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.JWT(cfg))
 	v1.Use(middleware.Audit(db))
@@ -49,7 +56,6 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.POST("/ws-tickets", wsTH.Issue)
 
 		// 主机管理
-		hostSvc := service.NewHostService(db, aes)
 		hostH := handler.NewHostHandler(hostSvc)
 		v1.POST("/hosts", hostH.Create)
 		v1.GET("/hosts", hostH.List)
@@ -59,7 +65,6 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.POST("/hosts/:id/test", hostH.TestConnect)
 
 		// 应用管理
-		appSvc := service.NewAppService(db)
 		appH := handler.NewAppHandler(appSvc)
 		v1.POST("/apps", appH.Create)
 		v1.GET("/apps", appH.List)
@@ -68,7 +73,6 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.DELETE("/apps/:id", appH.Delete)
 
 		// 应用 × 主机绑定（Deployment）
-		depSvc := service.NewDeploymentService(db)
 		depH := handler.NewDeploymentHandler(depSvc)
 		v1.POST("/apps/:id/hosts", depH.Bind)
 		v1.GET("/apps/:id/hosts", depH.ListByApp)
@@ -76,7 +80,6 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.PATCH("/deployments/:id", depH.UpdateGroup)
 
 		// 制品（Sprint 2.3 前的最小注册版：注册已存在的本地 jar）
-		artSvc := service.NewArtifactService(db)
 		artH := handler.NewArtifactHandler(artSvc)
 		v1.POST("/artifacts", artH.Create)
 		v1.GET("/artifacts", artH.List)
@@ -84,13 +87,19 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.DELETE("/artifacts/:id", artH.Delete)
 
 		// 流水线（Sprint 2.4 单主机部署）
-		pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
 		pipeH := handler.NewPipelineHandler(pipeSvc)
 		v1.POST("/apps/:id/deploy", pipeH.Deploy)
 		v1.GET("/pipelines", pipeH.List)
 		v1.GET("/pipelines/:id", pipeH.Get)
 
 		// 后续业务模块挂这里：monitor
+	}
+
+	// --- WebSocket 流（独立 group，绕开 JWT/Audit；走一次性 ticket 鉴权）---
+	wsGroup := r.Group("/api/v1/ws")
+	{
+		pipeWSH := handler.NewPipelineWSHandler(pipeSvc, wsTickets, wsHub, wsUpgrader)
+		wsGroup.GET("/pipelines/:id", pipeWSH.Stream)
 	}
 
 	// SPA 静态资源 + history fallback

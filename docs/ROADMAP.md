@@ -122,6 +122,9 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [x] 2.2 应用 × 主机关联（Deployment + 蓝绿分组 + 删除保护）
 - [~] 2.3 制品手动上传 + MD5 —— **暂缓**：先用 `POST /artifacts` 注册"已存在本地路径"打通部署链路；multipart streaming + 历史清理留到 Sprint 5 一起做
 - [x] 2.4 单主机部署最小闭环（SCP 分发 + systemd 单元 + 健康探针 + PipelineRun 状态机）
+- [x] 2.4 polish-1 Docker sshd 容器集成测（dial → SFTP → write unit → fake systemctl → health 全链路）
+- [x] 2.4 polish-2 systemd unit `User=` 透传（model + 校验 + 前端表单 + e2e 断言）
+- [x] 2.4 polish-3 WebSocket 实时步骤推送（一次性 ticket 鉴权 + Hub 广播 + 前端 Drawer 接 WS）
 
 ### Sprint 3 · 滚动 + 回滚（约 1 周）
 - [ ] 滚动状态机

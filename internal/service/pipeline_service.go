@@ -69,10 +69,32 @@ type PipelineService struct {
 	hostSvc *HostService
 	artSvc  *ArtifactService
 	sshOpts sshpkg.DialOptions
+	pub     Publisher // 可空：不推送
 
 	// 异步任务用：限制同 app 同时只能跑一个 pipeline，避免冲突
 	mu       sync.Mutex
 	runningAppIDs map[uint]struct{}
+}
+
+// Publisher 推送实时事件到外部（如 WebSocket Hub）。
+// 实现需保证 Publish 非阻塞（满了丢帧），避免拖死 pipeline 执行。
+type Publisher interface {
+	Publish(topic string, msg []byte) int
+}
+
+// PipelineTopic 单个 run 的 WS 主题命名约定。
+func PipelineTopic(runID uint) string {
+	return fmt.Sprintf("pipeline:%d", runID)
+}
+
+// PipelineEvent WS 帧的标准 schema（前端按 type 分发）。
+type PipelineEvent struct {
+	Type   string      `json:"type"` // "step" | "status" | "snapshot"
+	RunID  uint        `json:"run_id"`
+	Status string      `json:"status,omitempty"`   // 仅 type=status
+	Step   *StepResult `json:"step,omitempty"`     // 仅 type=step
+	Snap   *RunSnapshot `json:"snapshot,omitempty"` // 仅 type=snapshot（订阅首帧用）
+	Ts     string      `json:"ts"`
 }
 
 // NewPipelineService 构造。sshTimeout 单次拨号超时；总执行超时见 Trigger 内部。
@@ -85,6 +107,11 @@ func NewPipelineService(db *gorm.DB, hostSvc *HostService, artSvc *ArtifactServi
 		sshOpts:       sshpkg.DialOptions{Timeout: sshTimeout},
 		runningAppIDs: map[uint]struct{}{},
 	}
+}
+
+// SetPublisher 注入实时事件 publisher。线程不安全：仅启动期调一次。
+func (s *PipelineService) SetPublisher(p Publisher) {
+	s.pub = p
 }
 
 // Trigger 触发一次单主机部署。
@@ -153,6 +180,9 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor, strategy string
 	// 6. 异步执行
 	go s.execute(run.ID, &app, art, deps, strategy)
 
+	// 7. 推一个 status=running 事件让已订阅的客户端立刻有反馈
+	s.publishStatus(run.ID, "running")
+
 	return toRunView(run), nil
 }
 
@@ -217,7 +247,7 @@ func (s *PipelineService) execute(runID uint, app *model.Application, art *model
 	finalStatus := "success"
 	for i := range deps {
 		dep := &deps[i]
-		steps := s.deployOne(ctx, app, art, dep, envMap)
+		steps := s.deployOne(ctx, runID, app, art, dep, envMap)
 		snap.Steps = append(snap.Steps, steps...)
 		if !lastStepOK(steps) {
 			finalStatus = "failed"
@@ -233,30 +263,38 @@ func (s *PipelineService) execute(runID uint, app *model.Application, art *model
 	}
 
 	s.finishRun(runID, &snap, finalStatus)
+	s.publishStatus(runID, finalStatus)
 }
 
 // deployOne 部署到单台 host，返回该 host 的 step 序列（按阶段顺序）。
 // 任一阶段失败立刻返回，不再走后续阶段。
-func (s *PipelineService) deployOne(ctx context.Context, app *model.Application, art *model.Artifact, dep *model.Deployment, envMap map[string]string) []StepResult {
+// 每追加一个 step 同步推一帧（pub != nil 时），让前端实时看到进度。
+func (s *PipelineService) deployOne(ctx context.Context, runID uint, app *model.Application, art *model.Artifact, dep *model.Deployment, envMap map[string]string) []StepResult {
 	var steps []StepResult
+	// add 集中 append + publish，把 host 视角的实时事件喷出去
+	add := func(st StepResult) []StepResult {
+		steps = append(steps, st)
+		s.publishStep(runID, st)
+		return steps
+	}
 
 	// 阶段 1：拨号
 	target, auth, host, err := s.hostSvc.LoadAuth(dep.HostID)
 	if err != nil {
 		// host 都查不到，直接构造一个 dial 失败步骤
-		return append(steps, mkStep(dep.HostID, "", "", StageDial, false, "", "load auth: "+err.Error()))
+		return add(mkStep(dep.HostID, "", "", StageDial, false, "", "load auth: "+err.Error()))
 	}
 	dialStart := time.Now()
 	client, err := sshpkg.Dial(target, auth, s.sshOpts)
 	if err != nil {
-		return append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageDial, false, "", err.Error(), dialStart))
+		return add(mkStepTimed(host.ID, host.Name, host.IP, StageDial, false, "", err.Error(), dialStart))
 	}
 	defer client.Close()
 	// TOFU：把首次学到的 host key 落库
 	if host.HostKey == "" && client.LearnedHostKey() != "" {
 		s.hostSvc.RecordHostKey(host.ID, client.LearnedHostKey())
 	}
-	steps = append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageDial, true,
+	steps = add(mkStepTimed(host.ID, host.Name, host.IP, StageDial, true,
 		fmt.Sprintf("connected %s@%s:%d", target.User, target.IP, target.Port), "", dialStart))
 
 	dispatcher := deploy.NewDispatcher(client.SSHClient())
@@ -276,35 +314,35 @@ func (s *PipelineService) deployOne(ctx context.Context, app *model.Application,
 	upStart := time.Now()
 	md5sum, err := dispatcher.Upload(art.FilePath, spec.JarPath())
 	if err != nil {
-		return append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageUpload, false, "", err.Error(), upStart))
+		return add(mkStepTimed(host.ID, host.Name, host.IP, StageUpload, false, "", err.Error(), upStart))
 	}
 	if md5sum != art.FileMD5 {
-		return append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageUpload, false, "",
+		return add(mkStepTimed(host.ID, host.Name, host.IP, StageUpload, false, "",
 			fmt.Sprintf("md5 mismatch: local=%s remote=%s", art.FileMD5, md5sum), upStart))
 	}
-	steps = append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageUpload, true,
+	steps = add(mkStepTimed(host.ID, host.Name, host.IP, StageUpload, true,
 		fmt.Sprintf("uploaded %s (%d bytes, md5=%s)", spec.JarPath(), art.FileSize, md5sum), "", upStart))
 
 	// 阶段 3：写 unit 文件
 	unitStart := time.Now()
 	unitText, err := deploy.RenderUnit(spec)
 	if err != nil {
-		return append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageUnit, false, "", "render: "+err.Error(), unitStart))
+		return add(mkStepTimed(host.ID, host.Name, host.IP, StageUnit, false, "", "render: "+err.Error(), unitStart))
 	}
 	if err := dispatcher.WriteFile(spec.UnitPath(), unitText, 0o644); err != nil {
-		return append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageUnit, false, "", "write unit: "+err.Error(), unitStart))
+		return add(mkStepTimed(host.ID, host.Name, host.IP, StageUnit, false, "", "write unit: "+err.Error(), unitStart))
 	}
-	steps = append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageUnit, true, spec.UnitPath(), "", unitStart))
+	steps = add(mkStepTimed(host.ID, host.Name, host.IP, StageUnit, true, spec.UnitPath(), "", unitStart))
 
 	// 阶段 4：daemon-reload + restart
 	rsStart := time.Now()
 	if err := sysctl.DaemonReload(ctx); err != nil {
-		return append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageRestart, false, "", "daemon-reload: "+err.Error(), rsStart))
+		return add(mkStepTimed(host.ID, host.Name, host.IP, StageRestart, false, "", "daemon-reload: "+err.Error(), rsStart))
 	}
 	if err := sysctl.EnableAndRestart(ctx, spec.UnitName()); err != nil {
-		return append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageRestart, false, "", err.Error(), rsStart))
+		return add(mkStepTimed(host.ID, host.Name, host.IP, StageRestart, false, "", err.Error(), rsStart))
 	}
-	steps = append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageRestart, true, spec.UnitName(), "", rsStart))
+	steps = add(mkStepTimed(host.ID, host.Name, host.IP, StageRestart, true, spec.UnitName(), "", rsStart))
 
 	// 阶段 5：health probe
 	hStart := time.Now()
@@ -322,9 +360,9 @@ func (s *PipelineService) deployOne(ctx context.Context, app *model.Application,
 		if errStr == "" {
 			errStr = "probe failed"
 		}
-		return append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageHealth, false, detail, errStr, hStart))
+		return add(mkStepTimed(host.ID, host.Name, host.IP, StageHealth, false, detail, errStr, hStart))
 	}
-	steps = append(steps, mkStepTimed(host.ID, host.Name, host.IP, StageHealth, true,
+	steps = add(mkStepTimed(host.ID, host.Name, host.IP, StageHealth, true,
 		fmt.Sprintf("url=%s attempts=%d", probeURL, res.Attempts), "", hStart))
 	return steps
 }
@@ -377,6 +415,67 @@ func (s *PipelineService) finishRun(runID uint, snap *RunSnapshot, status string
 	}).Error; err != nil {
 		slog.Error("finish run", "id", runID, "err", err)
 	}
+}
+
+// publishStep 推送一条 step 事件。pub 为空时静默。
+func (s *PipelineService) publishStep(runID uint, st StepResult) {
+	if s.pub == nil {
+		return
+	}
+	data, err := json.Marshal(PipelineEvent{
+		Type:  "step",
+		RunID: runID,
+		Step:  &st,
+		Ts:    time.Now().Format(time.RFC3339),
+	})
+	if err != nil {
+		slog.Warn("marshal pipeline step event", "err", err)
+		return
+	}
+	s.pub.Publish(PipelineTopic(runID), data)
+}
+
+// publishStatus 推送 run 状态变更事件（running/success/failed）。
+func (s *PipelineService) publishStatus(runID uint, status string) {
+	if s.pub == nil {
+		return
+	}
+	data, err := json.Marshal(PipelineEvent{
+		Type:   "status",
+		RunID:  runID,
+		Status: status,
+		Ts:     time.Now().Format(time.RFC3339),
+	})
+	if err != nil {
+		slog.Warn("marshal pipeline status event", "err", err)
+		return
+	}
+	s.pub.Publish(PipelineTopic(runID), data)
+}
+
+// SnapshotEventBytes 为新接入的订阅者构造一帧 type=snapshot，
+// 让晚来的客户端能直接拿到当前完整快照而不只是后续增量。
+// 返回 nil 表示当前 run 不存在或快照解析失败（呼叫方应放弃首帧）。
+func (s *PipelineService) SnapshotEventBytes(runID uint) []byte {
+	v, err := s.Get(runID)
+	if err != nil {
+		return nil
+	}
+	var snap RunSnapshot
+	if v.StateSnapshot != "" {
+		_ = json.Unmarshal([]byte(v.StateSnapshot), &snap)
+	}
+	data, err := json.Marshal(PipelineEvent{
+		Type:   "snapshot",
+		RunID:  runID,
+		Status: v.Status,
+		Snap:   &snap,
+		Ts:     time.Now().Format(time.RFC3339),
+	})
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func toRunView(r *model.PipelineRun) PipelineRunView {
