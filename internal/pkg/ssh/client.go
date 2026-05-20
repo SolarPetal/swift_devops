@@ -48,6 +48,10 @@ func (c *Client) Close() error { return c.sc.Close() }
 // LearnedHostKey 首次 TOFU 学到的 host key（base64），其它情况下为空。
 func (c *Client) LearnedHostKey() string { return c.learnedKey }
 
+// SSHClient 返回底层 *cssh.Client，供需要复用同一连接的子系统（如 SFTP）使用。
+// 调用方不得 Close；连接生命周期由 Client 或 Pool 负责。
+func (c *Client) SSHClient() *cssh.Client { return c.sc }
+
 // ExecResult 命令执行结果
 type ExecResult struct {
 	Stdout   string

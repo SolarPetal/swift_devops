@@ -46,7 +46,39 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.DELETE("/hosts/:id", hostH.Delete)
 		v1.POST("/hosts/:id/test", hostH.TestConnect)
 
-		// 后续业务模块挂这里：apps / artifacts / pipelines / monitor
+		// 应用管理
+		appSvc := service.NewAppService(db)
+		appH := handler.NewAppHandler(appSvc)
+		v1.POST("/apps", appH.Create)
+		v1.GET("/apps", appH.List)
+		v1.GET("/apps/:id", appH.Get)
+		v1.PUT("/apps/:id", appH.Update)
+		v1.DELETE("/apps/:id", appH.Delete)
+
+		// 应用 × 主机绑定（Deployment）
+		depSvc := service.NewDeploymentService(db)
+		depH := handler.NewDeploymentHandler(depSvc)
+		v1.POST("/apps/:id/hosts", depH.Bind)
+		v1.GET("/apps/:id/hosts", depH.ListByApp)
+		v1.DELETE("/deployments/:id", depH.Unbind)
+		v1.PATCH("/deployments/:id", depH.UpdateGroup)
+
+		// 制品（Sprint 2.3 前的最小注册版：注册已存在的本地 jar）
+		artSvc := service.NewArtifactService(db)
+		artH := handler.NewArtifactHandler(artSvc)
+		v1.POST("/artifacts", artH.Create)
+		v1.GET("/artifacts", artH.List)
+		v1.GET("/artifacts/:id", artH.Get)
+		v1.DELETE("/artifacts/:id", artH.Delete)
+
+		// 流水线（Sprint 2.4 单主机部署）
+		pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
+		pipeH := handler.NewPipelineHandler(pipeSvc)
+		v1.POST("/apps/:id/deploy", pipeH.Deploy)
+		v1.GET("/pipelines", pipeH.List)
+		v1.GET("/pipelines/:id", pipeH.Get)
+
+		// 后续业务模块挂这里：monitor
 	}
 
 	// SPA 静态资源 + history fallback

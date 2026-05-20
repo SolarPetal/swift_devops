@@ -19,6 +19,7 @@ logs/
 *.db
 *.db-*
 *.log
+server.pid
 
 # OS
 .DS_Store

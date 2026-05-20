@@ -53,8 +53,8 @@ type Artifact struct {
 // Deployment 应用×主机部署关系
 type Deployment struct {
 	ID                 uint   `gorm:"primaryKey" json:"id"`
-	AppID              uint   `gorm:"index;not null" json:"app_id"`
-	HostID             uint   `gorm:"index;not null" json:"host_id"`
+	AppID              uint   `gorm:"uniqueIndex:idx_app_host;not null" json:"app_id"`
+	HostID             uint   `gorm:"uniqueIndex:idx_app_host;not null" json:"host_id"`
 	GroupTag           string `gorm:"size:20" json:"group_tag"` // blue / green
 	CurrentArtifactID  uint   `json:"current_artifact_id"`
 	PreviousArtifactID uint   `json:"previous_artifact_id"` // 一键回滚用

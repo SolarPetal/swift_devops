@@ -152,8 +152,17 @@ func (s *HostService) Update(id uint, in HostInput) (HostView, error) {
 	return toView(h), nil
 }
 
-// Delete 删除主机
+// Delete 删除主机。
+// 拒绝级联：若仍有 Deployment 引用，先让用户解绑。
 func (s *HostService) Delete(id uint) error {
+	var n int64
+	if err := s.db.Model(&model.Deployment{}).Where("host_id = ?", id).Count(&n).Error; err != nil {
+		return apperr.Wrap(err, "INTERNAL", "count deployments", 500)
+	}
+	if n > 0 {
+		return apperr.New("CONFLICT",
+			fmt.Sprintf("主机仍被 %d 个应用引用，请先解绑", n), 409)
+	}
 	res := s.db.Delete(&model.Host{}, id)
 	if res.Error != nil {
 		return apperr.Wrap(res.Error, "INTERNAL", "delete host", 500)
@@ -202,6 +211,41 @@ func (s *HostService) TestConnect(id uint) (sshpkg.TestResult, error) {
 	}
 	s.db.Model(&model.Host{}).Where("id = ?", id).Updates(updates)
 	return result, nil
+}
+
+// LoadAuth 取主机的 SSH 拨号参数（不返回明文给 handler 层）。
+// pipeline / 部署等需要主动建立连接的子系统使用。
+//   - 同样负责 TOFU：上层成功 dial 后可拿 Client.LearnedHostKey() 通过 RecordHostKey 落库
+func (s *HostService) LoadAuth(id uint) (sshpkg.HostTarget, sshpkg.AuthMethod, *model.Host, error) {
+	h, err := s.findByID(id)
+	if err != nil {
+		return sshpkg.HostTarget{}, sshpkg.AuthMethod{}, nil, err
+	}
+	blob, err := s.decryptSecret(h)
+	if err != nil {
+		return sshpkg.HostTarget{}, sshpkg.AuthMethod{}, nil, apperr.Wrap(err, "INTERNAL", "decrypt secret", 500)
+	}
+	target := sshpkg.HostTarget{
+		IP: h.IP, Port: h.Port, User: h.Username, KnownHostKey: h.HostKey,
+	}
+	auth := sshpkg.AuthMethod{Type: h.AuthType, Passphrase: blob.Passphrase}
+	if h.AuthType == "password" {
+		auth.Password = blob.Value
+	} else {
+		auth.KeyPEM = blob.Value
+	}
+	return target, auth, h, nil
+}
+
+// RecordHostKey 把首次 TOFU 学到的 host key 落库。
+// 仅当原 HostKey 为空时写入，避免覆盖既有信任。
+func (s *HostService) RecordHostKey(id uint, key string) {
+	if key == "" {
+		return
+	}
+	s.db.Model(&model.Host{}).
+		Where("id = ? AND (host_key IS NULL OR host_key = '')", id).
+		Update("host_key", key)
 }
 
 // --- 内部 ---

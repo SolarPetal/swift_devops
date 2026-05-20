@@ -8,7 +8,7 @@ const { Sider, Header, Content } = Layout
 // 用 emoji 当 icon，省一个 @ant-design/icons 依赖
 const items = [
   { key: '/hosts', label: '🖥  主机' },
-  { key: '/apps', label: '📦  应用', disabled: true },
+  { key: '/apps', label: '📦  应用' },
   { key: '/artifacts', label: '🧱  制品', disabled: true },
   { key: '/pipelines', label: '🚀  流水线', disabled: true },
   { key: '/monitor', label: '📈  监控', disabled: true },

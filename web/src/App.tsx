@@ -6,6 +6,8 @@ import { useAuth } from './store/auth'
 import Login from './pages/Login'
 import MainLayout from './pages/MainLayout'
 import HostList from './pages/HostList'
+import AppList from './pages/AppList'
+import AppDetail from './pages/AppDetail'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
@@ -30,7 +32,9 @@ export default function App() {
       <Route path="/" element={<RequireAuth><MainLayout /></RequireAuth>}>
         <Route index element={<Navigate to="/hosts" replace />} />
         <Route path="hosts" element={<HostList />} />
-        {/* 未来：apps / artifacts / pipelines / monitor */}
+        <Route path="apps" element={<AppList />} />
+        <Route path="apps/:id" element={<AppDetail />} />
+        {/* 未来：artifacts / pipelines / monitor */}
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

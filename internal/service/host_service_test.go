@@ -24,7 +24,7 @@ func setupSvc(t *testing.T) (*service.HostService, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := db.AutoMigrate(&model.Host{}); err != nil {
+	if err := db.AutoMigrate(&model.Host{}, &model.Deployment{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	key := base64.StdEncoding.EncodeToString(make([]byte, 32))

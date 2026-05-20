@@ -8,13 +8,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"swift-devops/internal/config"
+	apperr "swift-devops/internal/pkg/errors"
 )
 
 func JWT(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
+			apperr.Respond(c, apperr.New("UNAUTHORIZED", "missing token", http.StatusUnauthorized))
 			return
 		}
 		tokenStr := strings.TrimPrefix(auth, "Bearer ")
@@ -25,7 +26,7 @@ func JWT(cfg *config.Config) gin.HandlerFunc {
 			return []byte(cfg.Security.JWTSecret), nil
 		})
 		if err != nil || !tok.Valid {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			apperr.Respond(c, apperr.New("UNAUTHORIZED", "invalid token", http.StatusUnauthorized))
 			return
 		}
 		if claims, ok := tok.Claims.(jwt.MapClaims); ok {

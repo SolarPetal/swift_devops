@@ -104,21 +104,24 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 
 ## 4. Sprint 划分
 
-### Sprint 1 · 主机端到端（约 1 周）
+### Sprint 1 · 主机端到端（约 1 周）✅ 已完成
 - [x] `pkg/crypto/aesgcm.go` + 单测
-- [ ] `pkg/errors/` 错误壳
-- [ ] `middleware/audit.go`
-- [ ] `middleware/ratelimit.go`
-- [ ] `pkg/ssh/client.go` + `pool.go`
-- [ ] `handler/host.go` CRUD + 测连
-- [ ] 前端切 Antd Layout + 路由
-- [ ] `HostList.tsx` + `HostForm.tsx`
-- [ ] 冒烟：登录 → 录主机 → 测连 → 看卡片
+- [x] `pkg/errors/` 错误壳
+- [x] `middleware/audit.go`
+- [x] `middleware/ratelimit.go`
+- [x] router 接线 + auth 切错误壳
+- [x] `pkg/ssh/client.go` + `pool.go` + TOFU
+- [x] `service/host_service.go` + `handler/host.go` CRUD + 测连
+- [x] `main.go` master_key fail-fast
+- [x] 前端 Antd Layout + 路由 + AuthGuard
+- [x] `HostList.tsx` + `HostForm.tsx`
+- [x] 冒烟：登录 → 录主机 → 测连 → 编辑 → 删除（audit_logs 落 4 条）
 
 ### Sprint 2 · 应用 + 单主机部署（约 1 周）
-- [ ] 应用 CRUD + 配置中心
-- [ ] 制品手动上传 + MD5
-- [ ] 分发 + systemd 单元生成（单主机闭环）
+- [x] 2.1 应用 CRUD + 配置中心（JVM args / env vars / 健康检查 URL）
+- [x] 2.2 应用 × 主机关联（Deployment + 蓝绿分组 + 删除保护）
+- [~] 2.3 制品手动上传 + MD5 —— **暂缓**：先用 `POST /artifacts` 注册"已存在本地路径"打通部署链路；multipart streaming + 历史清理留到 Sprint 5 一起做
+- [x] 2.4 单主机部署最小闭环（SCP 分发 + systemd 单元 + 健康探针 + PipelineRun 状态机）
 
 ### Sprint 3 · 滚动 + 回滚（约 1 周）
 - [ ] 滚动状态机
