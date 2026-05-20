@@ -1,0 +1,48 @@
+# 集成测试用的 SSH + 假 systemctl + 简单 health 服务
+# 跑：docker build -t swift-devops-sshd:test -f internal/service/testdata/Dockerfile.sshd internal/service/testdata
+# 用：见 internal/service/pipeline_integration_test.go（build tag: integration）
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-server nginx ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /var/log/nginx \
+    && echo 'root:swift-devops-test' | chpasswd \
+    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config \
+    && sed -i 's/^UsePAM .*/UsePAM no/' /etc/ssh/sshd_config \
+    && ssh-keygen -A
+
+# fake systemctl：始终 exit 0，把命令回显到 /tmp/systemctl.log，便于断言
+RUN printf '%s\n' '#!/bin/sh' 'echo "[fake systemctl] $@" >> /tmp/systemctl.log' 'exit 0' \
+        > /usr/local/bin/systemctl \
+    && chmod +x /usr/local/bin/systemctl
+
+# nginx 暴露 /actuator/health，固定返回 UP，便于 health probe 通过
+# 用 heredoc 避免 printf 的转义坑
+RUN cat > /etc/nginx/sites-available/default <<'EOF'
+server {
+    listen 80 default_server;
+    location /actuator/health {
+        default_type application/json;
+        return 200 '{"status":"UP"}';
+    }
+    location / { return 404; }
+}
+EOF
+
+# 启动脚本：sshd 前台 + nginx 前台；任一挂了容器就退出便于排查
+RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
+#!/bin/bash
+set -e
+nginx -t
+nginx
+exec /usr/sbin/sshd -D -e
+EOF
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 22 80
+
+CMD ["/usr/local/bin/entrypoint.sh"]
