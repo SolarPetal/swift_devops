@@ -130,7 +130,7 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [x] 3.1 抽 Strategy 接口 + PipelineRunHost 表 + Cancel 机制（`ctx.WithCancel` + `map[runID]cancelFunc`）
 - [x] 3.2 Rolling 策略（固定 batch_size + 批内并行 + 批级 fail-fast；body 加 `batch_size`）
 - [x] 3.3 一键回滚（`POST /apps/:id/rollback`，per-dep 用 `previous_artifact_id`；strategy.Rollback 顺序 fail-fast）
-- [ ] 3.4 前端 PipelineDashboard 升级（Cancel 按钮 + 回滚按钮 + 批次进度卡片）
+- [x] 3.4 前端 PipelineDashboard 升级（Deploy Modal 加 strategy + batch_size；Rollback 按钮 + 二次确认；Drawer 内 Cancel 按钮）
 - [ ] 3.5 rolling 双容器集成测（基于 docker sshd × 2 验证端到端）
 
 ### Sprint 4 · 蓝绿 + Nginx（约 1 周）

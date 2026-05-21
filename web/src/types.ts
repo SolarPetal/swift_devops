@@ -131,8 +131,8 @@ export type PipelineRun = {
   id: number
   app_id: number
   artifact_id: number
-  strategy: string
-  status: 'pending' | 'running' | 'success' | 'failed' | 'interrupted'
+  strategy: string // 'single' | 'rolling' | 'rollback'
+  status: 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
   state_snapshot: string // JSON 字符串，前端 JSON.parse 成 RunSnapshot
   triggered_by: string
   started_at?: string

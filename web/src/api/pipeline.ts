@@ -13,10 +13,34 @@ export async function getPipeline(id: number): Promise<PipelineRun> {
   return r.data
 }
 
-export async function deployApp(appId: number, artifactId: number, strategy = 'single'): Promise<PipelineRun> {
-  const r = await api.post<PipelineRun>(`/apps/${appId}/deploy`, {
+// deployApp 触发部署。
+//   - strategy='single'（默认）：顺序逐台、fail-fast
+//   - strategy='rolling'：分批并行，batchSize 必传 >=1
+export async function deployApp(
+  appId: number,
+  artifactId: number,
+  strategy: 'single' | 'rolling' = 'single',
+  batchSize?: number,
+): Promise<PipelineRun> {
+  const body: Record<string, unknown> = {
     artifact_id: artifactId,
     strategy,
-  })
+  }
+  if (strategy === 'rolling') {
+    body.batch_size = batchSize ?? 1
+  }
+  const r = await api.post<PipelineRun>(`/apps/${appId}/deploy`, body)
+  return r.data
+}
+
+// cancelPipeline 请求取消运行中的 pipeline。后端 202 异步生效；最终 status 由 execute 收口。
+export async function cancelPipeline(id: number): Promise<void> {
+  await api.post(`/pipelines/${id}/cancel`)
+}
+
+// rollbackApp 一键回滚：每个 deployment 退到自己的 previous_artifact_id。
+// 没有任何 deployment 有 previous → 后端 400。
+export async function rollbackApp(appId: number): Promise<PipelineRun> {
+  const r = await api.post<PipelineRun>(`/apps/${appId}/rollback`)
   return r.data
 }

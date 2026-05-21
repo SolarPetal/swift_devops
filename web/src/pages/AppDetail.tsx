@@ -13,7 +13,7 @@ import { getApp } from '../api/app'
 import { listHosts } from '../api/host'
 import { bindHost, listDeployments, unbindDeployment, updateDeploymentGroup } from '../api/deployment'
 import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact } from '../api/artifact'
-import { deployApp, getPipeline, listPipelines } from '../api/pipeline'
+import { cancelPipeline, deployApp, getPipeline, listPipelines, rollbackApp } from '../api/pipeline'
 import { buildWSURL, issueWSTicket, type PipelineWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
 
@@ -398,8 +398,10 @@ function PipelineTab({ app }: { app: App }) {
   const handleDeploy = async () => {
     try {
       const v = await form.validateFields()
-      const run = await deployApp(app.id, v.artifact_id, 'single')
-      message.success(`已触发：#${run.id}`)
+      const strategy = (v.strategy ?? 'single') as 'single' | 'rolling'
+      const batchSize = strategy === 'rolling' ? Number(v.batch_size ?? 1) : undefined
+      const run = await deployApp(app.id, v.artifact_id, strategy, batchSize)
+      message.success(`已触发：#${run.id}（${strategy}${batchSize ? `, batch=${batchSize}` : ''}）`)
       setOpen(false); setDrawerRun(run); refresh()
     } catch (e) {
       if ((e as any)?.errorFields) return
@@ -407,13 +409,42 @@ function PipelineTab({ app }: { app: App }) {
     }
   }
 
+  const handleRollback = () => {
+    Modal.confirm({
+      title: `回滚 ${app.name}？`,
+      content: (
+        <>
+          <div>每台已绑定主机会退回到自己的 <code>previous_artifact_id</code>。</div>
+          <div style={{ marginTop: 8 }}>
+            <Typography.Text type="secondary">
+              没有 previous 的主机会被跳过；任一主机失败将停止后续。
+            </Typography.Text>
+          </div>
+        </>
+      ),
+      okType: 'danger',
+      okText: '确认回滚',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const run = await rollbackApp(app.id)
+          message.success(`已触发回滚：#${run.id}`)
+          setDrawerRun(run); refresh()
+        } catch (e) {
+          message.error(formatError(e))
+        }
+      },
+    })
+  }
+
   return (
     <>
       <Space style={{ marginBottom: 12 }}>
         <Button type="primary" disabled={arts.length === 0}
-          onClick={() => { form.resetFields(); setOpen(true) }}>
+          onClick={() => { form.resetFields(); form.setFieldsValue({ strategy: 'single', batch_size: 2 }); setOpen(true) }}>
           🚀 触发部署
         </Button>
+        <Button danger onClick={handleRollback}>↩ 回滚</Button>
         <Button onClick={refresh}>刷新</Button>
         {arts.length === 0 && (
           <Typography.Text type="secondary">先去"制品"页注册一个 jar，再来触发部署。</Typography.Text>
@@ -434,7 +465,7 @@ function PipelineTab({ app }: { app: App }) {
         ]}
       />
       <Modal title={`触发部署 - ${app.name}`} open={open} onOk={handleDeploy} onCancel={() => setOpen(false)} okText="触发" cancelText="取消">
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" initialValues={{ strategy: 'single', batch_size: 2 }}>
           <Form.Item name="artifact_id" label="选择制品" rules={[{ required: true }]}>
             <Select placeholder="选择要部署的版本"
               options={arts.map((a) => ({
@@ -442,9 +473,30 @@ function PipelineTab({ app }: { app: App }) {
                 label: `#${a.id}  ${a.version_tag}  (${a.file_name})`,
               }))} />
           </Form.Item>
-          <Typography.Text type="secondary">
-            策略：single（顺序部署到所有绑定主机，任一失败立即停止）
-          </Typography.Text>
+          <Form.Item name="strategy" label="部署策略" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 'single',  label: 'single（顺序逐台、任一失败立刻停止）' },
+                { value: 'rolling', label: 'rolling（分批并行、批级 fail-fast）' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, cur) => prev.strategy !== cur.strategy}
+          >
+            {({ getFieldValue }) =>
+              getFieldValue('strategy') === 'rolling' ? (
+                <Form.Item
+                  name="batch_size"
+                  label="批大小（每批同时部署的主机数）"
+                  rules={[{ required: true, message: 'rolling 必须指定 batch_size' }]}
+                >
+                  <InputNumber min={1} max={50} style={{ width: 200 }} placeholder="2" />
+                </Form.Item>
+              ) : null
+            }
+          </Form.Item>
         </Form>
       </Modal>
       <PipelineDetailDrawer run={drawerRun} onClose={() => setDrawerRun(null)} />
@@ -552,13 +604,39 @@ function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClo
     return m
   }, [snap])
 
+  const handleCancel = () => {
+    if (!run) return
+    Modal.confirm({
+      title: `取消部署 #${run.id}？`,
+      content: '已开始的主机会跑完当前阶段，未开始的主机标 skipped，最终 status 标 cancelled。',
+      okType: 'danger',
+      okText: '确认取消',
+      cancelText: '不取消',
+      onOk: async () => {
+        try {
+          await cancelPipeline(run.id)
+          message.success('已请求取消，等待执行线程退出…')
+        } catch (e) {
+          message.error(formatError(e))
+        }
+      },
+    })
+  }
+
   return (
     <Drawer
       title={run ? `部署详情 #${run.id}` : ''}
       open={!!run}
       onClose={onClose}
       width={720}
-      extra={<WSStatusTag state={wsState} />}
+      extra={
+        <Space>
+          {displayStatus === 'running' && (
+            <Button danger size="small" onClick={handleCancel}>取消部署</Button>
+          )}
+          <WSStatusTag state={wsState} />
+        </Space>
+      }
     >
       {run && (
         <>
