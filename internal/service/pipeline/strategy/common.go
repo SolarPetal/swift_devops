@@ -14,14 +14,16 @@ import (
 // 任一阶段失败立即返回，hooks.OnStep 已经把当前失败步骤喷出去。
 // 成功完成则 hooks.OnDeploymentSuccess 更新 deployment 表。
 //
+// art 参数：策略层传入 —— forward 模式（single/rolling/blue_green）传 plan.Artifact；
+// rollback 模式按 dep 查 previous_artifact_id 对应的 art。
+//
 // 返回值：HostOutcome（含 status / stage / err）+ 该主机的所有 step 序列。
 // ctx 应用于：拨号超时 + systemctl 命令超时 + 健康探针超时（probe 内部尊重 ctx）。
 //
 // 注意：本函数不会因 ctx 取消而提前 return ——已开始的部署应跑完当前 SSH 会话，
 // 由策略层在调用前判断 ctx.Err() != nil 决定是否进入这台主机。
-func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment, hooks Hooks) (HostOutcome, []StepResult) {
+func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment, art *model.Artifact, hooks Hooks) (HostOutcome, []StepResult) {
 	app := plan.App
-	art := plan.Artifact
 
 	started := time.Now()
 	outcome := HostOutcome{

@@ -99,3 +99,25 @@ func (h *PipelineHandler) Cancel(c *gin.Context) {
 	}
 	c.JSON(http.StatusAccepted, gin.H{"id": id, "cancel": "requested"})
 }
+
+// Rollback POST /apps/:id/rollback
+// 一键回滚：每个 deployment 退到自己的 previous_artifact_id。
+// 没有任何 deployment 有 previous_artifact_id → 400 BAD_REQUEST。
+func (h *PipelineHandler) Rollback(c *gin.Context) {
+	appID, ok := parseID(c)
+	if !ok {
+		return
+	}
+	actor := "unknown"
+	if v, ok := c.Get("user"); ok {
+		if s, ok := v.(string); ok {
+			actor = s
+		}
+	}
+	out, err := h.svc.Rollback(appID, actor)
+	if err != nil {
+		apperr.Respond(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, out)
+}

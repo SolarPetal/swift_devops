@@ -33,7 +33,7 @@ func (Single) Run(ctx context.Context, env Env, plan *Plan, hooks Hooks) ([]Host
 			continue
 		}
 
-		outcome, steps := deployHost(ctx, env, plan, dep, hooks)
+		outcome, steps := deployHost(ctx, env, plan, dep, plan.Artifact, hooks)
 		outcomes = append(outcomes, outcome)
 		allSteps = append(allSteps, steps...)
 

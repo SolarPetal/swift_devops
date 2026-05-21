@@ -88,9 +88,10 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/artifacts/:id", artH.Get)
 		v1.DELETE("/artifacts/:id", artH.Delete)
 
-		// 流水线（Sprint 2.4 单主机部署 / Sprint 3.1 抽 Strategy 接口 + Cancel）
+		// 流水线（Sprint 2.4 single / Sprint 3.1 Cancel / 3.2 rolling / 3.3 rollback）
 		pipeH := handler.NewPipelineHandler(pipeSvc)
 		v1.POST("/apps/:id/deploy", pipeH.Deploy)
+		v1.POST("/apps/:id/rollback", pipeH.Rollback)
 		v1.GET("/pipelines", pipeH.List)
 		v1.GET("/pipelines/:id", pipeH.Get)
 		v1.POST("/pipelines/:id/cancel", pipeH.Cancel)

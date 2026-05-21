@@ -160,7 +160,15 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts Tri
 	s.runningAppIDs[appID] = struct{}{}
 	s.mu.Unlock()
 
-	// 5. 落库 running
+	// 5. 解析 env vars（forward 路径专属：rollback 也用同样的 env）
+	envMap, envErr := deploy.ParseEnvVarsJSON(app.EnvVars)
+	if envErr != nil {
+		s.releaseLock(appID)
+		return PipelineRunView{}, apperr.Wrap(envErr, "BAD_REQUEST",
+			"env_vars 解析失败: "+envErr.Error(), 400)
+	}
+
+	// 6. 落库 running
 	now := time.Now()
 	snap := strategy.RunSnapshot{Strategy: opts.Strategy, ArtifactID: artifactID, StartedAt: now.Format(time.RFC3339)}
 	snapJSON, _ := json.Marshal(snap)
@@ -176,15 +184,19 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts Tri
 		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "create run", 500)
 	}
 
-	// 6. 为每个 deployment 创建 host 级 pending 行
+	// 7. 为每个 deployment 创建 host 级 pending 行
 	s.seedRunHosts(run.ID, deps)
 
-	// 7. 异步执行（带 cancel ctx）
+	// 8. 异步执行（带 cancel ctx）
+	plan := &strategy.Plan{
+		RunID: run.ID, App: &app, Artifact: art, Deps: deps, EnvMap: envMap,
+		BatchSize: opts.BatchSize,
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(run.ID, cancel)
-	go s.execute(ctx, run.ID, &app, art, deps, strat, opts)
+	go s.execute(ctx, run.ID, &app, plan, strat)
 
-	// 8. 立刻推 status=running
+	// 9. 立刻推 status=running
 	s.publishStatus(run.ID, RunStatusRunning)
 
 	return toRunView(run), nil
@@ -233,6 +245,95 @@ func (s *PipelineService) List(appID uint) ([]PipelineRunView, error) {
 	return vs, nil
 }
 
+// Rollback 触发一键回滚。
+//   - 每个 deployment 退到自己的 previous_artifact_id
+//   - 至少一台主机有 previous_artifact_id 才能触发；全为 0 → BAD_REQUEST
+//   - 制品已被清理（GetModel ErrNotFound）的 dep 仍可执行，由 strategy 标 skipped
+//   - 同 app 互斥
+func (s *PipelineService) Rollback(appID uint, actor string) (PipelineRunView, error) {
+	// 1. 校验 app
+	var app model.Application
+	if err := s.db.First(&app, appID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return PipelineRunView{}, apperr.New("NOT_FOUND", fmt.Sprintf("应用 %d 不存在", appID), 404)
+		}
+		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "find app", 500)
+	}
+	// 2. 查 deployments
+	var deps []model.Deployment
+	if err := s.db.Where("app_id = ?", appID).Order("id ASC").Find(&deps).Error; err != nil {
+		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "list deployments", 500)
+	}
+	if len(deps) == 0 {
+		return PipelineRunView{}, apperr.New("BAD_REQUEST", "应用尚未绑定任何主机，无法回滚", 400)
+	}
+
+	// 3. 预查 previous artifacts；至少一台主机能回滚
+	artByDep := map[uint]*model.Artifact{}
+	for i := range deps {
+		if deps[i].PreviousArtifactID == 0 {
+			continue
+		}
+		art, err := s.artSvc.GetModel(deps[i].PreviousArtifactID)
+		if err != nil {
+			slog.Warn("rollback: previous artifact missing",
+				"dep_id", deps[i].ID, "previous_id", deps[i].PreviousArtifactID, "err", err)
+			continue
+		}
+		artByDep[deps[i].ID] = art
+	}
+	if len(artByDep) == 0 {
+		return PipelineRunView{}, apperr.New("BAD_REQUEST",
+			"应用所有主机都没有可回滚的历史版本", 400)
+	}
+
+	// 4. env vars
+	envMap, envErr := deploy.ParseEnvVarsJSON(app.EnvVars)
+	if envErr != nil {
+		return PipelineRunView{}, apperr.Wrap(envErr, "BAD_REQUEST",
+			"env_vars 解析失败: "+envErr.Error(), 400)
+	}
+
+	// 5. 同 app 互斥
+	s.mu.Lock()
+	if _, busy := s.runningAppIDs[appID]; busy {
+		s.mu.Unlock()
+		return PipelineRunView{}, apperr.New("CONFLICT",
+			fmt.Sprintf("应用 %d 已有流水线在跑，请等待结束", appID), 409)
+	}
+	s.runningAppIDs[appID] = struct{}{}
+	s.mu.Unlock()
+
+	// 6. 落库 running（rollback artifact_id=0 标记，具体 art per-dep 在 plan 里）
+	now := time.Now()
+	snap := strategy.RunSnapshot{Strategy: "rollback", StartedAt: now.Format(time.RFC3339)}
+	snapJSON, _ := json.Marshal(snap)
+	run := &model.PipelineRun{
+		AppID: appID, ArtifactID: 0,
+		Strategy: "rollback", Status: RunStatusRunning,
+		StateSnapshot: string(snapJSON),
+		TriggeredBy:   actor,
+		StartedAt:     &now,
+	}
+	if err := s.db.Create(run).Error; err != nil {
+		s.releaseLock(appID)
+		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "create run", 500)
+	}
+
+	// 7. seed host rows + 异步执行
+	s.seedRunHosts(run.ID, deps)
+	plan := &strategy.Plan{
+		RunID: run.ID, App: &app, Deps: deps, EnvMap: envMap,
+		ArtifactByDepID: artByDep,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.registerCancel(run.ID, cancel)
+	go s.execute(ctx, run.ID, &app, plan, strategy.Rollback{})
+
+	s.publishStatus(run.ID, RunStatusRunning)
+	return toRunView(run), nil
+}
+
 func (s *PipelineService) Get(id uint) (PipelineRunView, error) {
 	var r model.PipelineRun
 	if err := s.db.First(&r, id).Error; err != nil {
@@ -246,32 +347,26 @@ func (s *PipelineService) Get(id uint) (PipelineRunView, error) {
 
 // --- 异步执行 ---
 
-func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Application, art *model.Artifact, deps []model.Deployment, strat strategy.Strategy, opts TriggerOptions) {
+// execute 通用流水线执行器。caller（Trigger / Rollback）负责组装 plan 和挑 strat。
+//   - app 用于 releaseLock(app.ID) 和总超时计算
+//   - plan.Deps 决定总超时和 PipelineRunHost 数量
+func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Application, plan *strategy.Plan, strat strategy.Strategy) {
 	defer s.releaseLock(app.ID)
 	defer s.unregisterCancel(runID)
 
-	envMap, envErr := deploy.ParseEnvVarsJSON(app.EnvVars)
 	snap := strategy.RunSnapshot{
-		Strategy:   strat.Name(),
-		ArtifactID: art.ID,
-		StartedAt:  time.Now().Format(time.RFC3339),
+		Strategy:  strat.Name(),
+		StartedAt: time.Now().Format(time.RFC3339),
 	}
-	if envErr != nil {
-		snap.Error = "env_vars 解析失败: " + envErr.Error()
-		s.finishRun(runID, &snap, RunStatusFailed)
-		s.publishStatus(runID, RunStatusFailed)
-		return
+	if plan.Artifact != nil {
+		snap.ArtifactID = plan.Artifact.ID
 	}
 
 	// 总超时：每 host 给 2 分钟，加 30 秒余量
-	totalTimeout := time.Duration(len(deps))*2*time.Minute + 30*time.Second
+	totalTimeout := time.Duration(len(plan.Deps))*2*time.Minute + 30*time.Second
 	timeoutCtx, cancelTimeout := context.WithTimeout(ctx, totalTimeout)
 	defer cancelTimeout()
 
-	plan := &strategy.Plan{
-		RunID: runID, App: app, Artifact: art, Deps: deps, EnvMap: envMap,
-		BatchSize: opts.BatchSize,
-	}
 	env := strategy.Env{HostSvc: s.hostSvc, SSHOpts: s.sshOpts}
 	hooks := &runHooks{svc: s, runID: runID}
 

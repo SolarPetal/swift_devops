@@ -66,7 +66,7 @@ func (Rolling) Run(ctx context.Context, env Env, plan *Plan, hooks Hooks) ([]Hos
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				outcome, steps := deployHost(ctx, env, plan, dep, hooks)
+				outcome, steps := deployHost(ctx, env, plan, dep, plan.Artifact, hooks)
 				batchOutcomes[i] = outcome
 				batchSteps[i] = steps
 			}()

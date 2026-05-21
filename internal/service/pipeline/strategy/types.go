@@ -69,12 +69,13 @@ type HostOutcome struct {
 // Plan 一次 run 的执行计划（数据 + 配置）。
 // service 层组装，策略只读。
 type Plan struct {
-	RunID     uint
-	App       *model.Application
-	Artifact  *model.Artifact
-	Deps      []model.Deployment // 已按 ID ASC 排好序
-	EnvMap    map[string]string  // 已解析的 env vars
-	BatchSize int                // rolling 专用；single/rollback 忽略；0/1 退化为单批
+	RunID           uint
+	App             *model.Application
+	Artifact        *model.Artifact            // forward 模式（single/rolling）的统一新版本；rollback 不用
+	ArtifactByDepID map[uint]*model.Artifact // rollback 用：每个 deployment 的 previous_artifact_id 对应的 art
+	Deps            []model.Deployment        // 已按 ID ASC 排好序
+	EnvMap          map[string]string         // 已解析的 env vars
+	BatchSize       int                       // rolling 专用；single/rollback 忽略；0/1 退化为单批
 }
 
 // HostLoader 从主机 ID 还原拨号参数（隔离对 HostService 的依赖，便于 mock）。

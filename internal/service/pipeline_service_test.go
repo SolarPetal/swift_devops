@@ -360,3 +360,46 @@ func TestCancel_OrphanRunMarkedCancelled(t *testing.T) {
 		t.Fatalf("orphan 应有 finished_at")
 	}
 }
+
+// TestRollback_AppNotFound 不存在的 app → 404
+func TestRollback_AppNotFound(t *testing.T) {
+	svc, _, _, _, _ := setupPipeSvc(t)
+	_, err := svc.Rollback(9999, "tester")
+	if err == nil {
+		t.Fatal("不存在 app 应报错")
+	}
+	if !stderrors.Is(err, apperr.ErrNotFound) {
+		t.Fatalf("应是 NOT_FOUND：%v", err)
+	}
+}
+
+// TestRollback_NoDeployments app 没绑主机 → 400
+func TestRollback_NoDeployments(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	appID := seedAppForPipe(t, db)
+	_, err := svc.Rollback(appID, "tester")
+	if err == nil {
+		t.Fatal("无 deployment 应报错")
+	}
+	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
+		t.Fatalf("应是 400：%v", err)
+	}
+}
+
+// TestRollback_NoPreviousArtifact 所有 deployment 都没有 previous → 400
+func TestRollback_NoPreviousArtifact(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	appID := seedAppForPipe(t, db)
+	// 造一个 deployment，无 previous_artifact_id
+	dep := &model.Deployment{AppID: appID, HostID: 1, Status: "running"}
+	if err := db.Create(dep).Error; err != nil {
+		t.Fatalf("create dep: %v", err)
+	}
+	_, err := svc.Rollback(appID, "tester")
+	if err == nil {
+		t.Fatal("无 previous 应报错")
+	}
+	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
+		t.Fatalf("应是 400：%v", err)
+	}
+}
