@@ -58,44 +58,72 @@ func ensureImage(t *testing.T) {
 // startContainer 起容器，等 sshd 起来后返回 cleanup。
 func startContainer(t *testing.T) func() {
 	t.Helper()
-	// 清残留
-	_ = exec.Command("docker", "rm", "-f", itContainer).Run()
-	cmd := exec.Command("docker", "run", "-d", "--rm", "--name", itContainer,
-		"-p", itSSHPort+":22", "-p", itHTTPPort+":80", itImage)
+	return startContainerNamed(t, itContainer, itSSHPort, itHTTPPort)
+}
+
+// startContainerNamed 起一个指定 name / 端口的容器，等 sshd ready 后返回 cleanup。
+// Sprint 3.5：抽出参数化版本支持多容器（rolling e2e 用）。
+func startContainerNamed(t *testing.T, name, sshPort, httpPort string) func() {
+	t.Helper()
+	_ = exec.Command("docker", "rm", "-f", name).Run()
+	cmd := exec.Command("docker", "run", "-d", "--rm", "--name", name,
+		"-p", sshPort+":22", "-p", httpPort+":80", itImage)
 	var berr bytes.Buffer
 	cmd.Stderr = &berr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("docker run: %v\n%s", err, berr.String())
+		t.Fatalf("docker run %s: %v\n%s", name, err, berr.String())
 	}
 	cleanup := func() {
-		out, _ := exec.Command("docker", "logs", "--tail", "50", itContainer).CombinedOutput()
 		if t.Failed() {
-			t.Logf("---container logs---\n%s\n---end---", out)
+			out, _ := exec.Command("docker", "logs", "--tail", "50", name).CombinedOutput()
+			t.Logf("---%s logs---\n%s\n---end---", name, out)
 		}
-		_ = exec.Command("docker", "rm", "-f", itContainer).Run()
+		_ = exec.Command("docker", "rm", "-f", name).Run()
 	}
-	// 等 sshd 起来：tcp 拨通 + 20s 超时
+	// 等 sshd
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := exec.Command("bash", "-c",
-			fmt.Sprintf("nc -z -w 1 127.0.0.1 %s && echo OK", itSSHPort)).Output()
+			fmt.Sprintf("nc -z -w 1 127.0.0.1 %s && echo OK", sshPort)).Output()
 		if err == nil && strings.Contains(string(conn), "OK") {
-			// 多等 500ms 让 sshd 完全 ready
 			time.Sleep(500 * time.Millisecond)
 			return cleanup
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
 	cleanup()
-	t.Fatalf("sshd 未在 20s 内就绪")
+	t.Fatalf("sshd 未在 20s 内就绪（%s）", name)
 	return cleanup
 }
 
-func dockerExec(t *testing.T, cmd string) string {
+// startContainers 并发起 N 个容器（rolling/blue-green e2e 用），返回统一 cleanup。
+// names/sshPorts/httpPorts 三者长度必须一致。
+func startContainers(t *testing.T, names, sshPorts, httpPorts []string) func() {
 	t.Helper()
-	out, err := exec.Command("docker", "exec", itContainer, "sh", "-c", cmd).CombinedOutput()
+	if len(names) != len(sshPorts) || len(names) != len(httpPorts) {
+		t.Fatalf("startContainers: 长度不一致")
+	}
+	cleanups := make([]func(), 0, len(names))
+	for i := range names {
+		cleanups = append(cleanups, startContainerNamed(t, names[i], sshPorts[i], httpPorts[i]))
+	}
+	return func() {
+		for _, c := range cleanups {
+			c()
+		}
+	}
+}
+
+func dockerExec(t *testing.T, cmd string) string {
+	return dockerExecOn(t, itContainer, cmd)
+}
+
+// dockerExecOn 指定容器执行命令。
+func dockerExecOn(t *testing.T, container, cmd string) string {
+	t.Helper()
+	out, err := exec.Command("docker", "exec", container, "sh", "-c", cmd).CombinedOutput()
 	if err != nil {
-		t.Logf("docker exec %q err: %v\n%s", cmd, err, out)
+		t.Logf("docker exec [%s] %q err: %v\n%s", container, cmd, err, out)
 	}
 	return string(out)
 }
@@ -258,3 +286,152 @@ func TestPipeline_E2E_Integration(t *testing.T) {
 
 // 让编译器看到 import filepath 用过（避免误删）
 var _ = filepath.Base
+
+// ===== Sprint 3.5：rolling 双容器端到端 =====
+
+const (
+	itRollingC1     = "swift-devops-sshd-test-r1"
+	itRollingC2     = "swift-devops-sshd-test-r2"
+	itRollingSSH1   = "12223"
+	itRollingSSH2   = "12224"
+	itRollingHTTP1  = "18081"
+	itRollingHTTP2  = "18082"
+)
+
+// setupForRollingIntegration 装配 2 host（不同 SSH 端口）+ 1 app + 2 deployment
+// （每个 deployment.Port 覆盖到对应 nginx 暴露的 host 端口）+ 1 artifact。
+func setupForRollingIntegration(t *testing.T) (*service.PipelineService, uint, uint) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&model.Host{}, &model.Application{}, &model.Artifact{},
+		&model.Deployment{}, &model.PipelineRun{}, &model.PipelineRunHost{},
+	); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	aes, _ := cryptopkg.NewAESGCM("uoVrzdITJj+e1YqRXDnUAunQt4qgbU1PzjAMVT13SqA=")
+	hostSvc := service.NewHostService(db, aes)
+	artRoot := t.TempDir()
+	artSvc := service.NewArtifactService(db, artRoot, 0)
+	depSvc := service.NewDeploymentService(db)
+	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, 10*time.Second)
+
+	// 两台 host
+	h1, err := hostSvc.Create(service.HostInput{
+		Name: "rolling-1", IP: "127.0.0.1",
+		Port: parsePortOr(itRollingSSH1, 12223),
+		AuthType: "password", Username: "root", Password: itPassword,
+	})
+	if err != nil {
+		t.Fatalf("host1 create: %v", err)
+	}
+	h2, err := hostSvc.Create(service.HostInput{
+		Name: "rolling-2", IP: "127.0.0.1",
+		Port: parsePortOr(itRollingSSH2, 12224),
+		AuthType: "password", Username: "root", Password: itPassword,
+	})
+	if err != nil {
+		t.Fatalf("host2 create: %v", err)
+	}
+
+	// app：默认 port 用 host1 的 18081（兜底），每个 deployment 用自己 port 覆盖
+	appM := &model.Application{
+		AppCode:        "demo-rolling",
+		Name:           "Demo Rolling",
+		AppType:        "jar",
+		DeployPath:     "/tmp/swift-devops-test",
+		Port:           parsePortOr(itRollingHTTP1, 18081),
+		HealthCheckURL: "/actuator/health",
+		SystemdUser:    "root",
+	}
+	if err := db.Create(appM).Error; err != nil {
+		t.Fatalf("app create: %v", err)
+	}
+
+	// 绑定：host1 走默认 port，host2 用 deployment.Port 覆盖到 18082
+	if _, err := depSvc.Bind(appM.ID, service.DeploymentInput{HostID: h1.ID}); err != nil {
+		t.Fatalf("bind h1: %v", err)
+	}
+	if _, err := depSvc.Bind(appM.ID, service.DeploymentInput{
+		HostID: h2.ID, Port: parsePortOr(itRollingHTTP2, 18082),
+	}); err != nil {
+		t.Fatalf("bind h2: %v", err)
+	}
+
+	jar := writeJarIn(t, artRoot, "ROLLING-INTEGRATION-FAKE-JAR")
+	art, err := artSvc.Register(service.ArtifactInput{
+		AppID: appM.ID, VersionTag: "vIT-R.1", FilePath: jar,
+	})
+	if err != nil {
+		t.Fatalf("artifact register: %v", err)
+	}
+
+	return pipeSvc, appM.ID, art.ID
+}
+
+// TestRolling_E2E_Integration 双容器 rolling 端到端。
+// batch_size=1：两批，每批一台，顺序执行。
+// 验证：两台都 success / 两个容器都落地 jar / unit 文件被写 / systemctl 日志含 restart。
+func TestRolling_E2E_Integration(t *testing.T) {
+	if os.Getenv("SKIP_DOCKER") != "" {
+		t.Skip("SKIP_DOCKER set")
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+	ensureImage(t)
+	cleanup := startContainers(t,
+		[]string{itRollingC1, itRollingC2},
+		[]string{itRollingSSH1, itRollingSSH2},
+		[]string{itRollingHTTP1, itRollingHTTP2},
+	)
+	defer cleanup()
+
+	pipe, appID, artID := setupForRollingIntegration(t)
+	out, err := pipe.Trigger(appID, artID, "rolling-e2e", service.TriggerOptions{
+		Strategy: "rolling", BatchSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("trigger rolling: %v", err)
+	}
+	if out.Status != "running" {
+		t.Fatalf("trigger 后应 running，得 %s", out.Status)
+	}
+
+	// 两批 × 单台 health 探针 30 次 × 2s ≈ 单台最长 60s；总超时给 150s 留余量
+	final := waitForRun(t, pipe, out.ID, 150*time.Second)
+	if final.Status != "success" {
+		t.Fatalf("应 success，得 %s\nstate_snapshot=%s", final.Status, final.StateSnapshot)
+	}
+
+	// 两个容器都应该有 jar 落地 + unit + systemctl 调用
+	for _, c := range []string{itRollingC1, itRollingC2} {
+		jarOut := dockerExecOn(t, c, "cat /tmp/swift-devops-test/app.jar")
+		if !strings.Contains(jarOut, "ROLLING-INTEGRATION-FAKE-JAR") {
+			t.Errorf("容器 %s jar 内容缺失: %s", c, jarOut)
+		}
+		unitOut := dockerExecOn(t, c, "cat /etc/systemd/system/devops-demo-rolling.service")
+		if !strings.Contains(unitOut, "ExecStart=/usr/bin/java") {
+			t.Errorf("容器 %s unit 缺 ExecStart:\n%s", c, unitOut)
+		}
+		logOut := dockerExecOn(t, c, "cat /tmp/systemctl.log")
+		if !strings.Contains(logOut, "restart devops-demo-rolling.service") {
+			t.Errorf("容器 %s systemctl 未调 restart:\n%s", c, logOut)
+		}
+	}
+
+	// snapshot 应含两台主机的 health step
+	if !strings.Contains(final.StateSnapshot, `"host_name":"rolling-1"`) ||
+		!strings.Contains(final.StateSnapshot, `"host_name":"rolling-2"`) {
+		t.Errorf("snapshot 应含两台主机：%s", final.StateSnapshot)
+	}
+	// rolling 策略名应落库
+	if final.Strategy != "rolling" {
+		t.Errorf("strategy 应为 rolling，得 %s", final.Strategy)
+	}
+}
