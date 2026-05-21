@@ -35,8 +35,12 @@ func Audit(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
+		// 仅对 JSON / 表单等小体请求记录 payload。
+		// multipart/form-data（含文件上传）一定要跳过——读 body 后即使重新塞回去也会被截断，
+		// 真正的 multipart 流读不完整 handler 必败；客户端还在 PUT 几十 MB 时 server close conn，
+		// 浏览器侧表现为 Network Error。
 		var bodySnippet []byte
-		if c.Request.Body != nil {
+		if c.Request.Body != nil && !isMultipart(c.Request.Header.Get("Content-Type")) {
 			buf, _ := io.ReadAll(io.LimitReader(c.Request.Body, auditPayloadMax+1))
 			c.Request.Body = io.NopCloser(bytes.NewReader(buf))
 			if len(buf) > auditPayloadMax {
@@ -99,4 +103,11 @@ func sanitizePayload(b []byte) string {
 		return string(b)
 	}
 	return string(out)
+}
+
+// isMultipart 判定 Content-Type 是否为 multipart/form-data。
+// 用 HasPrefix 而不是 == 是为了兼容带 boundary 参数的标准写法：
+//   multipart/form-data; boundary=----WebKitFormBoundary...
+func isMultipart(ct string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "multipart/form-data")
 }
