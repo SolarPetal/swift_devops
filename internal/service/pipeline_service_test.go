@@ -20,8 +20,8 @@ import (
 	"swift-devops/internal/service"
 )
 
-// 准备 pipeline service + 它依赖的 host/artifact svc
-func setupPipeSvc(t *testing.T) (*service.PipelineService, *service.HostService, *service.ArtifactService, *gorm.DB) {
+// 准备 pipeline service + 它依赖的 host/artifact svc。返回的 root 当做 artifactDir 白名单使用。
+func setupPipeSvc(t *testing.T) (*service.PipelineService, *service.HostService, *service.ArtifactService, *gorm.DB, string) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
@@ -38,9 +38,10 @@ func setupPipeSvc(t *testing.T) (*service.PipelineService, *service.HostService,
 	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	aes, _ := cryptopkg.NewAESGCM(key)
 	hostSvc := service.NewHostService(db, aes)
-	artSvc := service.NewArtifactService(db)
+	root := t.TempDir()
+	artSvc := service.NewArtifactService(db, root, 0)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, 0)
-	return pipeSvc, hostSvc, artSvc, db
+	return pipeSvc, hostSvc, artSvc, db, root
 }
 
 func seedAppForPipe(t *testing.T, db *gorm.DB) uint {
@@ -56,10 +57,9 @@ func seedAppForPipe(t *testing.T, db *gorm.DB) uint {
 	return a.ID
 }
 
-func registerJar(t *testing.T, svc *service.ArtifactService, appID uint, ver string) uint {
+func registerJar(t *testing.T, svc *service.ArtifactService, root string, appID uint, ver string) uint {
 	t.Helper()
-	dir := t.TempDir()
-	p := filepath.Join(dir, "x.jar")
+	p := filepath.Join(root, "x-"+ver+".jar")
 	if err := os.WriteFile(p, []byte("xx"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -73,7 +73,7 @@ func registerJar(t *testing.T, svc *service.ArtifactService, appID uint, ver str
 }
 
 func TestPipeline_Trigger_AppNotFound(t *testing.T) {
-	svc, _, _, _ := setupPipeSvc(t)
+	svc, _, _, _, _ := setupPipeSvc(t)
 	_, err := svc.Trigger(9999, 1, "tester", "single")
 	ae, ok := apperr.As(err)
 	if !ok || ae.Code != "NOT_FOUND" {
@@ -82,11 +82,11 @@ func TestPipeline_Trigger_AppNotFound(t *testing.T) {
 }
 
 func TestPipeline_Trigger_ArtifactMismatch(t *testing.T) {
-	svc, _, artSvc, db := setupPipeSvc(t)
+	svc, _, artSvc, db, root := setupPipeSvc(t)
 	app1 := seedAppForPipe(t, db)
 	app2 := &model.Application{AppCode: "other", Name: "X", DeployPath: "/o", Port: 9}
 	db.Create(app2)
-	artID := registerJar(t, artSvc, app2.ID, "v1") // 制品属于 app2
+	artID := registerJar(t, artSvc, root, app2.ID, "v1") // 制品属于 app2
 
 	_, err := svc.Trigger(app1, artID, "tester", "single")
 	if err == nil {
@@ -99,9 +99,9 @@ func TestPipeline_Trigger_ArtifactMismatch(t *testing.T) {
 }
 
 func TestPipeline_Trigger_NoDeployments(t *testing.T) {
-	svc, _, artSvc, db := setupPipeSvc(t)
+	svc, _, artSvc, db, root := setupPipeSvc(t)
 	appID := seedAppForPipe(t, db)
-	artID := registerJar(t, artSvc, appID, "v1")
+	artID := registerJar(t, artSvc, root, appID, "v1")
 	_, err := svc.Trigger(appID, artID, "tester", "single")
 	if err == nil {
 		t.Fatal("没绑主机应失败")
@@ -113,7 +113,7 @@ func TestPipeline_Trigger_NoDeployments(t *testing.T) {
 }
 
 func TestPipeline_Trigger_StrategyValidation(t *testing.T) {
-	svc, _, _, _ := setupPipeSvc(t)
+	svc, _, _, _, _ := setupPipeSvc(t)
 	_, err := svc.Trigger(1, 1, "tester", "rolling")
 	if err == nil {
 		t.Fatal("rolling 应拒")
@@ -125,7 +125,7 @@ func TestPipeline_Trigger_StrategyValidation(t *testing.T) {
 }
 
 func TestPipeline_List_Empty(t *testing.T) {
-	svc, _, _, _ := setupPipeSvc(t)
+	svc, _, _, _, _ := setupPipeSvc(t)
 	list, err := svc.List(0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -136,7 +136,7 @@ func TestPipeline_List_Empty(t *testing.T) {
 }
 
 func TestPipeline_Get_NotFound(t *testing.T) {
-	svc, _, _, _ := setupPipeSvc(t)
+	svc, _, _, _, _ := setupPipeSvc(t)
 	_, err := svc.Get(9999)
 	if err == nil {
 		t.Fatal("应失败")
@@ -178,12 +178,12 @@ func (p *recPub) snapshot() []string {
 }
 
 func TestPipeline_Publisher_EmitsStatusAndStep(t *testing.T) {
-	svc, hostSvc, artSvc, db := setupPipeSvc(t)
+	svc, hostSvc, artSvc, db, root := setupPipeSvc(t)
 	pub := newRecPub()
 	svc.SetPublisher(pub)
 
 	appID := seedAppForPipe(t, db)
-	artID := registerJar(t, artSvc, appID, "v1")
+	artID := registerJar(t, artSvc, root, appID, "v1")
 	// 绑一台肯定连不上的 host，让 pipeline 走完整路径但 dial 失败
 	hv, err := hostSvc.Create(service.HostInput{
 		Name: "ghost", IP: "127.0.0.1",
@@ -240,9 +240,9 @@ func TestPipeline_Publisher_EmitsStatusAndStep(t *testing.T) {
 }
 
 func TestPipeline_SnapshotEventBytes(t *testing.T) {
-	svc, _, artSvc, db := setupPipeSvc(t)
+	svc, _, artSvc, db, root := setupPipeSvc(t)
 	appID := seedAppForPipe(t, db)
-	_ = registerJar(t, artSvc, appID, "v1")
+	_ = registerJar(t, artSvc, root, appID, "v1")
 
 	// 不存在
 	if b := svc.SnapshotEventBytes(9999); b != nil {

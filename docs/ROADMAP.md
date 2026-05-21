@@ -120,7 +120,7 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 ### Sprint 2 · 应用 + 单主机部署（约 1 周）
 - [x] 2.1 应用 CRUD + 配置中心（JVM args / env vars / 健康检查 URL）
 - [x] 2.2 应用 × 主机关联（Deployment + 蓝绿分组 + 删除保护）
-- [~] 2.3 制品手动上传 + MD5 —— **暂缓**：先用 `POST /artifacts` 注册"已存在本地路径"打通部署链路；multipart streaming + 历史清理留到 Sprint 5 一起做
+- [x] 2.3 制品 multipart 上传 + 路径白名单（`POST /artifacts/upload` 流式 + MD5 + 大小限制 + `app_code/版本-时间戳` 落地；旧 `POST /artifacts` 注册保留作兼容）—— 历史清理 `max_history` 仍留到 Sprint 5
 - [x] 2.4 单主机部署最小闭环（SCP 分发 + systemd 单元 + 健康探针 + PipelineRun 状态机）
 - [x] 2.4 polish-1 Docker sshd 容器集成测（dial → SFTP → write unit → fake systemctl → health 全链路）
 - [x] 2.4 polish-2 systemd unit `User=` 透传（model + 校验 + 前端表单 + e2e 断言）
@@ -142,6 +142,7 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [ ] Git clone
 - [ ] Docker 容器构建
 - [ ] WebSocket 日志流
+- [ ] 制品历史清理（`max_history` 滚动删旧版 + 对应文件）
 
 ### Sprint 6 · 监控告警（约 1 周）
 - [ ] 系统采样

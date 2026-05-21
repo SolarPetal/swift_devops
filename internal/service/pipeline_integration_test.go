@@ -120,7 +120,8 @@ func setupForIntegration(t *testing.T) (*service.PipelineService, uint, uint) {
 	key = "uoVrzdITJj+e1YqRXDnUAunQt4qgbU1PzjAMVT13SqA="
 	aes, _ := cryptopkg.NewAESGCM(key)
 	hostSvc := service.NewHostService(db, aes)
-	artSvc := service.NewArtifactService(db)
+	artRoot := t.TempDir()
+	artSvc := service.NewArtifactService(db, artRoot, 0)
 	depSvc := service.NewDeploymentService(db)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, 10*time.Second)
 
@@ -155,8 +156,8 @@ func setupForIntegration(t *testing.T) (*service.PipelineService, uint, uint) {
 		t.Fatalf("bind: %v", err)
 	}
 
-	// 制品：写一个临时 jar
-	jar := writeTempJar(t, "INTEGRATION-FAKE-JAR-CONTENT")
+	// 制品：写一个临时 jar（必须落在 artRoot 内，过白名单）
+	jar := writeJarIn(t, artRoot, "INTEGRATION-FAKE-JAR-CONTENT")
 	art, err := artSvc.Register(service.ArtifactInput{
 		AppID: appM.ID, VersionTag: "vIT.1", FilePath: jar,
 	})

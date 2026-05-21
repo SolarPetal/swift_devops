@@ -45,6 +45,7 @@ type StorageCfg struct {
 	ArtifactDir    string `yaml:"artifact_dir"`
 	BuildWorkspace string `yaml:"build_workspace"`
 	MaxHistory     int    `yaml:"max_history"`
+	MaxUploadMB    int    `yaml:"max_upload_mb"` // 单文件上限，默认 256
 }
 
 type BuilderCfg struct {
@@ -115,6 +116,9 @@ func (c *Config) applyDefaults() {
 	if c.Storage.MaxHistory == 0 {
 		c.Storage.MaxHistory = 30
 	}
+	if c.Storage.MaxUploadMB == 0 {
+		c.Storage.MaxUploadMB = 256
+	}
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
 	}
@@ -132,6 +136,9 @@ func (c *Config) validate() error {
 	}
 	if c.Admin.Username == "" || c.Admin.PasswordBcrypt == "" {
 		return fmt.Errorf("admin.username and admin.password_bcrypt are required")
+	}
+	if c.Storage.ArtifactDir == "" {
+		return fmt.Errorf("storage.artifact_dir is required")
 	}
 	return nil
 }

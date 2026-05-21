@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Typography, Card, Button, Space, Table, Tag, Modal,
   Form, Select, InputNumber, Input, message, Descriptions, Skeleton, Tabs,
-  Drawer, Steps, Badge,
+  Drawer, Steps, Badge, Upload, Progress,
 } from 'antd'
 
 import type {
@@ -12,7 +12,7 @@ import type {
 import { getApp } from '../api/app'
 import { listHosts } from '../api/host'
 import { bindHost, listDeployments, unbindDeployment, updateDeploymentGroup } from '../api/deployment'
-import { createArtifact, deleteArtifact, listArtifacts } from '../api/artifact'
+import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact } from '../api/artifact'
 import { deployApp, getPipeline, listPipelines } from '../api/pipeline'
 import { buildWSURL, issueWSTicket, type PipelineWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
@@ -215,6 +215,13 @@ function ArtifactTab({ appId }: { appId: number }) {
   const [open, setOpen] = useState(false)
   const [form] = Form.useForm()
 
+  // 上传 Modal 状态
+  const [upOpen, setUpOpen] = useState(false)
+  const [upForm] = Form.useForm()
+  const [upFile, setUpFile] = useState<File | null>(null)
+  const [upPercent, setUpPercent] = useState(0)
+  const [uploading, setUploading] = useState(false)
+
   const refresh = async () => {
     setLoading(true)
     try { setList(await listArtifacts(appId)) }
@@ -246,16 +253,41 @@ function ArtifactTab({ appId }: { appId: number }) {
     })
   }
 
+  const openUpload = () => {
+    upForm.resetFields()
+    setUpFile(null)
+    setUpPercent(0)
+    setUpOpen(true)
+  }
+  const handleUpload = async () => {
+    if (uploading) return // 防重入：React 状态尚未刷新前 onOk 二次触发会送空 body 400
+    try {
+      const v = await upForm.validateFields()
+      if (!upFile) { message.warning('请选择要上传的文件'); return }
+      setUploading(true); setUpPercent(0)
+      await uploadArtifact(appId, v.version_tag, upFile, upFile.name, (p) => setUpPercent(p))
+      setUpPercent(100)
+      message.success('上传成功')
+      setUpOpen(false); refresh()
+    } catch (e) {
+      if ((e as any)?.errorFields) return
+      message.error(formatError(e))
+    } finally {
+      setUploading(false)
+    }
+  }
+
   return (
     <>
       <Space style={{ marginBottom: 12 }}>
-        <Button type="primary" onClick={() => { form.resetFields(); setOpen(true) }}>+ 注册制品</Button>
+        <Button type="primary" onClick={openUpload}>↑ 上传文件</Button>
+        <Button onClick={() => { form.resetFields(); setOpen(true) }}>+ 注册路径</Button>
         <Button onClick={refresh}>刷新</Button>
-        <Typography.Text type="secondary">Sprint 2.4：注册已存在的本地 jar。Sprint 2.3 才会有真正的 multipart 上传。</Typography.Text>
+        <Typography.Text type="secondary">上传走 multipart 直传服务器；注册适合已经 scp 到服务器的旧 jar。</Typography.Text>
       </Space>
       <Table<Artifact>
         rowKey="id" loading={loading} dataSource={list} pagination={false}
-        locale={{ emptyText: '还没有制品，点上方"+ 注册制品"添加一个本地 jar 路径' }}
+        locale={{ emptyText: '还没有制品，点上方"↑ 上传文件"或"+ 注册路径"添加' }}
         columns={[
           { title: 'ID', dataIndex: 'id', width: 60 },
           { title: '版本', dataIndex: 'version_tag', width: 140, render: (v) => <Tag>{v}</Tag> },
@@ -267,18 +299,56 @@ function ArtifactTab({ appId }: { appId: number }) {
           { title: '操作', width: 100, render: (_, a) => <Button danger size="small" onClick={() => handleDelete(a)}>删除</Button> },
         ]}
       />
+
       <Modal title="注册制品（本地 jar 路径）" open={open} onOk={handleAdd} onCancel={() => setOpen(false)} okText="注册" cancelText="取消">
         <Form form={form} layout="vertical">
           <Form.Item name="version_tag" label="版本标签" rules={[{ required: true }]}>
             <Input placeholder="v1.0.0 / 20260520-01" />
           </Form.Item>
           <Form.Item name="file_path" label="jar 绝对路径" rules={[{ required: true }]}
-            extra="必须是 swift-devops 服务进程可读的绝对路径，例如 /tmp/demo-1.0.0.jar">
+            extra="必须落在 storage.artifact_dir 之下，否则会被路径白名单拒绝">
             <Input placeholder="/var/lib/swift-devops/artifacts/demo-1.0.0.jar" />
           </Form.Item>
           <Form.Item name="file_name" label="文件名（可选，留空取 basename）">
             <Input placeholder="demo-1.0.0.jar" />
           </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="上传制品"
+        open={upOpen}
+        onOk={handleUpload}
+        onCancel={() => { if (!uploading) setUpOpen(false) }}
+        okText={uploading ? '上传中…' : '开始上传'}
+        cancelText="取消"
+        confirmLoading={uploading}
+        maskClosable={!uploading}
+        closable={!uploading}
+      >
+        <Form form={upForm} layout="vertical">
+          <Form.Item name="version_tag" label="版本标签" rules={[{ required: true }]}>
+            <Input placeholder="v1.0.0" />
+          </Form.Item>
+          <Form.Item label="文件" required>
+            <Upload.Dragger
+              multiple={false}
+              maxCount={1}
+              // 显式禁用 Antd 自带 ajax：即便 beforeUpload 返回 false，少数路径下 Antd 仍会发空 multipart 探测请求
+              customRequest={({ onSuccess }) => { setTimeout(() => onSuccess?.({}, new XMLHttpRequest()), 0) }}
+              beforeUpload={(f) => { setUpFile(f as File); return false }}
+              onRemove={() => { setUpFile(null); return true }}
+              fileList={upFile ? [{ uid: '-1', name: upFile.name, status: 'done', size: upFile.size } as any] : []}
+              disabled={uploading}
+            >
+              <p className="ant-upload-drag-icon" style={{ fontSize: 36, color: '#1677ff' }}>⬆</p>
+              <p className="ant-upload-text">点击或拖拽 jar 文件到此区域</p>
+              <p className="ant-upload-hint">单文件，最大受服务端 storage.max_upload_mb 限制</p>
+            </Upload.Dragger>
+          </Form.Item>
+          {(uploading || upPercent > 0) && (
+            <Progress percent={upPercent} status={uploading ? 'active' : 'success'} />
+          )}
         </Form>
       </Modal>
     </>

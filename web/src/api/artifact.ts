@@ -16,3 +16,33 @@ export async function createArtifact(input: ArtifactInput): Promise<Artifact> {
 export async function deleteArtifact(id: number): Promise<void> {
   await api.delete(`/artifacts/${id}`)
 }
+
+// uploadArtifact 走 multipart/form-data，把 file 流式发到 POST /artifacts/upload。
+// onProgress 收到 0~100 的整数百分比；浏览器拿不到上传完成事件时不会回调，调用方需要自行兜底 100%。
+export async function uploadArtifact(
+  appId: number,
+  versionTag: string,
+  file: File | Blob,
+  fileName?: string,
+  onProgress?: (percent: number) => void,
+): Promise<Artifact> {
+  const fd = new FormData()
+  fd.append('app_id', String(appId))
+  fd.append('version_tag', versionTag)
+  // 第三个参数显式给文件名，避免某些浏览器把 Blob 当 "blob"
+  fd.append('file', file, fileName ?? (file instanceof File ? file.name : 'upload.bin'))
+
+  const r = await api.post<Artifact>('/artifacts/upload', fd, {
+    timeout: 5 * 60_000, // 上传最多 5 分钟
+    // 注意：千万别手设 Content-Type；axios 会自动给 FormData 加上带 boundary 的 multipart/form-data。
+    // 手设会把 boundary 抹掉，server 端 multipart 解析必 400。
+    onUploadProgress: (e) => {
+      if (!onProgress) return
+      const total = e.total ?? 0
+      if (total > 0) {
+        onProgress(Math.round((e.loaded / total) * 100))
+      }
+    },
+  })
+  return r.data
+}

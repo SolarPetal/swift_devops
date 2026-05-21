@@ -40,7 +40,7 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	hostSvc := service.NewHostService(db, aes)
 	appSvc := service.NewAppService(db)
 	depSvc := service.NewDeploymentService(db)
-	artSvc := service.NewArtifactService(db)
+	artSvc := service.NewArtifactService(db, cfg.Storage.ArtifactDir, int64(cfg.Storage.MaxUploadMB)<<20)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
 	pipeSvc.SetPublisher(wsHub) // 异步推送 step/status 到 hub
 
@@ -79,9 +79,11 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.DELETE("/deployments/:id", depH.Unbind)
 		v1.PATCH("/deployments/:id", depH.UpdateGroup)
 
-		// 制品（Sprint 2.3 前的最小注册版：注册已存在的本地 jar）
-		artH := handler.NewArtifactHandler(artSvc)
+		// 制品（注册已有路径 + multipart 上传）
+		maxUp := int64(cfg.Storage.MaxUploadMB) << 20
+		artH := handler.NewArtifactHandler(artSvc, maxUp)
 		v1.POST("/artifacts", artH.Create)
+		v1.POST("/artifacts/upload", artH.Upload)
 		v1.GET("/artifacts", artH.List)
 		v1.GET("/artifacts/:id", artH.Get)
 		v1.DELETE("/artifacts/:id", artH.Delete)
