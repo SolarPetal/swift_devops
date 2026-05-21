@@ -111,7 +111,7 @@ func setupForIntegration(t *testing.T) (*service.PipelineService, uint, uint) {
 	}
 	if err := db.AutoMigrate(
 		&model.Host{}, &model.Application{}, &model.Artifact{},
-		&model.Deployment{}, &model.PipelineRun{},
+		&model.Deployment{}, &model.PipelineRun{}, &model.PipelineRunHost{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

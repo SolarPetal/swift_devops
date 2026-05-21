@@ -70,13 +70,29 @@ type PipelineRun struct {
 	ID            uint       `gorm:"primaryKey" json:"id"`
 	AppID         uint       `gorm:"index;not null" json:"app_id"`
 	ArtifactID    uint       `json:"artifact_id"`
-	Strategy      string     `gorm:"size:20" json:"strategy"` // build / rolling / blue_green / rollback
-	Status        string     `gorm:"size:20" json:"status"`   // pending / running / success / failed / interrupted
+	Strategy      string     `gorm:"size:20" json:"strategy"` // build / single / rolling / blue_green / rollback
+	Status        string     `gorm:"size:20" json:"status"`   // pending / running / success / failed / cancelled
 	StateSnapshot string     `gorm:"type:text" json:"state_snapshot"`
 	TriggeredBy   string     `gorm:"size:50" json:"triggered_by"`
 	StartedAt     *time.Time `json:"started_at"`
 	FinishedAt    *time.Time `json:"finished_at"`
 	CreatedAt     time.Time  `json:"created_at"`
+}
+
+// PipelineRunHost 单次 run 在某台主机上的执行状态。
+// 与 StateSnapshot.steps 互补：steps 是阶段级时序，本表是 host 级聚合，便于 SQL 查询和未来 dashboard。
+type PipelineRunHost struct {
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	RunID        uint       `gorm:"uniqueIndex:idx_run_host;not null;index" json:"run_id"`
+	HostID       uint       `gorm:"uniqueIndex:idx_run_host;not null" json:"host_id"`
+	DeploymentID uint       `gorm:"index" json:"deployment_id"`
+	Status       string     `gorm:"size:20;not null" json:"status"`       // pending / running / success / failed / skipped
+	CurrentStage string     `gorm:"size:20" json:"current_stage"`         // dial / upload / write_unit / restart / health
+	StartedAt    *time.Time `json:"started_at"`
+	EndedAt      *time.Time `json:"ended_at"`
+	Error        string     `gorm:"type:text" json:"error"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // AuditLog 审计日志

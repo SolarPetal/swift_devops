@@ -23,6 +23,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.Artifact{},
 		&model.Deployment{},
 		&model.PipelineRun{},
+		&model.PipelineRunHost{},
 		&model.AuditLog{},
 	)
 }

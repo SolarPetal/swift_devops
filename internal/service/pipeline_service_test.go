@@ -31,7 +31,7 @@ func setupPipeSvc(t *testing.T) (*service.PipelineService, *service.HostService,
 	}
 	if err := db.AutoMigrate(
 		&model.Host{}, &model.Application{}, &model.Artifact{},
-		&model.Deployment{}, &model.PipelineRun{},
+		&model.Deployment{}, &model.PipelineRun{}, &model.PipelineRunHost{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -272,3 +272,15 @@ func TestPipeline_SnapshotEventBytes(t *testing.T) {
 var _ service.Publisher = (interface {
 	Publish(topic string, msg []byte) int
 })(nil)
+
+// TestTrigger_RejectUnknownStrategy Sprint 3.1 仅注册了 single；其他策略名应被 pickStrategy 拒绝。
+func TestTrigger_RejectUnknownStrategy(t *testing.T) {
+	svc, _, _, _, _ := setupPipeSvc(t)
+	_, err := svc.Trigger(1, 1, "tester", "rolling")
+	if err == nil {
+		t.Fatal("rolling 当前未实现，应拒绝")
+	}
+	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
+		t.Fatalf("应是 400 BAD_REQUEST，得：%v", err)
+	}
+}

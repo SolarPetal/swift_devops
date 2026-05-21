@@ -88,7 +88,7 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/artifacts/:id", artH.Get)
 		v1.DELETE("/artifacts/:id", artH.Delete)
 
-		// 流水线（Sprint 2.4 单主机部署）
+		// 流水线（Sprint 2.4 单主机部署 / Sprint 3.1 抽 Strategy 接口）
 		pipeH := handler.NewPipelineHandler(pipeSvc)
 		v1.POST("/apps/:id/deploy", pipeH.Deploy)
 		v1.GET("/pipelines", pipeH.List)
