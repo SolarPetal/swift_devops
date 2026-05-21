@@ -210,7 +210,7 @@ func TestPipeline_E2E_Integration(t *testing.T) {
 	pipe, appID, artID := setupForIntegration(t)
 	_ = context.Background() // pipeline 内部已建 ctx
 
-	out, err := pipe.Trigger(appID, artID, "integration", "single")
+	out, err := pipe.Trigger(appID, artID, "integration", service.TriggerOptions{Strategy: "single"})
 	if err != nil {
 		t.Fatalf("trigger: %v", err)
 	}

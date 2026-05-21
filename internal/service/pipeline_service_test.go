@@ -75,7 +75,7 @@ func registerJar(t *testing.T, svc *service.ArtifactService, root string, appID 
 
 func TestPipeline_Trigger_AppNotFound(t *testing.T) {
 	svc, _, _, _, _ := setupPipeSvc(t)
-	_, err := svc.Trigger(9999, 1, "tester", "single")
+	_, err := svc.Trigger(9999, 1, "tester", service.TriggerOptions{Strategy: "single"})
 	ae, ok := apperr.As(err)
 	if !ok || ae.Code != "NOT_FOUND" {
 		t.Fatalf("应 NOT_FOUND：%v", err)
@@ -89,7 +89,7 @@ func TestPipeline_Trigger_ArtifactMismatch(t *testing.T) {
 	db.Create(app2)
 	artID := registerJar(t, artSvc, root, app2.ID, "v1") // 制品属于 app2
 
-	_, err := svc.Trigger(app1, artID, "tester", "single")
+	_, err := svc.Trigger(app1, artID, "tester", service.TriggerOptions{Strategy: "single"})
 	if err == nil {
 		t.Fatal("应失败")
 	}
@@ -103,7 +103,7 @@ func TestPipeline_Trigger_NoDeployments(t *testing.T) {
 	svc, _, artSvc, db, root := setupPipeSvc(t)
 	appID := seedAppForPipe(t, db)
 	artID := registerJar(t, artSvc, root, appID, "v1")
-	_, err := svc.Trigger(appID, artID, "tester", "single")
+	_, err := svc.Trigger(appID, artID, "tester", service.TriggerOptions{Strategy: "single"})
 	if err == nil {
 		t.Fatal("没绑主机应失败")
 	}
@@ -113,11 +113,13 @@ func TestPipeline_Trigger_NoDeployments(t *testing.T) {
 	}
 }
 
+// TestPipeline_Trigger_StrategyValidation Sprint 3.2 起 rolling 已实现；
+// 这里改测一个还没实现的策略名（rollback 留 Sprint 3.3），应被 pickStrategy 拒绝。
 func TestPipeline_Trigger_StrategyValidation(t *testing.T) {
 	svc, _, _, _, _ := setupPipeSvc(t)
-	_, err := svc.Trigger(1, 1, "tester", "rolling")
+	_, err := svc.Trigger(1, 1, "tester", service.TriggerOptions{Strategy: "rollback"})
 	if err == nil {
-		t.Fatal("rolling 应拒")
+		t.Fatal("rollback 应拒")
 	}
 	ae, _ := apperr.As(err)
 	if ae == nil || ae.Code != "BAD_REQUEST" {
@@ -199,7 +201,7 @@ func TestPipeline_Publisher_EmitsStatusAndStep(t *testing.T) {
 		t.Fatalf("bind: %v", err)
 	}
 
-	out, err := svc.Trigger(appID, artID, "tester", "single")
+	out, err := svc.Trigger(appID, artID, "tester", service.TriggerOptions{Strategy: "single"})
 	if err != nil {
 		t.Fatalf("trigger: %v", err)
 	}
@@ -274,12 +276,24 @@ var _ service.Publisher = (interface {
 	Publish(topic string, msg []byte) int
 })(nil)
 
-// TestTrigger_RejectUnknownStrategy Sprint 3.1 仅注册了 single；其他策略名应被 pickStrategy 拒绝。
+// TestTrigger_RejectUnknownStrategy Sprint 3.2 起支持 single/rolling；其他策略名应被 pickStrategy 拒绝。
 func TestTrigger_RejectUnknownStrategy(t *testing.T) {
 	svc, _, _, _, _ := setupPipeSvc(t)
-	_, err := svc.Trigger(1, 1, "tester", "rolling")
+	_, err := svc.Trigger(1, 1, "tester", service.TriggerOptions{Strategy: "rollback"})
 	if err == nil {
-		t.Fatal("rolling 当前未实现，应拒绝")
+		t.Fatal("rollback 当前未实现，应拒绝")
+	}
+	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
+		t.Fatalf("应是 400 BAD_REQUEST，得：%v", err)
+	}
+}
+
+// TestTrigger_RollingRequiresBatchSize rolling 必须指定 batch_size >= 1，否则 400。
+func TestTrigger_RollingRequiresBatchSize(t *testing.T) {
+	svc, _, _, _, _ := setupPipeSvc(t)
+	_, err := svc.Trigger(1, 1, "tester", service.TriggerOptions{Strategy: "rolling"})
+	if err == nil {
+		t.Fatal("rolling 无 batch_size 应拒绝")
 	}
 	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
 		t.Fatalf("应是 400 BAD_REQUEST，得：%v", err)

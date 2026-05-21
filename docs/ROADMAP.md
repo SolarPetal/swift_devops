@@ -127,11 +127,11 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [x] 2.4 polish-3 WebSocket 实时步骤推送（一次性 ticket 鉴权 + Hub 广播 + 前端 Drawer 接 WS）
 
 ### Sprint 3 · 滚动 + 回滚（约 1 周）
-- [ ] 滚动状态机
-- [ ] PipelineRun 编排
-- [ ] 健康检查门控
-- [ ] 一键回滚
-- [ ] 前端 PipelineDashboard
+- [x] 3.1 抽 Strategy 接口 + PipelineRunHost 表 + Cancel 机制（`ctx.WithCancel` + `map[runID]cancelFunc`）
+- [x] 3.2 Rolling 策略（固定 batch_size + 批内并行 + 批级 fail-fast；body 加 `batch_size`）
+- [ ] 3.3 一键回滚（用 `deployment.previous_artifact_id` 反向跑 Single）
+- [ ] 3.4 前端 PipelineDashboard 升级（Cancel 按钮 + 批次进度卡片）
+- [ ] 3.5 rolling 双容器集成测（基于 docker sshd × 2 验证端到端）
 
 ### Sprint 4 · 蓝绿 + Nginx（约 1 周）
 - [ ] 蓝绿双组部署

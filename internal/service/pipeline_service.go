@@ -104,12 +104,22 @@ func NewPipelineService(db *gorm.DB, hostSvc *HostService, artSvc *ArtifactServi
 
 func (s *PipelineService) SetPublisher(p Publisher) { s.pub = p }
 
-// Trigger 触发一次部署。当前支持 strategy=single；rolling/rollback 留 Sprint 3.2/3.3。
-func (s *PipelineService) Trigger(appID, artifactID uint, actor, strategyName string) (PipelineRunView, error) {
-	if strategyName == "" {
-		strategyName = "single"
+// TriggerOptions Trigger 的可选参数容器。
+// 未来 BlueGreen / Canary 的额外字段都加这里，避免 Trigger 签名继续膨胀。
+type TriggerOptions struct {
+	Strategy  string // "single" / "rolling" / "rollback"（"" 默认 single）
+	BatchSize int    // rolling 专用：批大小（>=1）
+}
+
+// Trigger 触发一次部署。
+//   - opts.Strategy 决定走哪个策略；空串默认 single
+//   - opts.BatchSize 仅 rolling 使用，<=0 时 rolling 拒绝
+//   - 同 app 互斥；前一次未结束则返回 409
+func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts TriggerOptions) (PipelineRunView, error) {
+	if opts.Strategy == "" {
+		opts.Strategy = "single"
 	}
-	strat, err := pickStrategy(strategyName)
+	strat, err := pickStrategy(opts)
 	if err != nil {
 		return PipelineRunView{}, err
 	}
@@ -152,11 +162,11 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor, strategyName st
 
 	// 5. 落库 running
 	now := time.Now()
-	snap := strategy.RunSnapshot{Strategy: strategyName, ArtifactID: artifactID, StartedAt: now.Format(time.RFC3339)}
+	snap := strategy.RunSnapshot{Strategy: opts.Strategy, ArtifactID: artifactID, StartedAt: now.Format(time.RFC3339)}
 	snapJSON, _ := json.Marshal(snap)
 	run := &model.PipelineRun{
 		AppID: appID, ArtifactID: artifactID,
-		Strategy: strategyName, Status: RunStatusRunning,
+		Strategy: opts.Strategy, Status: RunStatusRunning,
 		StateSnapshot: string(snapJSON),
 		TriggeredBy:   actor,
 		StartedAt:     &now,
@@ -172,7 +182,7 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor, strategyName st
 	// 7. 异步执行（带 cancel ctx）
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(run.ID, cancel)
-	go s.execute(ctx, run.ID, &app, art, deps, strat)
+	go s.execute(ctx, run.ID, &app, art, deps, strat, opts)
 
 	// 8. 立刻推 status=running
 	s.publishStatus(run.ID, RunStatusRunning)
@@ -236,7 +246,7 @@ func (s *PipelineService) Get(id uint) (PipelineRunView, error) {
 
 // --- 异步执行 ---
 
-func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Application, art *model.Artifact, deps []model.Deployment, strat strategy.Strategy) {
+func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Application, art *model.Artifact, deps []model.Deployment, strat strategy.Strategy, opts TriggerOptions) {
 	defer s.releaseLock(app.ID)
 	defer s.unregisterCancel(runID)
 
@@ -260,6 +270,7 @@ func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Ap
 
 	plan := &strategy.Plan{
 		RunID: runID, App: app, Artifact: art, Deps: deps, EnvMap: envMap,
+		BatchSize: opts.BatchSize,
 	}
 	env := strategy.Env{HostSvc: s.hostSvc, SSHOpts: s.sshOpts}
 	hooks := &runHooks{svc: s, runID: runID}
@@ -408,14 +419,20 @@ func toRunView(r *model.PipelineRun) PipelineRunView {
 	return v
 }
 
-// pickStrategy 名称 → 实例。未实现的策略一律拒绝。
-func pickStrategy(name string) (strategy.Strategy, error) {
-	switch name {
+// pickStrategy 名称 → 实例 + 参数校验。
+func pickStrategy(opts TriggerOptions) (strategy.Strategy, error) {
+	switch opts.Strategy {
 	case "single":
 		return strategy.Single{}, nil
+	case "rolling":
+		if opts.BatchSize < 1 {
+			return nil, apperr.New("BAD_REQUEST",
+				"strategy=rolling 时 batch_size 必须 >= 1", 400)
+		}
+		return strategy.Rolling{}, nil
 	default:
 		return nil, apperr.New("BAD_REQUEST",
-			fmt.Sprintf("strategy=%s 未实现（当前仅支持 single；rolling/rollback 见 Sprint 3.2/3.3）", name), 400)
+			fmt.Sprintf("strategy=%s 未实现（当前支持 single / rolling；rollback 见 Sprint 3.3）", opts.Strategy), 400)
 	}
 }
 

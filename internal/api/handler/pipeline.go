@@ -19,7 +19,7 @@ func NewPipelineHandler(svc *service.PipelineService) *PipelineHandler {
 	return &PipelineHandler{svc: svc}
 }
 
-// Deploy POST /apps/:id/deploy  body: {"artifact_id": N, "strategy": "single"}
+// Deploy POST /apps/:id/deploy  body: {"artifact_id": N, "strategy": "single|rolling", "batch_size": 2}
 func (h *PipelineHandler) Deploy(c *gin.Context) {
 	appID, ok := parseID(c)
 	if !ok {
@@ -27,7 +27,8 @@ func (h *PipelineHandler) Deploy(c *gin.Context) {
 	}
 	var body struct {
 		ArtifactID uint   `json:"artifact_id" binding:"required"`
-		Strategy   string `json:"strategy,omitempty"`
+		Strategy   string `json:"strategy,omitempty"`    // 默认 single
+		BatchSize  int    `json:"batch_size,omitempty"` // rolling 必填，>=1
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		apperr.Respond(c, apperr.Wrap(err, "BAD_REQUEST", err.Error(), http.StatusBadRequest))
@@ -39,7 +40,10 @@ func (h *PipelineHandler) Deploy(c *gin.Context) {
 			actor = s
 		}
 	}
-	out, err := h.svc.Trigger(appID, body.ArtifactID, actor, body.Strategy)
+	out, err := h.svc.Trigger(appID, body.ArtifactID, actor, service.TriggerOptions{
+		Strategy:  body.Strategy,
+		BatchSize: body.BatchSize,
+	})
 	if err != nil {
 		apperr.Respond(c, err)
 		return
