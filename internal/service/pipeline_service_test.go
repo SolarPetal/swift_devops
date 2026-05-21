@@ -3,6 +3,7 @@ package service_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	stderrors "errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -282,5 +283,66 @@ func TestTrigger_RejectUnknownStrategy(t *testing.T) {
 	}
 	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
 		t.Fatalf("应是 400 BAD_REQUEST，得：%v", err)
+	}
+}
+
+// TestCancel_NonExistent run 不存在 → ErrNotFound
+func TestCancel_NonExistent(t *testing.T) {
+	svc, _, _, _, _ := setupPipeSvc(t)
+	err := svc.Cancel(9999)
+	if err == nil {
+		t.Fatal("Cancel 不存在的 run 应报错")
+	}
+	if !stderrors.Is(err, apperr.ErrNotFound) {
+		t.Fatalf("应是 NOT_FOUND，得：%v", err)
+	}
+}
+
+// TestCancel_AlreadyFinished 已结束的 run → 409 CONFLICT
+func TestCancel_AlreadyFinished(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	appID := seedAppForPipe(t, db)
+	now := time.Now()
+	r := &model.PipelineRun{
+		AppID: appID, ArtifactID: 1, Strategy: "single",
+		Status: "success", StartedAt: &now, FinishedAt: &now,
+	}
+	if err := db.Create(r).Error; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	err := svc.Cancel(r.ID)
+	if err == nil {
+		t.Fatal("Cancel 已结束的 run 应报错")
+	}
+	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 409 {
+		t.Fatalf("应是 409 CONFLICT，得：%v", err)
+	}
+}
+
+// TestCancel_OrphanRunMarkedCancelled 进程重启后没有 cancelFn 的 running run，Cancel 兜底标 cancelled。
+func TestCancel_OrphanRunMarkedCancelled(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	appID := seedAppForPipe(t, db)
+	now := time.Now()
+	r := &model.PipelineRun{
+		AppID: appID, ArtifactID: 1, Strategy: "single",
+		Status:    "running", // 异常重启遗留
+		StartedAt: &now,
+	}
+	if err := db.Create(r).Error; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.Cancel(r.ID); err != nil {
+		t.Fatalf("Cancel orphan: %v", err)
+	}
+	var after model.PipelineRun
+	if err := db.First(&after, r.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if after.Status != "cancelled" {
+		t.Fatalf("orphan 应被标 cancelled，得 %s", after.Status)
+	}
+	if after.FinishedAt == nil {
+		t.Fatalf("orphan 应有 finished_at")
 	}
 }

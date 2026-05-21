@@ -79,3 +79,19 @@ func (h *PipelineHandler) Get(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, out)
 }
+
+// Cancel POST /pipelines/:id/cancel
+// 请求取消运行中的 pipeline。已结束的 run 返回 409。
+// 取消是异步的：本接口立刻返回 202，执行线程会在最近的阶段间隙退出，
+// 由 execute 收口把 status 落成 cancelled，并对未触达主机标 skipped。
+func (h *PipelineHandler) Cancel(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if err := h.svc.Cancel(id); err != nil {
+		apperr.Respond(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"id": id, "cancel": "requested"})
+}

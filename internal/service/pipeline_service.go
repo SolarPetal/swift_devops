@@ -36,9 +36,10 @@ const (
 
 // Pipeline run 整体状态
 const (
-	RunStatusRunning = "running"
-	RunStatusSuccess = "success"
-	RunStatusFailed  = "failed"
+	RunStatusRunning   = "running"
+	RunStatusSuccess   = "success"
+	RunStatusFailed    = "failed"
+	RunStatusCancelled = "cancelled"
 )
 
 // PipelineRunView 流水线响应视图
@@ -55,7 +56,7 @@ type PipelineRunView struct {
 	CreatedAt     string `json:"created_at"`
 }
 
-// PipelineService 流水线编排（策略派发 + 互斥 + 实时事件）
+// PipelineService 流水线编排（策略派发 + 互斥 + Cancel + 实时事件）
 type PipelineService struct {
 	db      *gorm.DB
 	hostSvc *HostService
@@ -64,7 +65,8 @@ type PipelineService struct {
 	pub     Publisher
 
 	mu            sync.Mutex
-	runningAppIDs map[uint]struct{} // 同 app 互斥
+	runningAppIDs map[uint]struct{}           // 同 app 互斥
+	cancelFns     map[uint]context.CancelFunc // runID → cancel
 }
 
 // Publisher 推送实时事件到外部（WebSocket Hub）。
@@ -96,6 +98,7 @@ func NewPipelineService(db *gorm.DB, hostSvc *HostService, artSvc *ArtifactServi
 		db: db, hostSvc: hostSvc, artSvc: artSvc,
 		sshOpts:       sshpkg.DialOptions{Timeout: sshTimeout},
 		runningAppIDs: map[uint]struct{}{},
+		cancelFns:     map[uint]context.CancelFunc{},
 	}
 }
 
@@ -166,13 +169,41 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor, strategyName st
 	// 6. 为每个 deployment 创建 host 级 pending 行
 	s.seedRunHosts(run.ID, deps)
 
-	// 7. 异步执行
-	go s.execute(context.Background(), run.ID, &app, art, deps, strat)
+	// 7. 异步执行（带 cancel ctx）
+	ctx, cancel := context.WithCancel(context.Background())
+	s.registerCancel(run.ID, cancel)
+	go s.execute(ctx, run.ID, &app, art, deps, strat)
 
 	// 8. 立刻推 status=running
 	s.publishStatus(run.ID, RunStatusRunning)
 
 	return toRunView(run), nil
+}
+
+// Cancel 请求取消一个正在跑的 run。
+//   - run 不存在 → NOT_FOUND
+//   - run 已结束（success/failed/cancelled）→ CONFLICT
+//   - cancel 触发后异步生效，立刻返回；最终 status 由 execute 收口决定
+//   - 进程重启后旧 running run 没有 cancelFn → 直接落 DB 标 cancelled 兜底
+func (s *PipelineService) Cancel(runID uint) error {
+	var r model.PipelineRun
+	if err := s.db.First(&r, runID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apperr.ErrNotFound
+		}
+		return apperr.Wrap(err, "INTERNAL", "get run", 500)
+	}
+	if r.Status != RunStatusRunning {
+		return apperr.New("CONFLICT", fmt.Sprintf("run 已结束（%s），无法取消", r.Status), 409)
+	}
+	s.mu.Lock()
+	cancel, ok := s.cancelFns[runID]
+	s.mu.Unlock()
+	if !ok {
+		return s.markCancelledOrphan(runID)
+	}
+	cancel()
+	return nil
 }
 
 // List / Get 不变
@@ -207,6 +238,7 @@ func (s *PipelineService) Get(id uint) (PipelineRunView, error) {
 
 func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Application, art *model.Artifact, deps []model.Deployment, strat strategy.Strategy) {
 	defer s.releaseLock(app.ID)
+	defer s.unregisterCancel(runID)
 
 	envMap, envErr := deploy.ParseEnvVarsJSON(app.EnvVars)
 	snap := strategy.RunSnapshot{
@@ -235,7 +267,9 @@ func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Ap
 	outcomes, steps := strat.Run(timeoutCtx, env, plan, hooks)
 	snap.Steps = steps
 
-	finalStatus := strategy.AggregateStatus(outcomes)
+	// 用户取消 vs 自然结束：看父 ctx 是不是被显式 Cancel 过
+	cancelled := errors.Is(ctx.Err(), context.Canceled)
+	finalStatus := strategy.AggregateStatus(outcomes, cancelled)
 
 	s.finishRun(runID, &snap, finalStatus)
 	s.publishStatus(runID, finalStatus)
@@ -265,6 +299,29 @@ func (s *PipelineService) releaseLock(appID uint) {
 	s.mu.Lock()
 	delete(s.runningAppIDs, appID)
 	s.mu.Unlock()
+}
+
+func (s *PipelineService) registerCancel(runID uint, cancel context.CancelFunc) {
+	s.mu.Lock()
+	s.cancelFns[runID] = cancel
+	s.mu.Unlock()
+}
+
+func (s *PipelineService) unregisterCancel(runID uint) {
+	s.mu.Lock()
+	delete(s.cancelFns, runID)
+	s.mu.Unlock()
+}
+
+// markCancelledOrphan 处理一个没有 cancelFn 的 running run（通常是进程重启后的孤儿）。
+// 直接落 DB 标 cancelled。
+func (s *PipelineService) markCancelledOrphan(runID uint) error {
+	now := time.Now()
+	return s.db.Model(&model.PipelineRun{}).Where("id = ? AND status = ?", runID, RunStatusRunning).
+		Updates(map[string]any{
+			"status":      RunStatusCancelled,
+			"finished_at": &now,
+		}).Error
 }
 
 func (s *PipelineService) finishRun(runID uint, snap *strategy.RunSnapshot, status string) {

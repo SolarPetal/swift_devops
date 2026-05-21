@@ -91,7 +91,7 @@ func TestSingle_FailFast(t *testing.T) {
 			t.Errorf("host[%d] status: %s, want skipped (fail-fast)", i, outcomes[i].Status)
 		}
 	}
-	if got := strategy.AggregateStatus(outcomes); got != "failed" {
+	if got := strategy.AggregateStatus(outcomes, false); got != "failed" {
 		t.Errorf("aggregate status: %s, want failed", got)
 	}
 	if len(hooks.deploys) != 0 {
@@ -115,6 +115,10 @@ func TestSingle_CtxDoneBeforeStart(t *testing.T) {
 			t.Errorf("host[%d] status: %s, want skipped", i, o.Status)
 		}
 	}
+	// Single 的 outcomes 无 failed + cancelled=true → cancelled
+	if got := strategy.AggregateStatus(outcomes, true); got != "cancelled" {
+		t.Errorf("aggregate: %s, want cancelled", got)
+	}
 }
 
 // 空 deps —— Run 不崩，outcomes 也空。
@@ -127,7 +131,7 @@ func TestSingle_NoDeps(t *testing.T) {
 	if len(outcomes) != 0 || len(steps) != 0 {
 		t.Errorf("expect empty, got %d outcomes / %d steps", len(outcomes), len(steps))
 	}
-	if got := strategy.AggregateStatus(outcomes); got != "success" {
+	if got := strategy.AggregateStatus(outcomes, false); got != "success" {
 		t.Errorf("aggregate of empty: %s, want success (no failures)", got)
 	}
 }
@@ -135,30 +139,35 @@ func TestSingle_NoDeps(t *testing.T) {
 // AggregateStatus 的几种组合
 func TestAggregateStatus(t *testing.T) {
 	cases := []struct {
-		name     string
-		outcomes []strategy.HostOutcome
-		want     string
+		name      string
+		outcomes  []strategy.HostOutcome
+		cancelled bool
+		want      string
 	}{
 		{"all success", []strategy.HostOutcome{
 			{Status: strategy.HostStatusSuccess},
 			{Status: strategy.HostStatusSuccess},
-		}, "success"},
+		}, false, "success"},
 		{"any failed", []strategy.HostOutcome{
 			{Status: strategy.HostStatusSuccess},
 			{Status: strategy.HostStatusFailed},
-		}, "failed"},
-		{"success + skipped → success", []strategy.HostOutcome{
+		}, false, "failed"},
+		{"success + skipped (no cancel) → success", []strategy.HostOutcome{
 			{Status: strategy.HostStatusSuccess},
 			{Status: strategy.HostStatusSkipped},
-		}, "success"},
-		{"failed + skipped → failed", []strategy.HostOutcome{
+		}, false, "success"},
+		{"success + skipped + cancelled flag → cancelled", []strategy.HostOutcome{
+			{Status: strategy.HostStatusSuccess},
+			{Status: strategy.HostStatusSkipped},
+		}, true, "cancelled"},
+		{"failed wins over cancel", []strategy.HostOutcome{
 			{Status: strategy.HostStatusFailed},
 			{Status: strategy.HostStatusSkipped},
-		}, "failed"},
+		}, true, "failed"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := strategy.AggregateStatus(c.outcomes); got != c.want {
+			if got := strategy.AggregateStatus(c.outcomes, c.cancelled); got != c.want {
 				t.Errorf("got %s, want %s", got, c.want)
 			}
 		})

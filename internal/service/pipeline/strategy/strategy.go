@@ -17,15 +17,17 @@ type Strategy interface {
 }
 
 // AggregateStatus 根据 outcomes 决定整个 run 的最终状态。
-//   - 任一 failed → failed
-//   - 否则（含全 success / success + skipped）→ success
-//
-// Sprint 3.1 起 cancelled 概念由 service 层的 Cancel 机制注入；此处只看 outcomes 本身。
-func AggregateStatus(outcomes []HostOutcome) string {
+//   - 任一 failed → failed（即使 cancelled=true，failed 优先，便于排障）
+//   - cancelled=true 且无 failed → cancelled（被用户/系统取消）
+//   - 否则 → success
+func AggregateStatus(outcomes []HostOutcome, cancelled bool) string {
 	for _, o := range outcomes {
 		if o.Status == HostStatusFailed {
 			return "failed"
 		}
+	}
+	if cancelled {
+		return "cancelled"
 	}
 	return "success"
 }
