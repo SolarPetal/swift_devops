@@ -45,6 +45,21 @@ exit 0
 EOF
 RUN chmod +x /usr/local/bin/journalctl
 
+# fake /usr/bin/java：Sprint 3.7 起 deployHost 加了 env_check 步骤会 test -x + -version
+# 真装 OpenJDK 让容器膨胀几百 MB；测试场景只需要 java 路径可执行 + 输出 -version 即可
+RUN cat > /usr/bin/java <<'EOF'
+#!/bin/sh
+case "$1" in
+  -version)
+    echo 'openjdk version "17.0.0" (fake stub for integration test)' >&2
+    exit 0
+    ;;
+esac
+echo "[fake java] would run: $@" >> /tmp/java.log
+exit 0
+EOF
+RUN chmod +x /usr/bin/java
+
 # nginx 暴露 /actuator/health，固定返回 UP，便于 health probe 通过
 # 用 heredoc 避免 printf 的转义坑
 RUN cat > /etc/nginx/sites-available/default <<'EOF'

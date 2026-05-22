@@ -15,6 +15,9 @@ type Host struct {
 	Status    string `gorm:"size:20;default:'unknown'" json:"status"`
 	Tags      string `gorm:"type:text" json:"tags"`    // JSON 数组
 	GroupTag  string `gorm:"size:20" json:"group_tag"` // blue / green
+	// JavaPath: 该主机上 java 可执行文件的绝对路径。空 = /usr/bin/java（默认）。
+	// Sprint 3.7 蓝绿/部署前 env_check 用，避免远端 java 不在 PATH 或路径不同导致 203/EXEC。
+	JavaPath  string `gorm:"size:255" json:"java_path"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -33,6 +36,9 @@ type Application struct {
 	JvmArgs        string `gorm:"type:text" json:"jvm_args"`
 	EnvVars        string `gorm:"type:text" json:"env_vars"` // JSON
 	SystemdUser    string `gorm:"size:32" json:"systemd_user"` // 空=root；非空写入 unit 的 User= 字段
+	// JavaPath: 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
+	// 适用场景：同一台主机跑多个 JDK 版本的应用（jdk8 / jdk17 等）。
+	JavaPath          string `gorm:"size:255" json:"java_path"`
 	// Sprint 4 蓝绿：nginx 配置。空 = 未启用蓝绿。
 	// NginxHostID 指向 hosts 表中跑 nginx 的主机；NginxUpstreamName 是该 nginx 中的 upstream 名。
 	// ActiveGroup 记录当前对外提供服务的组（blue/green/空）；空 = 首次部署前。

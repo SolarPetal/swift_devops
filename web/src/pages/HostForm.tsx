@@ -28,6 +28,7 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
         username: editing.username,
         group_tag: editing.group_tag,
         tags: editing.tags,
+        java_path: editing.java_path,
       })
     } else {
       form.setFieldsValue({
@@ -35,6 +36,7 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
         auth_type: 'password',
         username: 'root',
         group_tag: '',
+        java_path: '/usr/bin/java',
       })
     }
   }, [open, editing, form])
@@ -120,6 +122,19 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
             <Radio.Button value="blue">Blue</Radio.Button>
             <Radio.Button value="green">Green</Radio.Button>
           </Radio.Group>
+        </Form.Item>
+        <Form.Item
+          name="java_path"
+          label="Java 可执行路径"
+          tooltip="远端 Java 的绝对路径。部署前 env_check 会用 test -x 校验；默认 /usr/bin/java。"
+          rules={[
+            {
+              pattern: /^(\/.*)?$/,
+              message: '必须以 / 开头（绝对路径），或留空走默认',
+            },
+          ]}
+        >
+          <Input placeholder="/usr/bin/java" />
         </Form.Item>
         {isEdit && (
           <Alert

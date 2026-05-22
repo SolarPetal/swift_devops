@@ -10,6 +10,7 @@ export type Host = {
   status: 'online' | 'offline' | 'unknown'
   group_tag?: string
   tags?: string
+  java_path: string  // Sprint 3.7：远端 java 可执行路径，默认 /usr/bin/java
   has_secret: boolean
   has_host_key: boolean
   created_at: string
@@ -27,6 +28,7 @@ export type HostInput = {
   passphrase?: string
   group_tag?: string
   tags?: string
+  java_path?: string  // 留空 = /usr/bin/java
 }
 
 export type TestResult = {
@@ -53,6 +55,7 @@ export type App = {
   jvm_args: string
   env_vars: string
   systemd_user: string
+  java_path: string  // Sprint 3.7：应用级 java_path 覆盖；空 = 沿用 Host.java_path
   // Sprint 4 蓝绿配置（可选）
   nginx_host_id: number       // 0 = 未启用蓝绿
   nginx_upstream_name: string // upstream block 名，与 nginx_host_id 同填同空
@@ -108,7 +111,7 @@ export type ArtifactInput = {
 
 // --- 流水线 ---
 
-export type PipelineStage = 'dial' | 'upload' | 'write_unit' | 'restart' | 'health' | 'nginx_apply'
+export type PipelineStage = 'dial' | 'env_check' | 'upload' | 'write_unit' | 'restart' | 'health' | 'nginx_apply'
 
 export type StepResult = {
   host_id: number

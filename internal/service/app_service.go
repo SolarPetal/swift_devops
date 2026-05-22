@@ -27,6 +27,9 @@ type AppInput struct {
 	JvmArgs        string `json:"jvm_args,omitempty"`
 	EnvVars        string `json:"env_vars,omitempty"` // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
 	SystemdUser    string `json:"systemd_user,omitempty"` // 留空 = 用启动 sshd 的账号（一般 root）
+	// JavaPath 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
+	// 适用：同主机跑多 JDK 版本（jdk8 / jdk17）。
+	JavaPath string `json:"java_path,omitempty"`
 	// 蓝绿配置（Sprint 4）。三者要么全填、要么 NginxHostID=0 表示不启用蓝绿。
 	// ActiveGroup 是受运行时事实约束的字段，由蓝绿策略部署成功后写入；
 	// 但允许在创建/更新时初始化一次（如导入旧应用时声明现状）。
@@ -49,6 +52,7 @@ type AppView struct {
 	JvmArgs        string `json:"jvm_args"`
 	EnvVars        string `json:"env_vars"`
 	SystemdUser    string `json:"systemd_user"`
+	JavaPath       string `json:"java_path"`
 	NginxHostID       uint   `json:"nginx_host_id"`
 	NginxUpstreamName string `json:"nginx_upstream_name"`
 	ActiveGroup       string `json:"active_group"`
@@ -63,6 +67,7 @@ func toAppView(a *model.Application) AppView {
 		DeployPath: a.DeployPath, Port: a.Port,
 		HealthCheckURL: a.HealthCheckURL, JvmArgs: a.JvmArgs, EnvVars: a.EnvVars,
 		SystemdUser:       a.SystemdUser,
+		JavaPath:          a.JavaPath,
 		NginxHostID:       a.NginxHostID,
 		NginxUpstreamName: a.NginxUpstreamName,
 		ActiveGroup:       a.ActiveGroup,
@@ -105,6 +110,7 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 		HealthCheckURL: defaultHealthURL(in.HealthCheckURL),
 		JvmArgs:        in.JvmArgs, EnvVars: in.EnvVars,
 		SystemdUser:       strings.TrimSpace(in.SystemdUser),
+		JavaPath:          strings.TrimSpace(in.JavaPath),
 		NginxHostID:       in.NginxHostID,
 		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
 		ActiveGroup:       strings.TrimSpace(in.ActiveGroup),
@@ -161,6 +167,7 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.JvmArgs = in.JvmArgs
 	a.EnvVars = in.EnvVars
 	a.SystemdUser = strings.TrimSpace(in.SystemdUser)
+	a.JavaPath = strings.TrimSpace(in.JavaPath)
 	a.NginxHostID = in.NginxHostID
 	a.NginxUpstreamName = strings.TrimSpace(in.NginxUpstreamName)
 	a.ActiveGroup = strings.TrimSpace(in.ActiveGroup)
@@ -240,6 +247,9 @@ func validateAppInput(in AppInput) error {
 	case "", "blue", "green":
 	default:
 		return apperr.New("BAD_REQUEST", "active_group 仅允许 blue / green / 空", 400)
+	}
+	if err := validateJavaPath(in.JavaPath); err != nil {
+		return err
 	}
 	return nil
 }

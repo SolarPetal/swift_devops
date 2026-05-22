@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"swift-devops/internal/model"
@@ -70,6 +71,15 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 	dispatcher := deploy.NewDispatcher(client.SSHClient())
 	sysctl := deploy.NewSystemctl(client)
 
+	// 计算 effective java_path：app 覆盖 host，最后兜底 /usr/bin/java
+	effectiveJava := strings.TrimSpace(app.JavaPath)
+	if effectiveJava == "" {
+		effectiveJava = strings.TrimSpace(host.JavaPath)
+	}
+	if effectiveJava == "" {
+		effectiveJava = "/usr/bin/java"
+	}
+
 	spec := deploy.AppSpec{
 		AppCode:        app.AppCode,
 		DeployPath:     app.DeployPath,
@@ -78,7 +88,26 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 		HealthCheckURL: app.HealthCheckURL,
 		EnvVars:        plan.EnvMap,
 		User:           app.SystemdUser,
+		JavaPath:       effectiveJava,
 	}
+
+	// 阶段 1.5：env_check —— 部署前预检远端 Java 可用性（Sprint 3.7）
+	// 与其等到 systemctl restart 报 203/EXEC，不如在 dial 后立刻验证 java 路径正确
+	ecStart := time.Now()
+	envRes, err := client.Exec(ctx,
+		fmt.Sprintf("test -x %s && %s -version 2>&1 | head -1",
+			deploy.ShellQuote(effectiveJava), deploy.ShellQuote(effectiveJava)))
+	if err != nil {
+		return fail(StageEnvCheck, "exec env_check: "+err.Error(), ecStart, host.Name, host.IP, "")
+	}
+	if envRes.ExitCode != 0 {
+		return fail(StageEnvCheck,
+			fmt.Sprintf("远端 java 不可执行：%s（exit=%d）。请在「主机管理」修改主机的 java_path，或在「应用配置」覆盖；如未装 JDK，请先安装。\n\nstderr: %s",
+				effectiveJava, envRes.ExitCode, strings.TrimSpace(envRes.Stderr)),
+			ecStart, host.Name, host.IP, "")
+	}
+	emit(mkStepTimed(host.ID, host.Name, host.IP, StageEnvCheck, true,
+		fmt.Sprintf("%s → %s", effectiveJava, strings.TrimSpace(envRes.Stdout)), "", ecStart))
 
 	// 阶段 2：上传 jar
 	upStart := time.Now()
@@ -117,7 +146,8 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 	st, waited, waitErr := sysctl.WaitActive(ctx, spec.UnitName(), 10*time.Second)
 	if waitErr != nil {
 		dump := sysctl.StatusDump(ctx, spec.UnitName(), 200)
-		errStr := fmt.Sprintf("%s\n\n--- diagnostics ---\n%s", waitErr.Error(), dump)
+		hint := humanizeSystemdError(dump)
+		errStr := fmt.Sprintf("%s%s\n\n--- diagnostics ---\n%s", hint, waitErr.Error(), dump)
 		return fail(StageRestart, errStr, rsStart, host.Name, host.IP,
 			fmt.Sprintf("is-active=%s waited=%s", st, waited.Round(time.Millisecond)))
 	}
@@ -143,7 +173,8 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 		// Sprint 3.6：health 失败时附 status + journal，便于看到 Java 异常 / OOM / 端口冲突
 		dump := sysctl.StatusDump(ctx, spec.UnitName(), 200)
 		if dump != "" {
-			errStr = errStr + "\n\n--- diagnostics ---\n" + dump
+			hint := humanizeSystemdError(dump)
+			errStr = hint + errStr + "\n\n--- diagnostics ---\n" + dump
 		}
 		return fail(StageHealth, errStr, hStart, host.Name, host.IP, detail)
 	}
@@ -179,6 +210,40 @@ func effectivePort(dep *model.Deployment, app *model.Application) int {
 		return dep.Port
 	}
 	return app.Port
+}
+
+// humanizeSystemdError 从 systemctl status / journalctl 输出里识别常见错误码，
+// 返回友好的中文 hint（"⚠ Java 可执行文件不存在/权限不足..."），便于用户立刻定位。
+// 没命中任何已知模式时返回空串，调用方应直接展示原始 dump。
+//
+// Sprint 3.7：先支持 5 个最常见的 systemd 错误模式，覆盖 80% 部署失败场景。
+func humanizeSystemdError(dump string) string {
+	if dump == "" {
+		return ""
+	}
+	lower := strings.ToLower(dump)
+	switch {
+	case strings.Contains(dump, "status=203/EXEC"):
+		return "⚠ Java 可执行文件不存在或权限不足（systemd 203/EXEC）。请检查主机配置的 java_path，或确认远端已装 JDK。\n\n"
+	case strings.Contains(dump, "status=200/CHDIR"):
+		return "⚠ WorkingDirectory 不存在或无权访问（systemd 200/CHDIR）。请确认应用 deploy_path 在远端可写。\n\n"
+	case strings.Contains(dump, "status=200/USER"):
+		return "⚠ systemd User= 在远端不存在（200/USER）。请去掉应用的 systemd_user，或在远端创建该用户。\n\n"
+	case strings.Contains(dump, "status=200/EXEC"):
+		return "⚠ 进程启动时 exec 失败（200/EXEC）。常见原因：jar 文件损坏 / class not found。检查 jar 完整性与 JVM 参数。\n\n"
+	case strings.Contains(dump, "status=143"):
+		return "ℹ 进程收到 SIGTERM 退出（143）。一般是正常停止流程；若不是预期，检查 RestartSec 与外部信号源。\n\n"
+	case strings.Contains(lower, "killed") && strings.Contains(lower, "signal=kill"),
+		strings.Contains(dump, "status=137"),
+		strings.Contains(lower, "out of memory"),
+		strings.Contains(lower, "oom-killer"):
+		return "⚠ 进程被 OOM Killer 杀死（status=137 或 signal=KILL）。建议调大 -Xmx 或扩容主机内存。\n\n"
+	case strings.Contains(lower, "address already in use"),
+		strings.Contains(lower, "bindexception"),
+		strings.Contains(dump, "Port already in use"):
+		return "⚠ 端口已被占用。常见原因：上一进程未释放，或同主机已有别的应用占用此端口。检查 server.port 配置。\n\n"
+	}
+	return ""
 }
 
 func mkStepTimed(hostID uint, hostName, hostIP, stage string, ok bool, detail, errStr string, start time.Time) StepResult {

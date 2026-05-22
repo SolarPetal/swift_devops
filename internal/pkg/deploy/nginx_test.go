@@ -70,16 +70,16 @@ func TestRenderUpstreamConf_ValidationErrors(t *testing.T) {
 	}
 }
 
-// shQuote 把含特殊字符的路径包成 shell 单引号安全格式
-func TestShQuote(t *testing.T) {
+// ShellQuote 把含特殊字符的路径包成 shell 单引号安全格式
+func TestShellQuote(t *testing.T) {
 	cases := map[string]string{
 		"/tmp/x":           `'/tmp/x'`,
 		"/tmp/a b":         `'/tmp/a b'`,
 		"/tmp/has'apos":    `'/tmp/has'"'"'apos'`,
 	}
 	for in, want := range cases {
-		if got := shQuote(in); got != want {
-			t.Errorf("shQuote(%q)=%q, want %q", in, got, want)
+		if got := ShellQuote(in); got != want {
+			t.Errorf("ShellQuote(%q)=%q, want %q", in, got, want)
 		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 // 部署阶段名（前端按这些固定 string 渲染时序卡片）。
 const (
 	StageDial        = "dial"
+	StageEnvCheck    = "env_check" // Sprint 3.7：远端 java/路径预检
 	StageUpload      = "upload"
 	StageUnit        = "write_unit"
 	StageRestart     = "restart"

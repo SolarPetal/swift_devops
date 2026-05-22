@@ -24,6 +24,7 @@ type AppSpec struct {
 	HealthCheckURL string            // 留给 health 探针，不进 unit
 	EnvVars        map[string]string // 解析后的 env vars
 	User           string            // systemd User=，留空走默认（root）
+	JavaPath       string            // java 可执行路径，留空 → /usr/bin/java（Sprint 3.7）
 }
 
 // UnitName 单元名（不含路径）
@@ -71,7 +72,7 @@ WorkingDirectory={{.DeployPath}}
 {{- range $k, $v := .EnvVarsSorted}}
 Environment="{{$k}}={{$v}}"
 {{- end}}
-ExecStart=/usr/bin/java {{.JvmArgs}} -jar {{.JarPath}} --server.port={{.Port}}
+ExecStart={{.JavaPath}} {{.JvmArgs}} -jar {{.JarPath}} --server.port={{.Port}}
 Restart=on-failure
 RestartSec=5
 SuccessExitStatus=143
@@ -83,6 +84,7 @@ WantedBy=multi-user.target
 // RenderUnit 渲染 systemd unit 文件文本。
 //   - JvmArgs 原样拼接到 java 后；调用方需保证字符串安全
 //   - EnvVars 按 key 排序，输出稳定（便于 diff / 测试）
+//   - JavaPath 空时默认 /usr/bin/java（Sprint 3.7）
 func RenderUnit(s AppSpec) (string, error) {
 	type tmplData struct {
 		AppCode       string
@@ -91,6 +93,7 @@ func RenderUnit(s AppSpec) (string, error) {
 		Port          int
 		JarPath       string
 		User          string
+		JavaPath      string
 		EnvVarsSorted map[string]string // text/template range 按字典序遍历 map，天然稳定
 	}
 	t, err := template.New("unit").Parse(unitTmpl)
@@ -107,6 +110,10 @@ func RenderUnit(s AppSpec) (string, error) {
 	for _, k := range keys {
 		envs[k] = s.EnvVars[k]
 	}
+	javaPath := strings.TrimSpace(s.JavaPath)
+	if javaPath == "" {
+		javaPath = "/usr/bin/java"
+	}
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, tmplData{
 		AppCode:       s.AppCode,
@@ -115,6 +122,7 @@ func RenderUnit(s AppSpec) (string, error) {
 		Port:          s.Port,
 		JarPath:       s.JarPath(),
 		User:          strings.TrimSpace(s.User),
+		JavaPath:      javaPath,
 		EnvVarsSorted: envs,
 	}); err != nil {
 		return "", err

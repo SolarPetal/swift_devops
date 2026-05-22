@@ -286,6 +286,10 @@ func TestPipeline_E2E_Integration(t *testing.T) {
 	if !strings.Contains(final.StateSnapshot, `active in`) {
 		t.Errorf("restart step 应含 WaitActive 耗时：%s", final.StateSnapshot)
 	}
+	// Sprint 3.7：env_check 阶段应有一条 success step（fake /usr/bin/java -version 走通）
+	if !strings.Contains(final.StateSnapshot, `"stage":"env_check"`) {
+		t.Errorf("snapshot 应含 env_check step：%s", final.StateSnapshot)
+	}
 }
 
 // 让编译器看到 import filepath 用过（避免误删）

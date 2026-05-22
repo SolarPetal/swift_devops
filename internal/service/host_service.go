@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -29,23 +30,27 @@ type HostInput struct {
 	Passphrase string `json:"passphrase,omitempty"`
 	GroupTag   string `json:"group_tag,omitempty"`
 	Tags       string `json:"tags,omitempty"`
+	// JavaPath 该主机 java 可执行文件绝对路径。Sprint 3.7 起。
+	// 留空 = 后端写库时默认 "/usr/bin/java"；非空必须以 / 开头（绝对路径）。
+	JavaPath string `json:"java_path,omitempty"`
 }
 
 // HostView 主机响应，不含敏感字段
 type HostView struct {
-	ID        uint   `json:"id"`
-	Name      string `json:"name"`
-	IP        string `json:"ip"`
-	Port      int    `json:"port"`
-	AuthType  string `json:"auth_type"`
-	Username  string `json:"username"`
-	Status    string `json:"status"`
-	GroupTag  string `json:"group_tag"`
-	Tags      string `json:"tags"`
-	HasSecret bool   `json:"has_secret"`
-	HasHostKey bool  `json:"has_host_key"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID         uint   `json:"id"`
+	Name       string `json:"name"`
+	IP         string `json:"ip"`
+	Port       int    `json:"port"`
+	AuthType   string `json:"auth_type"`
+	Username   string `json:"username"`
+	Status     string `json:"status"`
+	GroupTag   string `json:"group_tag"`
+	Tags       string `json:"tags"`
+	JavaPath   string `json:"java_path"`
+	HasSecret  bool   `json:"has_secret"`
+	HasHostKey bool   `json:"has_host_key"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 func toView(h *model.Host) HostView {
@@ -53,6 +58,7 @@ func toView(h *model.Host) HostView {
 		ID: h.ID, Name: h.Name, IP: h.IP, Port: h.Port,
 		AuthType: h.AuthType, Username: h.Username,
 		Status: h.Status, GroupTag: h.GroupTag, Tags: h.Tags,
+		JavaPath:   h.JavaPath,
 		HasSecret:  h.Secret != "",
 		HasHostKey: h.HostKey != "",
 		CreatedAt:  h.CreatedAt.Format(time.RFC3339),
@@ -92,7 +98,8 @@ func (s *HostService) Create(in HostInput) (HostView, error) {
 		Name: in.Name, IP: in.IP, Port: in.Port,
 		AuthType: in.AuthType, Username: in.Username,
 		Secret: sec, GroupTag: in.GroupTag, Tags: in.Tags,
-		Status: "unknown",
+		JavaPath: defaultJavaPath(in.JavaPath),
+		Status:   "unknown",
 	}
 	if err := s.db.Create(h).Error; err != nil {
 		return HostView{}, apperr.Wrap(err, "INTERNAL", "create host", 500)
@@ -125,6 +132,9 @@ func (s *HostService) Get(id uint) (HostView, error) {
 // Update 更新主机。Password / PrivateKey 字段为空时保留原值。
 func (s *HostService) Update(id uint, in HostInput) (HostView, error) {
 	// 注意：Update 不要求凭证非空（保留旧值）；AuthType 由 handler 的 binding tag 校验
+	if err := validateJavaPath(in.JavaPath); err != nil {
+		return HostView{}, err
+	}
 	h, err := s.findByID(id)
 	if err != nil {
 		return HostView{}, err
@@ -138,6 +148,7 @@ func (s *HostService) Update(id uint, in HostInput) (HostView, error) {
 	h.Username = in.Username
 	h.GroupTag = in.GroupTag
 	h.Tags = in.Tags
+	h.JavaPath = defaultJavaPath(in.JavaPath)
 	if in.Password != "" || in.PrivateKey != "" {
 		sec, encErr := s.encryptSecret(in)
 		if encErr != nil {
@@ -268,7 +279,32 @@ func validateHostInput(in HostInput) error {
 	if in.AuthType == "key" && in.PrivateKey == "" {
 		return apperr.New("BAD_REQUEST", "auth_type=key 时 private_key 必填", 400)
 	}
+	if err := validateJavaPath(in.JavaPath); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateJavaPath 共用校验：空允许，非空必须绝对路径
+func validateJavaPath(p string) error {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return nil
+	}
+	if !strings.HasPrefix(p, "/") {
+		return apperr.New("BAD_REQUEST",
+			"java_path 必须是绝对路径（以 / 开头），如 /usr/bin/java 或 /opt/java-17/bin/java", 400)
+	}
+	return nil
+}
+
+// defaultJavaPath 写库时把空值填成 /usr/bin/java（兜底），非空保持原样。
+func defaultJavaPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "/usr/bin/java"
+	}
+	return p
 }
 
 func (s *HostService) encryptSecret(in HostInput) (string, error) {

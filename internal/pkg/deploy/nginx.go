@@ -99,7 +99,7 @@ func (a *NginxApplier) Apply(ctx context.Context, u NginxUpstream) error {
 
 	// 1. 备份老 conf。`test -f && cp; true` 模式：文件不存在时退到 true，整体 exit 0
 	if _, err := a.client.Exec(ctx,
-		fmt.Sprintf("test -f %s && cp -af %s %s; true", shQuote(path), shQuote(path), shQuote(bak))); err != nil {
+		fmt.Sprintf("test -f %s && cp -af %s %s; true", ShellQuote(path), ShellQuote(path), ShellQuote(bak))); err != nil {
 		return fmt.Errorf("backup old conf: %w", err)
 	}
 
@@ -135,16 +135,16 @@ func (a *NginxApplier) Apply(ctx context.Context, u NginxUpstream) error {
 // rollback 回滚到 .bak。alsoReload=true 时回滚后再 reload 一次让 nginx 恢复服务。
 // 回滚错误只 log（已经在错误返回链上了，不二次包装）。
 func (a *NginxApplier) rollback(ctx context.Context, path, bak string, alsoReload bool) {
-	cmd := fmt.Sprintf("test -f %s && cp -af %s %s; true", shQuote(bak), shQuote(bak), shQuote(path))
+	cmd := fmt.Sprintf("test -f %s && cp -af %s %s; true", ShellQuote(bak), ShellQuote(bak), ShellQuote(path))
 	if alsoReload {
 		cmd += "; nginx -s reload; true"
 	}
 	_, _ = a.client.Exec(ctx, cmd)
 }
 
-// shQuote 把路径包成 shell 单引号安全格式。
-// 路径里含单引号时用 '"'"' 拼接 —— 本场景路径由 app_code 拼出（appCodeRE 已禁止单引号），
-// 但加这一层防御不亏。
-func shQuote(s string) string {
+// ShellQuote 把路径包成 shell 单引号安全格式。
+// 路径里含单引号时用 '"'"' 拼接 —— 调用方传的路径一般经过 regex 限制（无单引号），
+// 但加这一层防御不亏；strategy 包也复用此函数做 env_check 时的路径转义。
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }

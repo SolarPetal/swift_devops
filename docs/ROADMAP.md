@@ -133,6 +133,7 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [x] 3.4 前端 PipelineDashboard 升级（Deploy Modal 加 strategy + batch_size；Rollback 按钮 + 二次确认；Drawer 内 Cancel 按钮）
 - [x] 3.5 rolling 双容器集成测（startContainers helper + TestRolling_E2E_Integration，4s 端到端通过）
 - [x] 3.6 部署可观测性补强（restart 后加 WaitActive 10s + restart/health 失败时附 systemctl status + journalctl -n 200）
+- [x] 3.7 环境前置 + 错误翻译（Host/App 加 java_path + dial 后加 env_check 阶段 + restart/health 失败时识别 203/EXEC / 200/CHDIR / 200/USER / OOM / 端口冲突等翻译成中文 hint）
 
 ### Sprint 4 · 蓝绿 + Nginx（约 1 周）
 - [x] 4.1 Application 加 nginx_host_id / nginx_upstream_name / active_group + 校验（同填同空 + 名风格 + 仅 blue/green）

@@ -78,6 +78,11 @@ export default function AppDetail() {
               : <Typography.Text type="secondary">（沿用 SSH 账号）</Typography.Text>}
           </Descriptions.Item>
           <Descriptions.Item label="JVM 参数"><code>{app.jvm_args || '-'}</code></Descriptions.Item>
+          <Descriptions.Item label="Java 路径覆盖">
+            {app.java_path
+              ? <code>{app.java_path}</code>
+              : <Typography.Text type="secondary">（沿用主机 java_path）</Typography.Text>}
+          </Descriptions.Item>
           <Descriptions.Item label="环境变量" span={2}><code>{app.env_vars || '-'}</code></Descriptions.Item>
           <Descriptions.Item label="蓝绿 nginx" span={2}>
             {app.nginx_host_id && app.nginx_host_id > 0 ? (
@@ -541,6 +546,7 @@ function PipelineTab({ app }: { app: App }) {
 
 const stageLabel: Record<PipelineStage, string> = {
   dial: 'SSH 拨号',
+  env_check: '远端环境预检',
   upload: '上传 jar',
   write_unit: '写 systemd unit',
   restart: 'systemctl restart',

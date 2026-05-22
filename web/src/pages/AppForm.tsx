@@ -35,6 +35,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         jvm_args: editing.jvm_args,
         env_vars: editing.env_vars,
         systemd_user: editing.systemd_user,
+        java_path: editing.java_path,
         nginx_host_id: editing.nginx_host_id || 0,
         nginx_upstream_name: editing.nginx_upstream_name,
         active_group: editing.active_group,
@@ -45,6 +46,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         port: 8080,
         health_check_url: '/actuator/health',
         jvm_args: '-Xms512m -Xmx512m',
+        java_path: '',
         nginx_host_id: 0,
         nginx_upstream_name: '',
         active_group: '',
@@ -135,6 +137,19 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
           ]}
         >
           <Input placeholder="留空 = 用 SSH 账号；如：deployer / java" />
+        </Form.Item>
+        <Form.Item
+          name="java_path"
+          label="Java 路径覆盖（可选）"
+          tooltip="留空 = 沿用主机的 java_path。仅当同台主机要跑不同 JDK 版本的应用时填写。"
+          rules={[
+            {
+              pattern: /^(\/.*)?$/,
+              message: '必须以 / 开头（绝对路径），或留空走主机默认',
+            },
+          ]}
+        >
+          <Input placeholder="留空沿用主机配置；或填 /opt/java-17/bin/java" />
         </Form.Item>
         <Form.Item
           name="env_vars"
