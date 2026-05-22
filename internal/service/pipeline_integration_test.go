@@ -282,6 +282,10 @@ func TestPipeline_E2E_Integration(t *testing.T) {
 		!strings.Contains(final.StateSnapshot, `"ok":true`) {
 		t.Errorf("snapshot 不完整：%s", final.StateSnapshot)
 	}
+	// Sprint 3.6：restart step 应附 "active in" 字样（WaitActive 等到 fake systemctl 报 active）
+	if !strings.Contains(final.StateSnapshot, `active in`) {
+		t.Errorf("restart step 应含 WaitActive 耗时：%s", final.StateSnapshot)
+	}
 }
 
 // 让编译器看到 import filepath 用过（避免误删）

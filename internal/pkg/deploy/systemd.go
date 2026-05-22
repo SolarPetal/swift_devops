@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 
 	sshpkg "swift-devops/internal/pkg/ssh"
 )
@@ -161,6 +162,82 @@ func (s *Systemctl) IsActive(ctx context.Context, unitName string) (string, erro
 	}
 	// is-active 返回非 0 但不是 ssh 层错误，调用方按 Stdout 决断
 	return strings.TrimSpace(res.Stdout), nil
+}
+
+// WaitActive 轮询 systemctl is-active 直到状态稳定或超时。
+//   - 每 500ms 探一次
+//   - 命中 "active" → 返回 nil + 总耗时
+//   - 命中 "failed" / "inactive" → 立即返回 error（不等超时，让上层尽早诊断）
+//   - 期间状态 "activating" → 继续等
+//   - 超时 → 返回 error 含最后一次状态
+//
+// Sprint 3.6：systemd Type=simple + Restart=on-failure 时，systemctl restart 是
+// 异步的 —— 必须主动等才能区分"启动成功"和"立刻 crash"。
+func (s *Systemctl) WaitActive(ctx context.Context, unitName string, timeout time.Duration) (string, time.Duration, error) {
+	start := time.Now()
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+
+	last := "unknown"
+	deadline := start.Add(timeout)
+	for {
+		// is-active 立刻探一次（首次不等 tick）
+		st, _ := s.IsActive(ctx, unitName)
+		last = st
+		switch st {
+		case "active":
+			return st, time.Since(start), nil
+		case "failed", "inactive":
+			return st, time.Since(start), fmt.Errorf("unit %s is %s after %s", unitName, st, time.Since(start).Round(time.Millisecond))
+		}
+		// activating / unknown / 临时空 → 继续等
+		if time.Now().After(deadline) {
+			return last, time.Since(start), fmt.Errorf("unit %s still %q after %s timeout", unitName, last, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return last, time.Since(start), ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+// StatusDump 拼装一份失败诊断信息：systemctl status 摘要 + journalctl 末尾 N 行。
+// 用于 step.error / step.detail，让前端 Drawer 直接看到 Java 栈和 systemd 错误。
+// 任一子命令失败时仍把可获取的部分返回（不阻塞主流程）。
+func (s *Systemctl) StatusDump(ctx context.Context, unitName string, journalLines int) string {
+	if journalLines <= 0 {
+		journalLines = 200
+	}
+	var b strings.Builder
+
+	// 1. systemctl status —— 短摘要 + Active: 行
+	statusCmd := fmt.Sprintf("systemctl status %s --no-pager -l --lines=0", unitName)
+	if res, err := s.client.Exec(ctx, statusCmd); err == nil {
+		b.WriteString("=== systemctl status ===\n")
+		b.WriteString(strings.TrimSpace(res.Stdout))
+		if strings.TrimSpace(res.Stderr) != "" {
+			b.WriteString("\n[stderr] ")
+			b.WriteString(strings.TrimSpace(res.Stderr))
+		}
+		b.WriteString("\n")
+	}
+
+	// 2. journalctl —— 应用日志末尾 N 行
+	// --no-pager 防止挂死；-n 限制行数；-o cat 去掉时间前缀让输出更紧凑
+	journalCmd := fmt.Sprintf("journalctl -u %s --no-pager -n %d -o cat 2>&1 || true",
+		unitName, journalLines)
+	if res, err := s.client.Exec(ctx, journalCmd); err == nil {
+		b.WriteString("\n=== journalctl -u ")
+		b.WriteString(unitName)
+		b.WriteString(" (last ")
+		fmt.Fprintf(&b, "%d", journalLines)
+		b.WriteString(" lines) ===\n")
+		b.WriteString(strings.TrimSpace(res.Stdout))
+		b.WriteString("\n")
+	}
+
+	return strings.TrimSpace(b.String())
 }
 
 func (s *Systemctl) run(ctx context.Context, cmd string) error {

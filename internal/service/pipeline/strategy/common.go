@@ -105,7 +105,7 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 	}
 	emit(mkStepTimed(host.ID, host.Name, host.IP, StageUnit, true, spec.UnitPath(), "", unitStart))
 
-	// 阶段 4：daemon-reload + restart
+	// 阶段 4：daemon-reload + restart + WaitActive（Sprint 3.6）
 	rsStart := time.Now()
 	if err := sysctl.DaemonReload(ctx); err != nil {
 		return fail(StageRestart, "daemon-reload: "+err.Error(), rsStart, host.Name, host.IP, "")
@@ -113,7 +113,16 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 	if err := sysctl.EnableAndRestart(ctx, spec.UnitName()); err != nil {
 		return fail(StageRestart, err.Error(), rsStart, host.Name, host.IP, "")
 	}
-	emit(mkStepTimed(host.ID, host.Name, host.IP, StageRestart, true, spec.UnitName(), "", rsStart))
+	// systemctl restart 是异步的，主动等 10s 内进入 active —— 否则立刻拉 status + journal
+	st, waited, waitErr := sysctl.WaitActive(ctx, spec.UnitName(), 10*time.Second)
+	if waitErr != nil {
+		dump := sysctl.StatusDump(ctx, spec.UnitName(), 200)
+		errStr := fmt.Sprintf("%s\n\n--- diagnostics ---\n%s", waitErr.Error(), dump)
+		return fail(StageRestart, errStr, rsStart, host.Name, host.IP,
+			fmt.Sprintf("is-active=%s waited=%s", st, waited.Round(time.Millisecond)))
+	}
+	emit(mkStepTimed(host.ID, host.Name, host.IP, StageRestart, true,
+		fmt.Sprintf("%s active in %s", spec.UnitName(), waited.Round(time.Millisecond)), "", rsStart))
 
 	// 阶段 5：health probe
 	hStart := time.Now()
@@ -130,6 +139,11 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 		errStr := res.LastError
 		if errStr == "" {
 			errStr = "probe failed"
+		}
+		// Sprint 3.6：health 失败时附 status + journal，便于看到 Java 异常 / OOM / 端口冲突
+		dump := sysctl.StatusDump(ctx, spec.UnitName(), 200)
+		if dump != "" {
+			errStr = errStr + "\n\n--- diagnostics ---\n" + dump
 		}
 		return fail(StageHealth, errStr, hStart, host.Name, host.IP, detail)
 	}

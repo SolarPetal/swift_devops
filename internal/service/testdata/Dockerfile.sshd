@@ -15,10 +15,35 @@ RUN apt-get update \
     && sed -i 's/^UsePAM .*/UsePAM no/' /etc/ssh/sshd_config \
     && ssh-keygen -A
 
-# fake systemctl：始终 exit 0，把命令回显到 /tmp/systemctl.log，便于断言
-RUN printf '%s\n' '#!/bin/sh' 'echo "[fake systemctl] $@" >> /tmp/systemctl.log' 'exit 0' \
-        > /usr/local/bin/systemctl \
-    && chmod +x /usr/local/bin/systemctl
+# fake systemctl：记录命令到日志，并对常用子命令返回合理的"测试用"输出。
+# Sprint 3.6 起 deployHost 用 is-active / status，需要 stub 配合走通。
+RUN cat > /usr/local/bin/systemctl <<'EOF'
+#!/bin/sh
+echo "[fake systemctl] $@" >> /tmp/systemctl.log
+case "$1" in
+  is-active)
+    # 假装 unit 永远 active —— 集成测关心流程走到，不真模拟 systemd
+    echo "active"
+    ;;
+  status)
+    unit="${2:-fake.service}"
+    echo "● $unit - fake systemd unit"
+    echo "   Loaded: loaded (test stub)"
+    echo "   Active: active (running)"
+    ;;
+esac
+exit 0
+EOF
+RUN chmod +x /usr/local/bin/systemctl
+
+# fake journalctl：deployHost 的 StatusDump 会调它，没有就 command not found
+RUN cat > /usr/local/bin/journalctl <<'EOF'
+#!/bin/sh
+echo "[fake journalctl] $@" >> /tmp/journalctl.log
+echo "(fake journalctl: no real journald in this test container)"
+exit 0
+EOF
+RUN chmod +x /usr/local/bin/journalctl
 
 # nginx 暴露 /actuator/health，固定返回 UP，便于 health probe 通过
 # 用 heredoc 避免 printf 的转义坑
