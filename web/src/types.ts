@@ -53,6 +53,10 @@ export type App = {
   jvm_args: string
   env_vars: string
   systemd_user: string
+  // Sprint 4 蓝绿配置（可选）
+  nginx_host_id: number       // 0 = 未启用蓝绿
+  nginx_upstream_name: string // upstream block 名，与 nginx_host_id 同填同空
+  active_group: string        // 'blue' | 'green' | ''；蓝绿部署成功后由后端写入
   created_at: string
   updated_at: string
 }
@@ -104,7 +108,7 @@ export type ArtifactInput = {
 
 // --- 流水线 ---
 
-export type PipelineStage = 'dial' | 'upload' | 'write_unit' | 'restart' | 'health'
+export type PipelineStage = 'dial' | 'upload' | 'write_unit' | 'restart' | 'health' | 'nginx_apply'
 
 export type StepResult = {
   host_id: number

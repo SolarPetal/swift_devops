@@ -79,6 +79,21 @@ export default function AppDetail() {
           </Descriptions.Item>
           <Descriptions.Item label="JVM 参数"><code>{app.jvm_args || '-'}</code></Descriptions.Item>
           <Descriptions.Item label="环境变量" span={2}><code>{app.env_vars || '-'}</code></Descriptions.Item>
+          <Descriptions.Item label="蓝绿 nginx" span={2}>
+            {app.nginx_host_id && app.nginx_host_id > 0 ? (
+              <>
+                <Tag color="cyan">已启用</Tag>{' '}
+                host_id=<code>{app.nginx_host_id}</code>{' / upstream='}
+                <code>{app.nginx_upstream_name}</code>
+                {' / 活跃组='}
+                {app.active_group === 'blue' && <Tag color="blue">Blue</Tag>}
+                {app.active_group === 'green' && <Tag color="green">Green</Tag>}
+                {!app.active_group && <Typography.Text type="secondary">（未部署过）</Typography.Text>}
+              </>
+            ) : (
+              <Typography.Text type="secondary">（未启用蓝绿）</Typography.Text>
+            )}
+          </Descriptions.Item>
         </Descriptions>
       </Card>
 
@@ -398,10 +413,13 @@ function PipelineTab({ app }: { app: App }) {
   const handleDeploy = async () => {
     try {
       const v = await form.validateFields()
-      const strategy = (v.strategy ?? 'single') as 'single' | 'rolling'
+      const strategy = (v.strategy ?? 'single') as 'single' | 'rolling' | 'blue_green'
       const batchSize = strategy === 'rolling' ? Number(v.batch_size ?? 1) : undefined
       const run = await deployApp(app.id, v.artifact_id, strategy, batchSize)
-      message.success(`已触发：#${run.id}（${strategy}${batchSize ? `, batch=${batchSize}` : ''}）`)
+      const detail =
+        strategy === 'rolling' ? `, batch=${batchSize}` :
+        strategy === 'blue_green' ? `（目标组由后端自动选）` : ''
+      message.success(`已触发：#${run.id}（${strategy}${detail}）`)
       setOpen(false); setDrawerRun(run); refresh()
     } catch (e) {
       if ((e as any)?.errorFields) return
@@ -476,8 +494,9 @@ function PipelineTab({ app }: { app: App }) {
           <Form.Item name="strategy" label="部署策略" rules={[{ required: true }]}>
             <Select
               options={[
-                { value: 'single',  label: 'single（顺序逐台、任一失败立刻停止）' },
-                { value: 'rolling', label: 'rolling（分批并行、批级 fail-fast）' },
+                { value: 'single',     label: 'single（顺序逐台、任一失败立刻停止）' },
+                { value: 'rolling',    label: 'rolling（分批并行、批级 fail-fast）' },
+                { value: 'blue_green', label: 'blue_green（双组并存、切流到非活跃组；需先在应用配 nginx）' },
               ]}
             />
           </Form.Item>
@@ -485,17 +504,31 @@ function PipelineTab({ app }: { app: App }) {
             noStyle
             shouldUpdate={(prev, cur) => prev.strategy !== cur.strategy}
           >
-            {({ getFieldValue }) =>
-              getFieldValue('strategy') === 'rolling' ? (
-                <Form.Item
-                  name="batch_size"
-                  label="批大小（每批同时部署的主机数）"
-                  rules={[{ required: true, message: 'rolling 必须指定 batch_size' }]}
-                >
-                  <InputNumber min={1} max={50} style={{ width: 200 }} placeholder="2" />
-                </Form.Item>
-              ) : null
-            }
+            {({ getFieldValue }) => {
+              const strategy = getFieldValue('strategy')
+              if (strategy === 'rolling') {
+                return (
+                  <Form.Item
+                    name="batch_size"
+                    label="批大小（每批同时部署的主机数）"
+                    rules={[{ required: true, message: 'rolling 必须指定 batch_size' }]}
+                  >
+                    <InputNumber min={1} max={50} style={{ width: 200 }} placeholder="2" />
+                  </Form.Item>
+                )
+              }
+              if (strategy === 'blue_green') {
+                const activeText = app.active_group
+                  ? `当前活跃 ${app.active_group}，本次将部署到 ${app.active_group === 'blue' ? 'green' : 'blue'} 组`
+                  : '首次蓝绿部署：将默认部署到 blue 组'
+                return (
+                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+                    📘 {activeText}；目标组主机部署完成后会重写 nginx upstream 切流。
+                  </Typography.Text>
+                )
+              }
+              return null
+            }}
           </Form.Item>
         </Form>
       </Modal>
@@ -512,6 +545,7 @@ const stageLabel: Record<PipelineStage, string> = {
   write_unit: '写 systemd unit',
   restart: 'systemctl restart',
   health: '健康探针',
+  nginx_apply: 'Nginx 切流',
 }
 
 function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClose: () => void }) {

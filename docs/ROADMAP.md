@@ -137,7 +137,7 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [x] 4.1 Application 加 nginx_host_id / nginx_upstream_name / active_group + 校验（同填同空 + 名风格 + 仅 blue/green）
 - [x] 4.2 `pkg/deploy/nginx.go` upstream 模板 + scp 覆盖 + `nginx -s reload`（NginxApplier 含 .bak 备份 + -t 预检 + 失败回滚；RenderUpstreamConf 单测全绿）
 - [x] 4.3 `strategy/bluegreen.go`：自动选目标组 + 组内 single 顺序 + nginx 切换 hook + service 接入 + handler/router
-- [ ] 4.4 前端：App 表单加 nginx 字段；部署 Modal 加 blue_green 选项；详情显示当前活跃组
+- [x] 4.4 前端：AppForm 加 nginx 三字段（Host Select + upstream Input + active_group Radio）；Deploy Modal 加 blue_green 选项（动态提示目标组）；AppDetail 应用信息卡片展示蓝绿状态；stageLabel 加 nginx_apply
 - [ ] 4.5 双 sshd + nginx 容器集成测（可选，参考 Sprint 3.5 startContainers）
 
 ### Sprint 5 · Docker 构建（约 1 周）

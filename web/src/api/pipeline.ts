@@ -16,10 +16,12 @@ export async function getPipeline(id: number): Promise<PipelineRun> {
 // deployApp 触发部署。
 //   - strategy='single'（默认）：顺序逐台、fail-fast
 //   - strategy='rolling'：分批并行，batchSize 必传 >=1
+//   - strategy='blue_green'：后端按 active_group 自动选目标组（active→opposite，空→blue）
+//     需要 App 已配 nginx_host_id + nginx_upstream_name；前端不必传 target_group
 export async function deployApp(
   appId: number,
   artifactId: number,
-  strategy: 'single' | 'rolling' = 'single',
+  strategy: 'single' | 'rolling' | 'blue_green' = 'single',
   batchSize?: number,
 ): Promise<PipelineRun> {
   const body: Record<string, unknown> = {
