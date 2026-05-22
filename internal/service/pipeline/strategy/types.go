@@ -6,6 +6,7 @@
 package strategy
 
 import (
+	"context"
 	"time"
 
 	"swift-devops/internal/model"
@@ -14,11 +15,12 @@ import (
 
 // 部署阶段名（前端按这些固定 string 渲染时序卡片）。
 const (
-	StageDial    = "dial"
-	StageUpload  = "upload"
-	StageUnit    = "write_unit"
-	StageRestart = "restart"
-	StageHealth  = "health"
+	StageDial        = "dial"
+	StageUpload      = "upload"
+	StageUnit        = "write_unit"
+	StageRestart     = "restart"
+	StageHealth      = "health"
+	StageNginxApply  = "nginx_apply" // 蓝绿专用：upstream 切流 + nginx -s reload
 )
 
 // Host 级状态机：与 model.PipelineRunHost.Status 字段一一对应。
@@ -71,11 +73,14 @@ type HostOutcome struct {
 type Plan struct {
 	RunID           uint
 	App             *model.Application
-	Artifact        *model.Artifact            // forward 模式（single/rolling）的统一新版本；rollback 不用
+	Artifact        *model.Artifact            // forward 模式（single/rolling/blue_green）的统一新版本；rollback 不用
 	ArtifactByDepID map[uint]*model.Artifact // rollback 用：每个 deployment 的 previous_artifact_id 对应的 art
 	Deps            []model.Deployment        // 已按 ID ASC 排好序
 	EnvMap          map[string]string         // 已解析的 env vars
 	BatchSize       int                       // rolling 专用；single/rollback 忽略；0/1 退化为单批
+	// 蓝绿专用（Sprint 4.3）：
+	TargetGroup string                                  // blue / green —— BlueGreen 部署到这个组
+	NginxApply  func(ctx context.Context) error // 切流闭包：service 层注入，BlueGreen 在全 success 后调用一次
 }
 
 // HostLoader 从主机 ID 还原拨号参数（隔离对 HostService 的依赖，便于 mock）。
@@ -99,4 +104,7 @@ type Hooks interface {
 	OnHostStatus(deploymentID, hostID uint, status, currentStage, errMsg string)
 	// OnDeploymentSuccess 单台主机部署成功，更新 deployment 表的制品指针。
 	OnDeploymentSuccess(dep *model.Deployment, newArtifactID uint)
+	// OnGroupSwitched 蓝绿专用：目标组切流成功后，由策略调用一次，
+	// service 实现里更新 App.ActiveGroup。
+	OnGroupSwitched(group string)
 }

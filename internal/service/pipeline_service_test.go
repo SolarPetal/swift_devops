@@ -403,3 +403,64 @@ func TestRollback_NoPreviousArtifact(t *testing.T) {
 		t.Fatalf("应是 400：%v", err)
 	}
 }
+
+// TestTrigger_BlueGreen_RequiresNginxConfig App 没配 nginx → 400
+func TestTrigger_BlueGreen_RequiresNginxConfig(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	appID := seedAppForPipe(t, db) // 默认 NginxHostID=0
+	dep := &model.Deployment{AppID: appID, HostID: 1, GroupTag: "blue", Status: "running"}
+	if err := db.Create(dep).Error; err != nil {
+		t.Fatalf("create dep: %v", err)
+	}
+	art := &model.Artifact{
+		AppID: appID, VersionTag: "vBG-1", FileName: "x.jar",
+		FilePath: "/tmp/x.jar", FileMD5: "abc", FileSize: 1, BuildStatus: "success",
+	}
+	if err := db.Create(art).Error; err != nil {
+		t.Fatalf("create art: %v", err)
+	}
+
+	_, err := svc.Trigger(appID, art.ID, "tester", service.TriggerOptions{Strategy: "blue_green"})
+	if err == nil {
+		t.Fatal("App 未配 nginx 应拒")
+	}
+	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
+		t.Fatalf("应是 400：%v", err)
+	}
+}
+
+// TestTrigger_BlueGreen_TargetGroupEmpty App 配了 nginx 但目标组没主机 → 400
+func TestTrigger_BlueGreen_TargetGroupEmpty(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	app := &model.Application{
+		AppCode: "demo-bg", Name: "Demo BG", DeployPath: "/opt/bg", Port: 8080,
+		HealthCheckURL: "/actuator/health",
+		NginxHostID:    1, NginxUpstreamName: "demo-up", ActiveGroup: "blue",
+	}
+	if err := db.Create(app).Error; err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	// 只有 blue 组主机（active=blue → target=green，green 组无主机）
+	dep := &model.Deployment{AppID: app.ID, HostID: 2, GroupTag: "blue", Status: "running"}
+	if err := db.Create(dep).Error; err != nil {
+		t.Fatalf("create dep: %v", err)
+	}
+	art := &model.Artifact{
+		AppID: app.ID, VersionTag: "vBG", FileName: "x.jar",
+		FilePath: "/tmp/x.jar", FileMD5: "abc", BuildStatus: "success",
+	}
+	if err := db.Create(art).Error; err != nil {
+		t.Fatalf("create art: %v", err)
+	}
+
+	_, err := svc.Trigger(app.ID, art.ID, "tester", service.TriggerOptions{Strategy: "blue_green"})
+	if err == nil {
+		t.Fatal("目标组无主机应拒")
+	}
+	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
+		t.Fatalf("应是 400：%v", err)
+	}
+	if !strings.Contains(err.Error(), "green") {
+		t.Errorf("错误信息应提到目标组 green：%v", err)
+	}
+}

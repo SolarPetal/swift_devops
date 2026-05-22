@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -192,6 +193,20 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts Tri
 		RunID: run.ID, App: &app, Artifact: art, Deps: deps, EnvMap: envMap,
 		BatchSize: opts.BatchSize,
 	}
+
+	// 蓝绿专属：自动选目标组 + 注入 NginxApply 闭包
+	if opts.Strategy == "blue_green" {
+		if err := s.injectBlueGreenPlan(&app, plan); err != nil {
+			s.releaseLock(appID)
+			// 标记 run 为 failed（已落库）；不写 snapshot 避免误导前端
+			now := time.Now()
+			_ = s.db.Model(&model.PipelineRun{}).Where("id = ?", run.ID).Updates(map[string]any{
+				"status": RunStatusFailed, "finished_at": &now,
+			}).Error
+			return PipelineRunView{}, err
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(run.ID, cancel)
 	go s.execute(ctx, run.ID, &app, plan, strat)
@@ -514,7 +529,84 @@ func toRunView(r *model.PipelineRun) PipelineRunView {
 	return v
 }
 
-// pickStrategy 名称 → 实例 + 参数校验。
+// injectBlueGreenPlan 在 Trigger 内部为 blue_green 策略组装 plan：
+//   - 校验 App 已配 NginxHostID + NginxUpstreamName
+//   - 自动选目标组：active="blue" → target="green"，反之亦然，空 → "blue"（首次部署）
+//   - 预查目标组每台主机的 IP:Port（effectivePort），组装成 NginxBackend 列表
+//   - 组装 NginxApply 闭包（dial nginx host → NewNginxApplier → Apply）
+//
+// 返回 *apperr.Error；调用方在错误时已 releaseLock + 收口 run。
+func (s *PipelineService) injectBlueGreenPlan(app *model.Application, plan *strategy.Plan) error {
+	if app.NginxHostID == 0 || strings.TrimSpace(app.NginxUpstreamName) == "" {
+		return apperr.New("BAD_REQUEST",
+			"应用未配置 nginx_host_id / nginx_upstream_name，无法蓝绿部署", 400)
+	}
+	target := pickTargetGroup(app.ActiveGroup)
+	plan.TargetGroup = target
+
+	// 预查目标组主机 IP / effective port，用于 NginxApply 闭包
+	type hostRow struct {
+		ID   uint
+		IP   string
+		Port int
+	}
+	var rows []hostRow
+	for i := range plan.Deps {
+		d := &plan.Deps[i]
+		if d.GroupTag != target {
+			continue
+		}
+		var h model.Host
+		if err := s.db.Select("id", "ip").First(&h, d.HostID).Error; err != nil {
+			return apperr.Wrap(err, "INTERNAL", "lookup host for blue_green", 500)
+		}
+		port := d.Port
+		if port == 0 {
+			port = app.Port
+		}
+		rows = append(rows, hostRow{ID: h.ID, IP: h.IP, Port: port})
+	}
+	if len(rows) == 0 {
+		return apperr.New("BAD_REQUEST",
+			fmt.Sprintf("目标组 %q 没有绑定主机；请先在主机绑定页给目标组添加主机", target), 400)
+	}
+
+	backends := make([]deploy.NginxBackend, 0, len(rows))
+	for _, r := range rows {
+		backends = append(backends, deploy.NginxBackend{IP: r.IP, Port: r.Port})
+	}
+	upstream := deploy.NginxUpstream{
+		AppCode: app.AppCode, UpstreamName: app.NginxUpstreamName, Servers: backends,
+	}
+	nginxHostID := app.NginxHostID
+	dialOpts := s.sshOpts
+
+	plan.NginxApply = func(ctx context.Context) error {
+		t, auth, _, err := s.hostSvc.LoadAuth(nginxHostID)
+		if err != nil {
+			return fmt.Errorf("load nginx host auth: %w", err)
+		}
+		c, err := sshpkg.Dial(t, auth, dialOpts)
+		if err != nil {
+			return fmt.Errorf("dial nginx host: %w", err)
+		}
+		defer c.Close()
+		return deploy.NewNginxApplier(c).Apply(ctx, upstream)
+	}
+	return nil
+}
+
+// pickTargetGroup 根据当前活跃组选目标组：active=blue → green，active=green → blue，空 → blue（首次部署）
+func pickTargetGroup(active string) string {
+	switch strings.TrimSpace(active) {
+	case "green":
+		return "blue"
+	case "blue":
+		return "green"
+	default:
+		return "blue"
+	}
+}
 func pickStrategy(opts TriggerOptions) (strategy.Strategy, error) {
 	switch opts.Strategy {
 	case "single":
@@ -525,9 +617,11 @@ func pickStrategy(opts TriggerOptions) (strategy.Strategy, error) {
 				"strategy=rolling 时 batch_size 必须 >= 1", 400)
 		}
 		return strategy.Rolling{}, nil
+	case "blue_green":
+		return strategy.BlueGreen{}, nil
 	default:
 		return nil, apperr.New("BAD_REQUEST",
-			fmt.Sprintf("strategy=%s 未实现（当前支持 single / rolling；rollback 见 Sprint 3.3）", opts.Strategy), 400)
+			fmt.Sprintf("strategy=%s 未实现（当前支持 single / rolling / blue_green；rollback 见 /apps/:id/rollback）", opts.Strategy), 400)
 	}
 }
 
@@ -571,5 +665,16 @@ func (h *runHooks) OnDeploymentSuccess(dep *model.Deployment, newArtifactID uint
 		"status":               "running",
 	}).Error; err != nil {
 		slog.Warn("update deployment artifact", "dep_id", dep.ID, "err", err)
+	}
+}
+
+// OnGroupSwitched 蓝绿切流成功后调用，把 App.active_group 更新为目标组。
+// 仅对 strategy=blue_green 有效；其他策略不调用此 hook。
+func (h *runHooks) OnGroupSwitched(group string) {
+	if err := h.svc.db.Model(&model.Application{}).
+		Where("id = (?)",
+			h.svc.db.Model(&model.PipelineRun{}).Select("app_id").Where("id = ?", h.runID)).
+		Update("active_group", group).Error; err != nil {
+		slog.Warn("update app active_group", "run_id", h.runID, "group", group, "err", err)
 	}
 }
