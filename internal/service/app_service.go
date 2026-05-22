@@ -27,6 +27,12 @@ type AppInput struct {
 	JvmArgs        string `json:"jvm_args,omitempty"`
 	EnvVars        string `json:"env_vars,omitempty"` // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
 	SystemdUser    string `json:"systemd_user,omitempty"` // 留空 = 用启动 sshd 的账号（一般 root）
+	// 蓝绿配置（Sprint 4）。三者要么全填、要么 NginxHostID=0 表示不启用蓝绿。
+	// ActiveGroup 是受运行时事实约束的字段，由蓝绿策略部署成功后写入；
+	// 但允许在创建/更新时初始化一次（如导入旧应用时声明现状）。
+	NginxHostID       uint   `json:"nginx_host_id,omitempty"`
+	NginxUpstreamName string `json:"nginx_upstream_name,omitempty"`
+	ActiveGroup       string `json:"active_group,omitempty"`
 }
 
 // AppView 应用响应
@@ -43,6 +49,9 @@ type AppView struct {
 	JvmArgs        string `json:"jvm_args"`
 	EnvVars        string `json:"env_vars"`
 	SystemdUser    string `json:"systemd_user"`
+	NginxHostID       uint   `json:"nginx_host_id"`
+	NginxUpstreamName string `json:"nginx_upstream_name"`
+	ActiveGroup       string `json:"active_group"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
 }
@@ -53,9 +62,12 @@ func toAppView(a *model.Application) AppView {
 		AppType: a.AppType, GitURL: a.GitURL, GitCredID: a.GitCredID,
 		DeployPath: a.DeployPath, Port: a.Port,
 		HealthCheckURL: a.HealthCheckURL, JvmArgs: a.JvmArgs, EnvVars: a.EnvVars,
-		SystemdUser: a.SystemdUser,
-		CreatedAt:   a.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:   a.UpdatedAt.Format(time.RFC3339),
+		SystemdUser:       a.SystemdUser,
+		NginxHostID:       a.NginxHostID,
+		NginxUpstreamName: a.NginxUpstreamName,
+		ActiveGroup:       a.ActiveGroup,
+		CreatedAt:         a.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:         a.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -67,6 +79,10 @@ var appCodeRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,49}$`)
 // 含小写字母/数字/下划线/连字符，长度 1-32）。够覆盖 java、nobody、deployer 这些常见用户。
 // 不接 UID 数字，强制走可读名，省得 unit 里出现魔法数字。
 var systemdUserRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+// nginxUpstreamRE 限制 nginx upstream 名：字母开头，长度 2-100，含字母/数字/下划线/连字符。
+// 跟 nginx upstream <name> { ... } 块的语法保持安全。
+var nginxUpstreamRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,99}$`)
 
 // AppService 应用业务编排
 type AppService struct {
@@ -88,7 +104,10 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 		DeployPath: in.DeployPath, Port: in.Port,
 		HealthCheckURL: defaultHealthURL(in.HealthCheckURL),
 		JvmArgs:        in.JvmArgs, EnvVars: in.EnvVars,
-		SystemdUser:    strings.TrimSpace(in.SystemdUser),
+		SystemdUser:       strings.TrimSpace(in.SystemdUser),
+		NginxHostID:       in.NginxHostID,
+		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
+		ActiveGroup:       strings.TrimSpace(in.ActiveGroup),
 	}
 	if err := s.db.Create(a).Error; err != nil {
 		if isUniqueConstraint(err) {
@@ -142,6 +161,9 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.JvmArgs = in.JvmArgs
 	a.EnvVars = in.EnvVars
 	a.SystemdUser = strings.TrimSpace(in.SystemdUser)
+	a.NginxHostID = in.NginxHostID
+	a.NginxUpstreamName = strings.TrimSpace(in.NginxUpstreamName)
+	a.ActiveGroup = strings.TrimSpace(in.ActiveGroup)
 	if err := s.db.Save(a).Error; err != nil {
 		if isUniqueConstraint(err) {
 			return AppView{}, apperr.New("CONFLICT",
@@ -203,6 +225,21 @@ func validateAppInput(in AppInput) error {
 	if u := strings.TrimSpace(in.SystemdUser); u != "" && !systemdUserRE.MatchString(u) {
 		return apperr.New("BAD_REQUEST",
 			"systemd_user 必须是 POSIX 用户名（小写字母/下划线开头，长度 1-32，仅含小写字母/数字/下划线/连字符）", 400)
+	}
+	// 蓝绿配置（Sprint 4）：NginxHostID 与 NginxUpstreamName 要么都填、要么都不填
+	upstream := strings.TrimSpace(in.NginxUpstreamName)
+	if (in.NginxHostID > 0) != (upstream != "") {
+		return apperr.New("BAD_REQUEST",
+			"nginx_host_id 与 nginx_upstream_name 必须同时填或同时为空（启用/不启用蓝绿）", 400)
+	}
+	if upstream != "" && !nginxUpstreamRE.MatchString(upstream) {
+		return apperr.New("BAD_REQUEST",
+			"nginx_upstream_name 必须字母开头、长度 2-100、仅含字母/数字/下划线/连字符", 400)
+	}
+	switch strings.TrimSpace(in.ActiveGroup) {
+	case "", "blue", "green":
+	default:
+		return apperr.New("BAD_REQUEST", "active_group 仅允许 blue / green / 空", 400)
 	}
 	return nil
 }

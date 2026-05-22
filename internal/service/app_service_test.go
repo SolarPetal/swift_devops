@@ -252,3 +252,88 @@ func TestAppService_SystemdUserRoundtrip(t *testing.T) {
 		t.Fatalf("update 清空 systemd_user 失败：%q", updated.SystemdUser)
 	}
 }
+
+// Sprint 4.1：蓝绿三字段校验
+func TestAppService_NginxConfigValidation(t *testing.T) {
+	svc, _ := setupAppSvc(t)
+
+	t.Run("两字段必须同填同空：只填 upstream", func(t *testing.T) {
+		in := validInput()
+		in.NginxUpstreamName = "user-svc-backend"
+		// NginxHostID 留 0
+		_, err := svc.Create(in)
+		if err == nil {
+			t.Fatal("应拒绝")
+		}
+		ae, _ := apperr.As(err)
+		if ae == nil || ae.HTTPStatus != 400 {
+			t.Fatalf("应 400：%v", err)
+		}
+	})
+
+	t.Run("两字段必须同填同空：只填 host_id", func(t *testing.T) {
+		in := validInput()
+		in.AppCode = "diff-1"
+		in.NginxHostID = 7
+		_, err := svc.Create(in)
+		if err == nil {
+			t.Fatal("应拒绝")
+		}
+	})
+
+	t.Run("upstream 名风格非法", func(t *testing.T) {
+		in := validInput()
+		in.AppCode = "diff-2"
+		in.NginxHostID = 7
+		in.NginxUpstreamName = "1bad" // 数字开头
+		_, err := svc.Create(in)
+		if err == nil {
+			t.Fatal("应拒绝")
+		}
+	})
+
+	t.Run("active_group 非法值", func(t *testing.T) {
+		in := validInput()
+		in.AppCode = "diff-3"
+		in.ActiveGroup = "red"
+		_, err := svc.Create(in)
+		if err == nil {
+			t.Fatal("应拒绝")
+		}
+	})
+
+	t.Run("合法配置成功", func(t *testing.T) {
+		in := validInput()
+		in.AppCode = "ok-1"
+		in.NginxHostID = 7
+		in.NginxUpstreamName = "user-svc-backend"
+		in.ActiveGroup = "blue"
+		out, err := svc.Create(in)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if out.NginxHostID != 7 || out.NginxUpstreamName != "user-svc-backend" || out.ActiveGroup != "blue" {
+			t.Fatalf("字段未透传：%+v", out)
+		}
+	})
+
+	t.Run("Update 切换 active_group", func(t *testing.T) {
+		in := validInput()
+		in.AppCode = "ok-2"
+		in.NginxHostID = 8
+		in.NginxUpstreamName = "svc-up"
+		in.ActiveGroup = "blue"
+		created, err := svc.Create(in)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		in.ActiveGroup = "green"
+		updated, err := svc.Update(created.ID, in)
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if updated.ActiveGroup != "green" {
+			t.Fatalf("active_group 应为 green，得 %s", updated.ActiveGroup)
+		}
+	})
+}

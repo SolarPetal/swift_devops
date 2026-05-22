@@ -33,6 +33,12 @@ type Application struct {
 	JvmArgs        string `gorm:"type:text" json:"jvm_args"`
 	EnvVars        string `gorm:"type:text" json:"env_vars"` // JSON
 	SystemdUser    string `gorm:"size:32" json:"systemd_user"` // 空=root；非空写入 unit 的 User= 字段
+	// Sprint 4 蓝绿：nginx 配置。空 = 未启用蓝绿。
+	// NginxHostID 指向 hosts 表中跑 nginx 的主机；NginxUpstreamName 是该 nginx 中的 upstream 名。
+	// ActiveGroup 记录当前对外提供服务的组（blue/green/空）；空 = 首次部署前。
+	NginxHostID       uint   `gorm:"index" json:"nginx_host_id"`
+	NginxUpstreamName string `gorm:"size:100" json:"nginx_upstream_name"`
+	ActiveGroup       string `gorm:"size:20" json:"active_group"` // blue / green / 空
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
