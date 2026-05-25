@@ -42,7 +42,8 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	depSvc := service.NewDeploymentService(db)
 	artSvc := service.NewArtifactService(db, cfg.Storage.ArtifactDir, int64(cfg.Storage.MaxUploadMB)<<20)
 	gitCredSvc := service.NewGitCredentialService(db, aes)
-	buildSvc := service.NewBuildService(db, artSvc, gitCredSvc, cfg.Storage.BuildWorkspace, cfg.Builder.MavenCacheDir)
+	builderEnvSvc := service.NewBuilderEnvService(db)
+	buildSvc := service.NewBuildService(db, artSvc, gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace, cfg.Builder.MavenCacheDir)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
 	pipeSvc.SetPublisher(wsHub) // 异步推送 step/status 到 hub
 
@@ -112,6 +113,12 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/builds", buildH.List)
 		v1.GET("/builds/:id", buildH.Get)
 		v1.GET("/builds/:id/log", buildH.GetLog)
+
+		// 构建环境配置（Sprint 5.4）：单例配置 + 检测
+		beH := handler.NewBuilderEnvHandler(builderEnvSvc)
+		v1.GET("/builder-env", beH.Get)
+		v1.PUT("/builder-env", beH.Update)
+		v1.POST("/builder-env/detect", beH.Detect)
 
 		// 后续业务模块挂这里：monitor
 	}

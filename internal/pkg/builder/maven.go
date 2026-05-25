@@ -19,6 +19,7 @@ type MavenOptions struct {
 	MavenCacheDir string        // -Dmaven.repo.local=<dir>；空 = 走 ~/.m2
 	LogWriter     io.Writer     // 命令输出
 	Timeout       time.Duration // 0 = 30 分钟兜底
+	ExecEnv       []string      // 注入到 mvn 子进程的环境变量；nil = os.Environ()。Sprint 5.4
 }
 
 // MavenResult 构建产物
@@ -63,7 +64,11 @@ func MvnPackage(ctx context.Context, opts MavenOptions) (MavenResult, error) {
 	cmd.Dir = opts.WorkDir
 	cmd.Stdout = logw
 	cmd.Stderr = logw
-	cmd.Env = os.Environ()
+	if opts.ExecEnv != nil {
+		cmd.Env = append([]string{}, opts.ExecEnv...)
+	} else {
+		cmd.Env = os.Environ()
+	}
 	if err := cmd.Run(); err != nil {
 		return MavenResult{}, fmt.Errorf("mvn package: %w", err)
 	}

@@ -84,6 +84,25 @@ export type BuildTriggerInput = {
   cred_id?: number
 }
 
+// Sprint 5.4：构建机环境配置（单例）
+export type BuilderEnv = {
+  java_home: string
+  maven_home: string
+  git_path: string
+  java_version: string
+  maven_version: string
+  git_version: string
+  detected_at?: string
+  valid: boolean
+  detect_message: string
+}
+
+export type BuilderEnvInput = {
+  java_home: string
+  maven_home: string
+  git_path?: string
+}
+
 export type App = {
   id: number
   app_code: string

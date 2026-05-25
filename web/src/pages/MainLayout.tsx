@@ -10,6 +10,7 @@ const items = [
   { key: '/hosts', label: '🖥  主机' },
   { key: '/apps', label: '📦  应用' },
   { key: '/git-creds', label: '🔑  Git 凭证' },
+  { key: '/builder-env', label: '⚙  构建环境' },
   { key: '/artifacts', label: '🧱  制品', disabled: true },
   { key: '/pipelines', label: '🚀  流水线', disabled: true },
   { key: '/monitor', label: '📈  监控', disabled: true },

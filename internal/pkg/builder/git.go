@@ -42,6 +42,7 @@ type CloneOptions struct {
 	Cred      *Credential   // nil = 匿名
 	LogWriter io.Writer     // 命令输出（stdout+stderr）流到这里；nil = 丢弃
 	Timeout   time.Duration // 0 = 5 分钟兜底
+	ExecEnv   []string      // 调用方注入的环境变量（Sprint 5.4 builder env）；nil = os.Environ()
 }
 
 // Clone 拉代码到 TargetDir，返回 HEAD commit SHA。
@@ -80,16 +81,16 @@ func Clone(ctx context.Context, opts CloneOptions) (string, error) {
 	args = append(args, "--", cloneURL, opts.TargetDir)
 	fmt.Fprintf(logw, "$ git %s\n", redactArgs(args))
 
-	if err := runCmd(cctx, "", logw, extraEnv, "git", args...); err != nil {
+	if err := runCmd(cctx, "", logw, opts.ExecEnv, extraEnv, "git", args...); err != nil {
 		// fallback：纯 commit SHA 时 -b 会报错，去掉 -b 重试 + 后续 checkout
 		if opts.Ref != "" && looksLikeSHA(opts.Ref) {
 			_ = os.RemoveAll(opts.TargetDir)
 			fmt.Fprintf(logw, "[fallback] -b %s 失败，回退为 clone 默认分支 + checkout\n", opts.Ref)
 			retry := []string{"clone", "--", cloneURL, opts.TargetDir}
-			if err2 := runCmd(cctx, "", logw, extraEnv, "git", retry...); err2 != nil {
+			if err2 := runCmd(cctx, "", logw, opts.ExecEnv, extraEnv, "git", retry...); err2 != nil {
 				return "", fmt.Errorf("git clone retry: %w", err2)
 			}
-			if err2 := runCmd(cctx, opts.TargetDir, logw, extraEnv, "git", "checkout", opts.Ref); err2 != nil {
+			if err2 := runCmd(cctx, opts.TargetDir, logw, opts.ExecEnv, extraEnv, "git", "checkout", opts.Ref); err2 != nil {
 				return "", fmt.Errorf("git checkout %s: %w", opts.Ref, err2)
 			}
 		} else {
@@ -98,7 +99,11 @@ func Clone(ctx context.Context, opts CloneOptions) (string, error) {
 	}
 
 	// 2. 取 HEAD commit SHA
-	out, err := exec.CommandContext(cctx, "git", "-C", opts.TargetDir, "rev-parse", "HEAD").Output()
+	revCmd := exec.CommandContext(cctx, "git", "-C", opts.TargetDir, "rev-parse", "HEAD")
+	if opts.ExecEnv != nil {
+		revCmd.Env = append([]string{}, opts.ExecEnv...)
+	}
+	out, err := revCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("rev-parse HEAD: %w", err)
 	}
@@ -158,15 +163,18 @@ func prepareCredential(c *Credential, cloneURL *string) ([]string, func(), error
 }
 
 // runCmd 在 dir 下跑 cmd，stdout/stderr 都重定向到 logw。
-// extraEnv 与当前进程环境合并。
-func runCmd(ctx context.Context, dir string, logw io.Writer, extraEnv []string, name string, args ...string) error {
+// baseEnv 是基础环境（一般是 opts.ExecEnv 或 os.Environ()）；extraEnv 追加在后面（如 GIT_SSH_COMMAND）。
+func runCmd(ctx context.Context, dir string, logw io.Writer, baseEnv, extraEnv []string, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Stdout = logw
 	cmd.Stderr = logw
-	cmd.Env = append(os.Environ(), extraEnv...)
+	if baseEnv == nil {
+		baseEnv = os.Environ()
+	}
+	cmd.Env = append(append([]string{}, baseEnv...), extraEnv...)
 	return cmd.Run()
 }
 

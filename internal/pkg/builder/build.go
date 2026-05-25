@@ -21,6 +21,7 @@ type Plan struct {
 	Workspace     string      // build workspace 根目录（如 ./data/build/）
 	MavenCacheDir string      // -Dmaven.repo.local；空 = 走 ~/.m2
 	LogWriter     io.Writer   // git + mvn 全部 stdout/stderr 都写这里
+	ExecEnv       []string    // KEY=VALUE 列表，注入到 git/mvn 子进程；nil = 继承 os.Environ()。Sprint 5.4
 	CloneTimeout  time.Duration
 	BuildTimeout  time.Duration
 	BuildID       uint        // 用于命名子目录（同 app_code 多并发时去重）
@@ -70,6 +71,7 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 		Cred:      plan.Cred,
 		LogWriter: plan.LogWriter,
 		Timeout:   plan.CloneTimeout,
+		ExecEnv:   plan.ExecEnv,
 	})
 	if err != nil {
 		return res, fmt.Errorf("clone: %w", err)
@@ -83,6 +85,7 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 		MavenCacheDir: plan.MavenCacheDir,
 		LogWriter:     plan.LogWriter,
 		Timeout:       plan.BuildTimeout,
+		ExecEnv:       plan.ExecEnv,
 	})
 	if err != nil {
 		return res, fmt.Errorf("maven: %w", err)

@@ -74,17 +74,18 @@ type BuildService struct {
 	db            *gorm.DB
 	artSvc        *ArtifactService
 	credSvc       *GitCredentialService
+	envSvc        *BuilderEnvService
 	workspace     string // build_workspace 根目录
 	mavenCacheDir string
 
-	mu        sync.Mutex
-	busyApps  map[uint]struct{} // 同 app 互斥（构建 + 部署可分开管，但构建本身互斥）
+	mu       sync.Mutex
+	busyApps map[uint]struct{} // 同 app 互斥（构建 + 部署可分开管，但构建本身互斥）
 }
 
 func NewBuildService(db *gorm.DB, artSvc *ArtifactService, credSvc *GitCredentialService,
-	workspace, mavenCacheDir string) *BuildService {
+	envSvc *BuilderEnvService, workspace, mavenCacheDir string) *BuildService {
 	return &BuildService{
-		db: db, artSvc: artSvc, credSvc: credSvc,
+		db: db, artSvc: artSvc, credSvc: credSvc, envSvc: envSvc,
 		workspace:     workspace,
 		mavenCacheDir: mavenCacheDir,
 		busyApps:      map[uint]struct{}{},
@@ -95,6 +96,11 @@ func NewBuildService(db *gorm.DB, artSvc *ArtifactService, credSvc *GitCredentia
 func (s *BuildService) Trigger(appID uint, actor string, in BuildTriggerInput) (BuildRunView, error) {
 	if s.workspace == "" {
 		return BuildRunView{}, apperr.New("INTERNAL", "storage.build_workspace 未配置", 500)
+	}
+
+	// Sprint 5.4：构建环境必须先在「⚙ 构建环境」配好且检测通过
+	if err := s.envSvc.RequireValid(); err != nil {
+		return BuildRunView{}, err
 	}
 
 	// 1. 校验 app + git_url
@@ -238,11 +244,18 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 
+	// 注入构建机环境变量（JAVA_HOME / MAVEN_HOME / PATH 前置 java/mvn/git bin）
+	execEnv, envErr := s.envSvc.BuildExecEnv()
+	if envErr != nil {
+		fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
+	}
+
 	plan := builder.Plan{
 		AppCode: app.AppCode, GitURL: app.GitURL, GitRef: defaultRef(in.GitRef),
 		Cred: cred, MvnArgs: in.MvnArgs,
 		Workspace: s.workspace, MavenCacheDir: s.mavenCacheDir,
 		LogWriter: io.MultiWriter(logFile),
+		ExecEnv:   execEnv,
 		BuildID:   buildID,
 	}
 	res, err := builder.Build(ctx, plan)

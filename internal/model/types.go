@@ -142,6 +142,23 @@ type BuildRun struct {
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
+// BuilderEnv 构建机环境配置（Sprint 5.4，单行表，固定 ID=1）。
+// 用于把 swift-devops 进程所在主机的 JAVA_HOME / MAVEN_HOME / GIT 路径
+// 透传给构建用的 mvn 子进程，避免依赖 systemd 启动时的环境变量。
+type BuilderEnv struct {
+	ID            uint       `gorm:"primaryKey" json:"id"` // 固定 1
+	JavaHome      string     `gorm:"size:255" json:"java_home"`
+	MavenHome     string     `gorm:"size:255" json:"maven_home"`
+	GitPath       string     `gorm:"size:255" json:"git_path"` // 一般 /usr/bin/git；空 = 走 PATH 找
+	JavaVersion   string     `gorm:"size:100" json:"java_version"`
+	MavenVersion  string     `gorm:"size:100" json:"maven_version"`
+	GitVersion    string     `gorm:"size:100" json:"git_version"`
+	DetectedAt    *time.Time `json:"detected_at"`
+	Valid         bool       `json:"valid"`  // 上次检测是否全部命中
+	DetectMessage string     `gorm:"type:text" json:"detect_message"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
 // AuditLog 审计日志
 type AuditLog struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`

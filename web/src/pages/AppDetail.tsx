@@ -3,12 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Typography, Card, Button, Space, Table, Tag, Modal,
   Form, Select, InputNumber, Input, message, Descriptions, Skeleton, Tabs,
-  Drawer, Steps, Badge, Upload, Progress,
+  Drawer, Steps, Badge, Upload, Progress, Tooltip,
 } from 'antd'
 
 import type {
   App, Deployment, Host, Artifact, PipelineRun, RunSnapshot, StepResult, PipelineStage,
-  BuildRun, GitCredential,
+  BuildRun, GitCredential, BuilderEnv,
 } from '../types'
 import { getApp } from '../api/app'
 import { listHosts } from '../api/host'
@@ -17,6 +17,7 @@ import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact } from '.
 import { cancelPipeline, deployApp, getPipeline, listPipelines, rollbackApp } from '../api/pipeline'
 import { getBuild, getBuildLog, listBuilds, triggerBuild } from '../api/build'
 import { listGitCreds } from '../api/gitcred'
+import { getBuilderEnv } from '../api/builderEnv'
 import { buildWSURL, issueWSTicket, type PipelineWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
 
@@ -253,6 +254,7 @@ function ArtifactTab({ app }: { app: App }) {
   const [builds, setBuilds] = useState<BuildRun[]>([])
   const [buildsLoading, setBuildsLoading] = useState(false)
   const [logTarget, setLogTarget] = useState<BuildRun | null>(null)
+  const [builderEnv, setBuilderEnv] = useState<BuilderEnv | null>(null)
   const [logText, setLogText] = useState('')
   const [logLoading, setLogLoading] = useState(false)
 
@@ -268,7 +270,11 @@ function ArtifactTab({ app }: { app: App }) {
     catch (e) { message.error(formatError(e)) }
     finally { setBuildsLoading(false) }
   }
-  useEffect(() => { refresh(); refreshBuilds() }, [appId])
+  useEffect(() => {
+    refresh()
+    refreshBuilds()
+    getBuilderEnv().then(setBuilderEnv).catch(() => {})
+  }, [appId])
 
   // 有构建在 running → 每 3s 轮询刷新
   useEffect(() => {
@@ -396,14 +402,24 @@ function ArtifactTab({ app }: { app: App }) {
   return (
     <>
       <Space style={{ marginBottom: 12 }} wrap>
-        <Button type="primary" onClick={openBuild} disabled={!app.git_url}>
-          ⚙ 从仓库构建
-        </Button>
+        <Tooltip title={
+          !app.git_url ? '应用未配 git_url' :
+          !builderEnv?.valid ? '构建环境未就绪，去「⚙ 构建环境」配置 java_home / maven_home 并检测' :
+          ''
+        }>
+          <Button type="primary" onClick={openBuild}
+            disabled={!app.git_url || !builderEnv?.valid}>
+            ⚙ 从仓库构建
+          </Button>
+        </Tooltip>
         <Button onClick={openUpload}>↑ 上传文件</Button>
         <Button onClick={() => { form.resetFields(); setOpen(true) }}>+ 注册路径</Button>
-        <Button onClick={() => { refresh(); refreshBuilds() }}>刷新</Button>
+        <Button onClick={() => { refresh(); refreshBuilds(); getBuilderEnv().then(setBuilderEnv).catch(() => {}) }}>刷新</Button>
         {!app.git_url && (
           <Typography.Text type="secondary">应用未配 git_url，构建按钮不可用；先去「应用管理」补上。</Typography.Text>
+        )}
+        {app.git_url && builderEnv && !builderEnv.valid && (
+          <Typography.Text type="warning">构建环境未就绪，去左侧菜单「⚙ 构建环境」配一下。</Typography.Text>
         )}
       </Space>
 
