@@ -69,6 +69,8 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
       cancelText="取消"
       width={560}
       destroyOnClose
+      maskClosable={false}
+      keyboard={false}
     >
       <Form form={form} layout="vertical">
         <Form.Item name="name" label="名称" rules={[{ required: true }]}>

@@ -205,7 +205,7 @@ function HostBindTab({ appId, appPort }: { appId: number; appPort: number }) {
           { title: '操作', width: 100, render: (_, d) => <Button danger size="small" onClick={() => handleUnbind(d)}>解绑</Button> },
         ]}
       />
-      <Modal title="绑定主机" open={bindOpen} onOk={handleBind} onCancel={() => setBindOpen(false)} okText="绑定" cancelText="取消">
+      <Modal title="绑定主机" open={bindOpen} onOk={handleBind} onCancel={() => setBindOpen(false)} okText="绑定" cancelText="取消" maskClosable={false} keyboard={false}>
         <Form form={bindForm} layout="vertical" initialValues={{ group_tag: '' }}>
           <Form.Item name="host_id" label="选择主机" rules={[{ required: true, message: '必选' }]}>
             <Select placeholder="从可用主机里选一台"
@@ -450,7 +450,8 @@ function ArtifactTab({ app }: { app: App }) {
 
       <Modal title={`从仓库构建 - ${app.name}`} open={bdOpen}
         onOk={handleBuild} onCancel={() => setBdOpen(false)}
-        okText="触发构建" cancelText="取消" width={560}>
+        okText="触发构建" cancelText="取消" width={560}
+        maskClosable={false} keyboard={false}>
         <Form form={bdForm} layout="vertical">
           <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
             git_url: <code>{app.git_url}</code>
@@ -513,7 +514,7 @@ function ArtifactTab({ app }: { app: App }) {
         )}
       </Modal>
 
-      <Modal title="注册制品（本地 jar 路径）" open={open} onOk={handleAdd} onCancel={() => setOpen(false)} okText="注册" cancelText="取消">
+      <Modal title="注册制品（本地 jar 路径）" open={open} onOk={handleAdd} onCancel={() => setOpen(false)} okText="注册" cancelText="取消" maskClosable={false} keyboard={false}>
         <Form form={form} layout="vertical">
           <Form.Item name="version_tag" label="版本标签" rules={[{ required: true }]}>
             <Input placeholder="v1.0.0 / 20260520-01" />
@@ -536,7 +537,8 @@ function ArtifactTab({ app }: { app: App }) {
         okText={uploading ? '上传中…' : '开始上传'}
         cancelText="取消"
         confirmLoading={uploading}
-        maskClosable={!uploading}
+        maskClosable={false}
+        keyboard={false}
         closable={!uploading}
       >
         <Form form={upForm} layout="vertical">
@@ -680,7 +682,7 @@ function PipelineTab({ app }: { app: App }) {
           { title: '操作', width: 90, render: (_, r) => <Button size="small" onClick={() => setDrawerRun(r)}>详情</Button> },
         ]}
       />
-      <Modal title={`触发部署 - ${app.name}`} open={open} onOk={handleDeploy} onCancel={() => setOpen(false)} okText="触发" cancelText="取消">
+      <Modal title={`触发部署 - ${app.name}`} open={open} onOk={handleDeploy} onCancel={() => setOpen(false)} okText="触发" cancelText="取消" maskClosable={false} keyboard={false}>
         <Form form={form} layout="vertical" initialValues={{ strategy: 'single', batch_size: 2 }}>
           <Form.Item name="artifact_id" label="选择制品" rules={[{ required: true }]}>
             <Select placeholder="选择要部署的版本"

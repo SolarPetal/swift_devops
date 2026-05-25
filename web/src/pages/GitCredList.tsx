@@ -124,6 +124,8 @@ export default function GitCredList() {
         cancelText="取消"
         width={560}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form form={form} layout="vertical">
           <Form.Item
