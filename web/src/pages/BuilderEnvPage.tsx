@@ -77,18 +77,18 @@ export default function BuilderEnvPage() {
           label="JAVA_HOME"
           rules={[
             { required: true, message: '必填' },
-            { pattern: /^\/.*$/, message: '必须是绝对路径（以 / 开头）' },
+            { pattern: /^\/[^\\]*$/, message: '必须是绝对路径（以 / 开头），且不能含反斜杠 \\' },
           ]}
           tooltip="JDK 安装目录的绝对路径。检测时会跑 <java_home>/bin/java -version"
         >
-          <Input placeholder="如：/opt/jdk-17 或 /mnt/d/develop/jdk-17" />
+          <Input placeholder="如：/opt/jdk-17 或 /mnt/d/develop/jdk-17（注意全用 / 不用 \\）" />
         </Form.Item>
         <Form.Item
           name="maven_home"
           label="MAVEN_HOME"
           rules={[
             { required: true, message: '必填' },
-            { pattern: /^\/.*$/, message: '必须是绝对路径（以 / 开头）' },
+            { pattern: /^\/[^\\]*$/, message: '必须是绝对路径（以 / 开头），且不能含反斜杠 \\' },
           ]}
           tooltip="Maven 安装目录的绝对路径。检测时会跑 <maven_home>/bin/mvn -v"
         >
@@ -99,7 +99,7 @@ export default function BuilderEnvPage() {
           label="Git 可执行路径（可选）"
           tooltip="留空走 PATH 找 git；填写后用绝对路径，如 /usr/bin/git"
           rules={[
-            { pattern: /^(\/.*)?$/, message: '必须是绝对路径或留空' },
+            { pattern: /^(\/[^\\]*)?$/, message: '必须是绝对路径或留空，且不能含反斜杠' },
           ]}
         >
           <Input placeholder="留空走 PATH；或填 /usr/bin/git" />
@@ -129,9 +129,10 @@ export default function BuilderEnvPage() {
           </Descriptions>
           {env.detect_message && (
             <pre style={{
-              background: '#fafafa', border: '1px solid #f0f0f0', padding: 10, marginTop: 12,
+              background: '#1e1e1e', color: '#d4d4d4', padding: 12, marginTop: 12,
               borderRadius: 4, fontSize: 12, fontFamily: 'Consolas, Monaco, monospace',
-              whiteSpace: 'pre-wrap',
+              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              maxHeight: 400, overflow: 'auto',
             }}>{env.detect_message}</pre>
           )}
         </Card>

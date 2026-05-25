@@ -98,9 +98,9 @@ func (s *BuilderEnvService) Update(in BuilderEnvInput) (BuilderEnvView, error) {
 	if err != nil {
 		return BuilderEnvView{}, err
 	}
-	e.JavaHome = strings.TrimSpace(in.JavaHome)
-	e.MavenHome = strings.TrimSpace(in.MavenHome)
-	e.GitPath = strings.TrimSpace(in.GitPath)
+	e.JavaHome = normalizePath(in.JavaHome)
+	e.MavenHome = normalizePath(in.MavenHome)
+	e.GitPath = normalizePath(in.GitPath)
 	// 改完路径要重新 detect，先把 valid 清掉
 	e.Valid = false
 	e.DetectMessage = "已更新配置，请点「检测」按钮验证"
@@ -266,10 +266,24 @@ func validatePathAbs(name, p string, required bool) error {
 		}
 		return nil
 	}
+	// 拒绝 Windows 反斜杠 —— Linux 路径必须用 /
+	if strings.Contains(p, `\`) {
+		return apperr.New("BAD_REQUEST",
+			name+" 含反斜杠 \\，请用 Linux 正斜杠 /（如 /mnt/d/develop/jdk-21）", 400)
+	}
 	if !filepath.IsAbs(p) {
 		return apperr.New("BAD_REQUEST", name+" 必须是绝对路径（以 / 开头）", 400)
 	}
 	return nil
+}
+
+// normalizePath 归一化路径：trim 空白 + 去尾部 /（除非是根 /）
+func normalizePath(p string) string {
+	p = strings.TrimSpace(p)
+	if len(p) > 1 && strings.HasSuffix(p, "/") {
+		p = strings.TrimRight(p, "/")
+	}
+	return p
 }
 
 // appendOrReplace 在 envs（KEY=VALUE 列表）里把 key 替换成 value，没有则追加。
