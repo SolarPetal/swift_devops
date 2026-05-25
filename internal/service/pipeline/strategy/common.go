@@ -92,22 +92,54 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 	}
 
 	// 阶段 1.5：env_check —— 部署前预检远端 Java 可用性（Sprint 3.7）
-	// 与其等到 systemctl restart 报 203/EXEC，不如在 dial 后立刻验证 java 路径正确
+	// 自动 resolve：用户填的 java_path 可能是 JDK 目录（/usr/local/jdk-21）也可能是
+	// java 可执行文件（/usr/bin/java）。远端 shell 探测：
+	//   - <path>/bin/java 可执行 → 用它（path 是 JDK 目录）
+	//   - 否则 <path> 本身可执行 → 用它（path 是 java 文件）
+	//   - 都不行 → 报错
+	// resolved 结果回写 spec.JavaPath，保证 unit 文件 ExecStart 不再踩 203/EXEC
 	ecStart := time.Now()
-	envRes, err := client.Exec(ctx,
-		fmt.Sprintf("test -x %s && %s -version 2>&1 | head -1",
-			deploy.ShellQuote(effectiveJava), deploy.ShellQuote(effectiveJava)))
+	q := deploy.ShellQuote(effectiveJava)
+	resolveScript := fmt.Sprintf(`
+if [ -x %s/bin/java ]; then RESOLVED=%s/bin/java
+elif [ -x %s ]; then RESOLVED=%s
+else echo "java not found at %s (also tried %s/bin/java)"; exit 1; fi
+echo "RESOLVED=$RESOLVED"
+"$RESOLVED" -version 2>&1 | head -1
+`, q, q, q, q, effectiveJava, effectiveJava)
+	envRes, err := client.Exec(ctx, resolveScript)
 	if err != nil {
 		return fail(StageEnvCheck, "exec env_check: "+err.Error(), ecStart, host.Name, host.IP, "")
 	}
 	if envRes.ExitCode != 0 {
+		stderr := strings.TrimSpace(envRes.Stderr)
+		if stderr == "" {
+			stderr = strings.TrimSpace(envRes.Stdout)
+		}
 		return fail(StageEnvCheck,
-			fmt.Sprintf("远端 java 不可执行：%s（exit=%d）。请在「主机管理」修改主机的 java_path，或在「应用配置」覆盖；如未装 JDK，请先安装。\n\nstderr: %s",
-				effectiveJava, envRes.ExitCode, strings.TrimSpace(envRes.Stderr)),
+			fmt.Sprintf("远端 java 不可执行：%s（exit=%d）。请在「主机管理」修改主机的 java_path，或在「应用配置」覆盖；如未装 JDK，请先安装。\n\n%s",
+				effectiveJava, envRes.ExitCode, stderr),
 			ecStart, host.Name, host.IP, "")
 	}
-	emit(mkStepTimed(host.ID, host.Name, host.IP, StageEnvCheck, true,
-		fmt.Sprintf("%s → %s", effectiveJava, strings.TrimSpace(envRes.Stdout)), "", ecStart))
+	// 解析 RESOLVED=xxx 行 + 取版本
+	var resolvedJava, javaVersion string
+	for _, line := range strings.Split(strings.TrimSpace(envRes.Stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "RESOLVED=") {
+			resolvedJava = strings.TrimPrefix(line, "RESOLVED=")
+		} else if line != "" && javaVersion == "" {
+			javaVersion = line
+		}
+	}
+	if resolvedJava == "" {
+		resolvedJava = effectiveJava // 兜底
+	}
+	spec.JavaPath = resolvedJava // 写回，让 RenderUnit 拿到正确路径
+	detail := fmt.Sprintf("%s → %s", resolvedJava, javaVersion)
+	if resolvedJava != effectiveJava {
+		detail = fmt.Sprintf("%s (resolved from %s) → %s", resolvedJava, effectiveJava, javaVersion)
+	}
+	emit(mkStepTimed(host.ID, host.Name, host.IP, StageEnvCheck, true, detail, "", ecStart))
 
 	// 阶段 2：上传 jar
 	upStart := time.Now()

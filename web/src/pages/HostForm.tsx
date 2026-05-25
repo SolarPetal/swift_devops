@@ -128,7 +128,7 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
         <Form.Item
           name="java_path"
           label="Java 可执行路径"
-          tooltip="远端 Java 的绝对路径。部署前 env_check 会用 test -x 校验；默认 /usr/bin/java。"
+          tooltip="远端 Java 路径。两种都支持：JDK 安装目录（如 /usr/local/jdk-21.0.2）或 java 可执行文件（如 /usr/bin/java）。env_check 阶段会自动 resolve。默认 /usr/bin/java。"
           rules={[
             {
               pattern: /^(\/.*)?$/,
@@ -136,7 +136,7 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
             },
           ]}
         >
-          <Input placeholder="/usr/bin/java" />
+          <Input placeholder="/usr/bin/java 或 /usr/local/jdk-21.0.2（目录也行）" />
         </Form.Item>
         {isEdit && (
           <Alert

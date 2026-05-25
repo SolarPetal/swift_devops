@@ -239,7 +239,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                   <Form.Item
                     name="java_path"
                     label="Java 路径覆盖（可选）"
-                    tooltip="留空 = 沿用主机的 java_path。仅当同台主机要跑不同 JDK 版本的应用时填写"
+                    tooltip="留空 = 沿用主机的 java_path。仅当同台主机要跑不同 JDK 版本的应用时填写。两种格式都支持：JDK 目录或 java 可执行文件"
                     rules={[
                       {
                         pattern: /^(\/.*)?$/,
