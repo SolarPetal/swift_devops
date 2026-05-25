@@ -143,10 +143,12 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [ ] 4.5 双 sshd + nginx 容器集成测（可选，参考 Sprint 3.5 startContainers）
 
 ### Sprint 5 · Docker 构建（约 1 周）
-- [ ] Git clone
-- [ ] Docker 容器构建
-- [ ] WebSocket 日志流
-- [ ] 制品历史清理（`max_history` 滚动删旧版 + 对应文件）
+- [x] 5.1 GitCredential：model + CRUD + AES-GCM 加密 + 前端管理页（HTTPS token / SSH key 两种类型）
+- [x] 5.2 pkg/builder：git Clone（token/SSH key/匿名三模式）+ mvn package + 编排
+- [x] 5.3 BuildService + handler：异步触发 + 同 app 互斥 + 自动 IngestLocalJar 落 Artifact；前端制品 Tab 加「⚙ 从仓库构建」+ 历史 + 日志 Modal（轮询）
+- [ ] 5.4 WS 实时日志（复用 Sprint 2.4 WS 框架 + 前端 LogTerminal）
+- [ ] 5.5 Docker 容器构建（隔离环境，避免本机依赖 git/mvn/JDK）
+- [ ] 5.6 制品历史清理（`max_history` 滚动删旧版 + 对应文件）
 
 ### Sprint 6 · 监控告警（约 1 周）
 - [ ] 系统采样

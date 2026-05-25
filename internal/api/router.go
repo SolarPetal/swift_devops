@@ -41,6 +41,8 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	appSvc := service.NewAppService(db)
 	depSvc := service.NewDeploymentService(db)
 	artSvc := service.NewArtifactService(db, cfg.Storage.ArtifactDir, int64(cfg.Storage.MaxUploadMB)<<20)
+	gitCredSvc := service.NewGitCredentialService(db, aes)
+	buildSvc := service.NewBuildService(db, artSvc, gitCredSvc, cfg.Storage.BuildWorkspace, cfg.Builder.MavenCacheDir)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
 	pipeSvc.SetPublisher(wsHub) // 异步推送 step/status 到 hub
 
@@ -95,6 +97,21 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/pipelines", pipeH.List)
 		v1.GET("/pipelines/:id", pipeH.Get)
 		v1.POST("/pipelines/:id/cancel", pipeH.Cancel)
+
+		// Git 凭证管理（Sprint 5.1）
+		gcH := handler.NewGitCredentialHandler(gitCredSvc)
+		v1.POST("/git-creds", gcH.Create)
+		v1.GET("/git-creds", gcH.List)
+		v1.GET("/git-creds/:id", gcH.Get)
+		v1.PUT("/git-creds/:id", gcH.Update)
+		v1.DELETE("/git-creds/:id", gcH.Delete)
+
+		// 构建（Sprint 5.3）：git clone + mvn package → 注册成 Artifact
+		buildH := handler.NewBuildHandler(buildSvc)
+		v1.POST("/apps/:id/build", buildH.Trigger)
+		v1.GET("/builds", buildH.List)
+		v1.GET("/builds/:id", buildH.Get)
+		v1.GET("/builds/:id/log", buildH.GetLog)
 
 		// 后续业务模块挂这里：monitor
 	}

@@ -8,12 +8,15 @@ import {
 
 import type {
   App, Deployment, Host, Artifact, PipelineRun, RunSnapshot, StepResult, PipelineStage,
+  BuildRun, GitCredential,
 } from '../types'
 import { getApp } from '../api/app'
 import { listHosts } from '../api/host'
 import { bindHost, listDeployments, unbindDeployment, updateDeploymentGroup } from '../api/deployment'
 import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact } from '../api/artifact'
 import { cancelPipeline, deployApp, getPipeline, listPipelines, rollbackApp } from '../api/pipeline'
+import { getBuild, getBuildLog, listBuilds, triggerBuild } from '../api/build'
+import { listGitCreds } from '../api/gitcred'
 import { buildWSURL, issueWSTicket, type PipelineWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
 
@@ -107,7 +110,7 @@ export default function AppDetail() {
           defaultActiveKey="hosts"
           items={[
             { key: 'hosts',     label: '主机绑定', children: <HostBindTab appId={appId} appPort={app.port} /> },
-            { key: 'artifacts', label: '制品',     children: <ArtifactTab appId={appId} /> },
+            { key: 'artifacts', label: '制品',     children: <ArtifactTab app={app} /> },
             { key: 'pipelines', label: '部署历史', children: <PipelineTab app={app} /> },
           ]}
         />
@@ -229,7 +232,8 @@ function HostBindTab({ appId, appPort }: { appId: number; appPort: number }) {
 
 // ---------- 制品 Tab ----------
 
-function ArtifactTab({ appId }: { appId: number }) {
+function ArtifactTab({ app }: { app: App }) {
+  const appId = app.id
   const [list, setList] = useState<Artifact[]>([])
   const [loading, setLoading] = useState(false)
   const [open, setOpen] = useState(false)
@@ -242,13 +246,38 @@ function ArtifactTab({ appId }: { appId: number }) {
   const [upPercent, setUpPercent] = useState(0)
   const [uploading, setUploading] = useState(false)
 
+  // 构建 Modal 状态（Sprint 5.3）
+  const [bdOpen, setBdOpen] = useState(false)
+  const [bdForm] = Form.useForm()
+  const [creds, setCreds] = useState<GitCredential[]>([])
+  const [builds, setBuilds] = useState<BuildRun[]>([])
+  const [buildsLoading, setBuildsLoading] = useState(false)
+  const [logTarget, setLogTarget] = useState<BuildRun | null>(null)
+  const [logText, setLogText] = useState('')
+  const [logLoading, setLogLoading] = useState(false)
+
   const refresh = async () => {
     setLoading(true)
     try { setList(await listArtifacts(appId)) }
     catch (e) { message.error(formatError(e)) }
     finally { setLoading(false) }
   }
-  useEffect(() => { refresh() }, [appId])
+  const refreshBuilds = async () => {
+    setBuildsLoading(true)
+    try { setBuilds(await listBuilds(appId)) }
+    catch (e) { message.error(formatError(e)) }
+    finally { setBuildsLoading(false) }
+  }
+  useEffect(() => { refresh(); refreshBuilds() }, [appId])
+
+  // 有构建在 running → 每 3s 轮询刷新
+  useEffect(() => {
+    const hasBuilding = builds.some((b) => b.status === 'building')
+    if (!hasBuilding) return
+    const t = setInterval(() => { refreshBuilds(); refresh() }, 3000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [builds])
 
   const handleAdd = async () => {
     try {
@@ -297,20 +326,119 @@ function ArtifactTab({ appId }: { appId: number }) {
     }
   }
 
+  // 构建：拉远端代码 + mvn package
+  const openBuild = async () => {
+    try { setCreds(await listGitCreds()) } catch (e) { message.error(formatError(e)) }
+    bdForm.resetFields()
+    bdForm.setFieldsValue({ git_ref: 'main', mvn_args: 'clean package -DskipTests', cred_id: 0 })
+    setBdOpen(true)
+  }
+  const handleBuild = async () => {
+    try {
+      const v = await bdForm.validateFields()
+      const payload: any = {
+        git_ref: v.git_ref || 'main',
+        mvn_args: v.mvn_args || '',
+      }
+      if (v.cred_id && v.cred_id > 0) payload.cred_id = v.cred_id
+      const r = await triggerBuild(appId, payload)
+      message.success(`已触发构建：#${r.id}`)
+      setBdOpen(false); refreshBuilds()
+    } catch (e) {
+      if ((e as any)?.errorFields) return
+      message.error(formatError(e))
+    }
+  }
+
+  // 查看构建日志
+  const openLog = async (b: BuildRun) => {
+    setLogTarget(b)
+    setLogLoading(true)
+    setLogText('')
+    try {
+      const txt = await getBuildLog(b.id)
+      setLogText(txt)
+      // building 中开个轻量轮询
+      if (b.status === 'building') {
+        const t = setInterval(async () => {
+          try {
+            const [fresh, freshLog] = await Promise.all([getBuild(b.id), getBuildLog(b.id)])
+            setLogText(freshLog)
+            if (fresh.status !== 'building') {
+              clearInterval(t)
+              refreshBuilds()
+              refresh()
+            }
+          } catch {}
+        }, 2000)
+        // 关闭 Modal 时停止
+        ;(window as any).__buildLogTimer = t
+      }
+    } catch (e) {
+      message.error(formatError(e))
+    } finally { setLogLoading(false) }
+  }
+  const closeLog = () => {
+    const t = (window as any).__buildLogTimer
+    if (t) clearInterval(t)
+    setLogTarget(null)
+    setLogText('')
+  }
+
+  const buildStatusTag = (s: string) => {
+    if (s === 'success') return <Tag color="green">✓ 成功</Tag>
+    if (s === 'failed') return <Tag color="red">✗ 失败</Tag>
+    if (s === 'building') return <Tag color="processing">● 构建中</Tag>
+    if (s === 'cancelled') return <Tag color="default">○ 已取消</Tag>
+    return <Tag>{s}</Tag>
+  }
+
   return (
     <>
-      <Space style={{ marginBottom: 12 }}>
-        <Button type="primary" onClick={openUpload}>↑ 上传文件</Button>
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Button type="primary" onClick={openBuild} disabled={!app.git_url}>
+          ⚙ 从仓库构建
+        </Button>
+        <Button onClick={openUpload}>↑ 上传文件</Button>
         <Button onClick={() => { form.resetFields(); setOpen(true) }}>+ 注册路径</Button>
-        <Button onClick={refresh}>刷新</Button>
-        <Typography.Text type="secondary">上传走 multipart 直传服务器；注册适合已经 scp 到服务器的旧 jar。</Typography.Text>
+        <Button onClick={() => { refresh(); refreshBuilds() }}>刷新</Button>
+        {!app.git_url && (
+          <Typography.Text type="secondary">应用未配 git_url，构建按钮不可用；先去「应用管理」补上。</Typography.Text>
+        )}
       </Space>
+
+      {/* 构建历史：仅有记录时显示 */}
+      {builds.length > 0 && (
+        <Card size="small" title={`构建历史（最近 ${Math.min(builds.length, 10)} 条）`}
+          style={{ marginBottom: 12 }}>
+          <Table<BuildRun>
+            rowKey="id" size="small" pagination={false}
+            loading={buildsLoading}
+            dataSource={builds.slice(0, 10)}
+            columns={[
+              { title: '#', dataIndex: 'id', width: 60 },
+              { title: 'Ref', dataIndex: 'git_ref', width: 120 },
+              { title: 'Commit', dataIndex: 'commit_sha', width: 90,
+                render: (s) => s ? <code>{s.substring(0, 7)}</code> : '-' },
+              { title: '状态', dataIndex: 'status', width: 100, render: (s) => buildStatusTag(s) },
+              { title: '产物', dataIndex: 'artifact_id', width: 80,
+                render: (id) => id ? `#${id}` : '-' },
+              { title: '触发人', dataIndex: 'triggered_by', width: 110 },
+              { title: '开始', dataIndex: 'started_at', width: 170,
+                render: (s) => s ? new Date(s).toLocaleString() : '-' },
+              { title: '操作', width: 100,
+                render: (_, b) => <Button size="small" onClick={() => openLog(b)}>日志</Button> },
+            ]}
+          />
+        </Card>
+      )}
+
       <Table<Artifact>
         rowKey="id" loading={loading} dataSource={list} pagination={false}
-        locale={{ emptyText: '还没有制品，点上方"↑ 上传文件"或"+ 注册路径"添加' }}
+        locale={{ emptyText: '还没有制品，点上方"⚙ 从仓库构建" / "↑ 上传文件" / "+ 注册路径"添加' }}
         columns={[
           { title: 'ID', dataIndex: 'id', width: 60 },
-          { title: '版本', dataIndex: 'version_tag', width: 140, render: (v) => <Tag>{v}</Tag> },
+          { title: '版本', dataIndex: 'version_tag', width: 180, render: (v) => <Tag>{v}</Tag> },
           { title: '文件', dataIndex: 'file_name' },
           { title: '路径', dataIndex: 'file_path', ellipsis: true, render: (v) => <code>{v}</code> },
           { title: 'MD5', dataIndex: 'file_md5', width: 280, render: (v) => <code style={{ fontSize: 11 }}>{v}</code> },
@@ -319,6 +447,71 @@ function ArtifactTab({ appId }: { appId: number }) {
           { title: '操作', width: 100, render: (_, a) => <Button danger size="small" onClick={() => handleDelete(a)}>删除</Button> },
         ]}
       />
+
+      <Modal title={`从仓库构建 - ${app.name}`} open={bdOpen}
+        onOk={handleBuild} onCancel={() => setBdOpen(false)}
+        okText="触发构建" cancelText="取消" width={560}>
+        <Form form={bdForm} layout="vertical">
+          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+            git_url: <code>{app.git_url}</code>
+          </Typography.Text>
+          <Form.Item name="git_ref" label="分支 / Tag / Commit" rules={[{ required: true }]}>
+            <Input placeholder="main / v1.0.0 / 7-digit SHA" />
+          </Form.Item>
+          <Form.Item name="cred_id" label="Git 凭证">
+            <Select
+              options={[
+                { value: 0, label: '— 无凭证（公网 / 走本机 SSH 默认 key）—' },
+                ...creds.map((c) => ({
+                  value: c.id,
+                  label: `${c.name} (${c.type === 'token' ? 'HTTPS Token' : 'SSH Key'})`,
+                })),
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="mvn_args" label="Maven 参数（可选）"
+            tooltip="留空 = clean package -DskipTests">
+            <Input placeholder="clean package -DskipTests -pl module-a -am" />
+          </Form.Item>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            构建在 swift-devops 服务器本机进程跑（需装 git + mvn + JDK）。
+            成功后自动落 Artifact，version_tag 形如 <code>git-&lt;短SHA&gt;-&lt;BuildID&gt;</code>。
+          </Typography.Text>
+        </Form>
+      </Modal>
+
+      <Modal title={logTarget ? `构建 #${logTarget.id} 日志` : ''}
+        open={!!logTarget} onCancel={closeLog} footer={null}
+        width={900} destroyOnClose>
+        {logLoading && <Typography.Text type="secondary">加载中…</Typography.Text>}
+        {logTarget && (
+          <>
+            <Descriptions size="small" column={2} style={{ marginBottom: 12 }}>
+              <Descriptions.Item label="状态">{buildStatusTag(logTarget.status)}</Descriptions.Item>
+              <Descriptions.Item label="Ref">{logTarget.git_ref}</Descriptions.Item>
+              <Descriptions.Item label="Commit">
+                {logTarget.commit_sha ? <code>{logTarget.commit_sha.substring(0, 7)}</code> : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="产物">
+                {logTarget.artifact_id ? `#${logTarget.artifact_id}` : '-'}
+              </Descriptions.Item>
+            </Descriptions>
+            {logTarget.error && (
+              <Card size="small" type="inner" style={{ marginBottom: 12, borderColor: '#ff4d4f' }}>
+                <Typography.Text type="danger">{logTarget.error}</Typography.Text>
+              </Card>
+            )}
+            <pre style={{
+              background: '#1e1e1e', color: '#d4d4d4', padding: 12, borderRadius: 4,
+              maxHeight: 500, overflow: 'auto', fontSize: 12,
+              fontFamily: 'Consolas, Monaco, monospace',
+              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            }}>
+              {logText || '(空)'}
+            </pre>
+          </>
+        )}
+      </Modal>
 
       <Modal title="注册制品（本地 jar 路径）" open={open} onOk={handleAdd} onCancel={() => setOpen(false)} okText="注册" cancelText="取消">
         <Form form={form} layout="vertical">

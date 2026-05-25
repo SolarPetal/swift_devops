@@ -8,6 +8,7 @@ import MainLayout from './pages/MainLayout'
 import HostList from './pages/HostList'
 import AppList from './pages/AppList'
 import AppDetail from './pages/AppDetail'
+import GitCredList from './pages/GitCredList'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="hosts" element={<HostList />} />
         <Route path="apps" element={<AppList />} />
         <Route path="apps/:id" element={<AppDetail />} />
+        <Route path="git-creds" element={<GitCredList />} />
         {/* 未来：artifacts / pipelines / monitor */}
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

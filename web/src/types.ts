@@ -42,6 +42,48 @@ export type ApiError = {
   error: { code: string; message: string }
 }
 
+// Sprint 5.1：Git 凭证
+export type GitCredential = {
+  id: number
+  name: string
+  type: 'token' | 'ssh_key'
+  username: string
+  has_secret: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type GitCredentialInput = {
+  name: string
+  type: 'token' | 'ssh_key'
+  username?: string
+  secret?: string // Update 时留空保留旧值
+}
+
+// Sprint 5.2/5.3：构建任务
+export type BuildRun = {
+  id: number
+  app_id: number
+  git_ref: string
+  commit_sha: string
+  mvn_args: string
+  cred_id: number
+  status: 'building' | 'success' | 'failed' | 'cancelled'
+  log_path: string
+  artifact_id: number
+  triggered_by: string
+  error: string
+  started_at?: string
+  finished_at?: string
+  created_at: string
+}
+
+export type BuildTriggerInput = {
+  git_ref?: string
+  mvn_args?: string
+  cred_id?: number
+}
+
 export type App = {
   id: number
   app_code: string

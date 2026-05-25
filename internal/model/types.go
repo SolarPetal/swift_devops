@@ -107,6 +107,41 @@ type PipelineRunHost struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
+// GitCredential Git 仓库凭证（Sprint 5.1）。
+// 同一份凭证可被多个 Application 复用（按 GitCredID 引用，但 Sprint 5 暂不绑 app，触发构建时按需选）。
+//   - Type=token: Secret 存 HTTPS PAT，Username 存用户名（GitHub 一般是 token 拥有者；GitLab 可填 oauth2 等）
+//   - Type=ssh_key: Secret 存 PEM 私钥，Username 一般为 "git"
+type GitCredential struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"size:100;uniqueIndex;not null" json:"name"`
+	Type      string    `gorm:"size:20;not null" json:"type"` // token / ssh_key
+	Username  string    `gorm:"size:100" json:"username"`
+	Secret    string    `gorm:"type:text" json:"-"` // AES-GCM 密文；外部一律 has_secret=true 占位
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BuildRun 一次构建任务（Sprint 5.2）。
+//   - 与 PipelineRun 平级；构建/部署各自独立工作流
+//   - 成功时 ArtifactID 指向落库的 Artifact，前端可直接基于此触发部署
+//   - LogPath 是相对 server 文件系统的绝对路径，里面是 git clone + mvn package 的合并输出
+type BuildRun struct {
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	AppID       uint       `gorm:"index;not null" json:"app_id"`
+	GitRef      string     `gorm:"size:100" json:"git_ref"`     // 分支 / tag / commit
+	CommitSHA   string     `gorm:"size:40" json:"commit_sha"`   // clone 后从 git rev-parse 回填
+	MvnArgs     string     `gorm:"size:255" json:"mvn_args"`    // 用户指定的额外 mvn 参数；空 = 默认
+	CredID      uint       `gorm:"index" json:"cred_id"`        // 关联 GitCredential；0 = 无凭证（公网仓）
+	Status      string     `gorm:"size:20;not null" json:"status"` // building / success / failed / cancelled
+	LogPath     string     `gorm:"size:255" json:"log_path"`    // build log 文件绝对路径
+	ArtifactID  uint       `gorm:"index" json:"artifact_id"`    // 成功时回填指向 Artifact
+	TriggeredBy string     `gorm:"size:50" json:"triggered_by"`
+	Error       string     `gorm:"type:text" json:"error"`
+	StartedAt   *time.Time `json:"started_at"`
+	FinishedAt  *time.Time `json:"finished_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
 // AuditLog 审计日志
 type AuditLog struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`

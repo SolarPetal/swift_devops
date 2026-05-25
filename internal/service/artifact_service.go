@@ -244,6 +244,90 @@ func (s *ArtifactService) Upload(in ArtifactUploadInput, src io.Reader) (Artifac
 	return toArtifactView(a), nil
 }
 
+// IngestLocalJar 把构建产出的 jar 拷贝到 artifactDir 并注册成 Artifact。
+// Sprint 5.3 给 BuildService 调：
+//   - localPath 通常在 build_workspace 内（构建工作区），不一定在 artifactDir 白名单
+//   - 拷贝到 {artifactDir}/{app_code}/{version_tag}{ext}
+//   - 计算 MD5 + size，落 Artifact 表
+//   - 不删 localPath（调用方决定是否清理 build workspace）
+func (s *ArtifactService) IngestLocalJar(appID uint, versionTag, localPath string) (ArtifactView, error) {
+	if s.artifactDir == "" {
+		return ArtifactView{}, apperr.New("INTERNAL", "storage.artifact_dir 未配置", 500)
+	}
+	if strings.TrimSpace(versionTag) == "" {
+		return ArtifactView{}, apperr.New("BAD_REQUEST", "version_tag 必填", 400)
+	}
+
+	// 1. 校验 app
+	var app model.Application
+	if err := s.db.First(&app, appID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ArtifactView{}, apperr.New("NOT_FOUND", fmt.Sprintf("应用 %d 不存在", appID), 404)
+		}
+		return ArtifactView{}, apperr.Wrap(err, "INTERNAL", "find app", 500)
+	}
+
+	// 2. 源文件检查
+	src, err := os.Open(localPath)
+	if err != nil {
+		return ArtifactView{}, apperr.Wrap(err, "INTERNAL", "open source jar", 500)
+	}
+	defer src.Close()
+	st, err := src.Stat()
+	if err != nil {
+		return ArtifactView{}, apperr.Wrap(err, "INTERNAL", "stat source jar", 500)
+	}
+
+	// 3. 组装落地路径：{root}/{app_code}/{sanitized_version}-{unixnano}{ext}
+	subDir := filepath.Join(s.artifactDir, app.AppCode)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		return ArtifactView{}, apperr.Wrap(err, "INTERNAL", "mkdir artifact subdir", 500)
+	}
+	ext := filepath.Ext(localPath)
+	if ext == "" {
+		ext = ".jar"
+	}
+	ver := sanitizeVersion(versionTag)
+	fname := fmt.Sprintf("%s-%d%s", ver, time.Now().UnixNano(), ext)
+	dst := filepath.Join(subDir, fname)
+
+	// 4. 拷贝 + MD5
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return ArtifactView{}, apperr.Wrap(err, "INTERNAL", "create dst", 500)
+	}
+	h := md5.New()
+	mw := io.MultiWriter(f, h)
+	written, err := io.Copy(mw, src)
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(dst)
+		return ArtifactView{}, apperr.Wrap(err, "INTERNAL", "copy jar", 500)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(dst)
+		return ArtifactView{}, apperr.Wrap(err, "INTERNAL", "close dst", 500)
+	}
+	if written != st.Size() {
+		_ = os.Remove(dst)
+		return ArtifactView{}, apperr.New("INTERNAL",
+			fmt.Sprintf("copy size mismatch: src=%d written=%d", st.Size(), written), 500)
+	}
+
+	// 5. 落库
+	a := &model.Artifact{
+		AppID: appID, VersionTag: versionTag,
+		FileName: filepath.Base(localPath), FilePath: dst,
+		FileMD5: hex.EncodeToString(h.Sum(nil)), FileSize: written,
+		BuildStatus: "success",
+	}
+	if err := s.db.Create(a).Error; err != nil {
+		_ = os.Remove(dst)
+		return ArtifactView{}, apperr.Wrap(err, "INTERNAL", "create artifact", 500)
+	}
+	return toArtifactView(a), nil
+}
+
 // ListByApp 列出应用制品（最新优先）
 func (s *ArtifactService) ListByApp(appID uint) ([]ArtifactView, error) {
 	var as []model.Artifact

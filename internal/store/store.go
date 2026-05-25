@@ -24,6 +24,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.Deployment{},
 		&model.PipelineRun{},
 		&model.PipelineRunHost{},
+		&model.GitCredential{},
+		&model.BuildRun{},
 		&model.AuditLog{},
 	)
 }
