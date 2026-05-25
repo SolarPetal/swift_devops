@@ -336,7 +336,14 @@ function ArtifactTab({ app }: { app: App }) {
   const openBuild = async () => {
     try { setCreds(await listGitCreds()) } catch (e) { message.error(formatError(e)) }
     bdForm.resetFields()
-    bdForm.setFieldsValue({ git_ref: 'main', mvn_args: 'clean package -DskipTests', cred_id: 0 })
+    bdForm.setFieldsValue({
+      git_ref: 'main',
+      mvn_args: 'clean package -DskipTests',
+      cred_id: 0,
+      // 默认填 app 配置的值，可临时改
+      build_module: app.build_module || '',
+      build_jar_pattern: app.build_jar_pattern || '',
+    })
     setBdOpen(true)
   }
   const handleBuild = async () => {
@@ -347,6 +354,8 @@ function ArtifactTab({ app }: { app: App }) {
         mvn_args: v.mvn_args || '',
       }
       if (v.cred_id && v.cred_id > 0) payload.cred_id = v.cred_id
+      if (v.build_module && v.build_module.trim() !== '') payload.build_module = v.build_module.trim()
+      if (v.build_jar_pattern && v.build_jar_pattern.trim() !== '') payload.build_jar_pattern = v.build_jar_pattern.trim()
       const r = await triggerBuild(appId, payload)
       message.success(`已触发构建：#${r.id}`)
       setBdOpen(false); refreshBuilds()
@@ -489,6 +498,14 @@ function ArtifactTab({ app }: { app: App }) {
           <Form.Item name="mvn_args" label="Maven 参数（可选）"
             tooltip="留空 = clean package -DskipTests">
             <Input placeholder="clean package -DskipTests -pl module-a -am" />
+          </Form.Item>
+          <Form.Item name="build_module" label="构建模块（可选，覆盖应用配置）"
+            tooltip="multi-module 项目专用：mvn -pl <module> -am 缩窄编译范围">
+            <Input placeholder="如：car-dealer-admin" />
+          </Form.Item>
+          <Form.Item name="build_jar_pattern" label="主 jar 路径模板（可选，覆盖应用配置）"
+            tooltip="命中多 jar 时显式指定。glob 相对仓库根，如 car-dealer-admin/target/*.jar">
+            <Input placeholder="如：car-dealer-admin/target/*.jar" />
           </Form.Item>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             构建在 swift-devops 服务器本机进程跑（需装 git + mvn + JDK）。

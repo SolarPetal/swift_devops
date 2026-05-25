@@ -146,7 +146,7 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [x] 5.1 GitCredential：model + CRUD + AES-GCM 加密 + 前端管理页（HTTPS token / SSH key 两种类型）
 - [x] 5.2 pkg/builder：git Clone（token/SSH key/匿名三模式）+ mvn package + 编排
 - [x] 5.3 BuildService + handler：异步触发 + 同 app 互斥 + 自动 IngestLocalJar 落 Artifact；前端制品 Tab 加「⚙ 从仓库构建」+ 历史 + 日志 Modal（轮询）
-- [x] 5.4 构建环境管理：BuilderEnv 单例表（java_home / maven_home / git_path）+ 「检测」按钮跑 -version 拿版本 + builder pkg 注入 ExecEnv 到 mvn 子进程 + 未检测通过时构建按钮 disabled
+- [x] 5.4 构建环境管理：BuilderEnv 单例表（java_home / maven_home / git_path）+ 「检测」按钮跑 -version 拿版本 + builder pkg 注入 ExecEnv 到 mvn 子进程 + 未检测通过时构建按钮 disabled。子项 5.4.7：multi-module 项目（Spring Boot 多 jar）支持 —— App 加 build_module / build_jar_pattern 字段、触发时可临时覆盖、builder 三级 jar 选择（pattern → 唯一 → Spring Boot MANIFEST.MF 探测）
 - [ ] 5.5 WS 实时日志（复用 Sprint 2.4 WS 框架 + 前端 LogTerminal）
 - [ ] 5.6 Docker 容器构建（隔离环境，避免本机依赖 git/mvn/JDK）
 - [ ] 5.7 制品历史清理（`max_history` 滚动删旧版 + 对应文件）

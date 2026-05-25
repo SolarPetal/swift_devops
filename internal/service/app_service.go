@@ -30,6 +30,9 @@ type AppInput struct {
 	// JavaPath 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
 	// 适用：同主机跑多 JDK 版本（jdk8 / jdk17）。
 	JavaPath string `json:"java_path,omitempty"`
+	// 构建参数（Sprint 5.4.7）：multi-module 项目专用
+	BuildModule     string `json:"build_module,omitempty"`      // mvn -pl 用，如 "car-dealer-admin"
+	BuildJarPattern string `json:"build_jar_pattern,omitempty"` // glob 选 jar，如 "car-dealer-admin/target/*.jar"
 	// 蓝绿配置（Sprint 4）。三者要么全填、要么 NginxHostID=0 表示不启用蓝绿。
 	// ActiveGroup 是受运行时事实约束的字段，由蓝绿策略部署成功后写入；
 	// 但允许在创建/更新时初始化一次（如导入旧应用时声明现状）。
@@ -53,6 +56,8 @@ type AppView struct {
 	EnvVars        string `json:"env_vars"`
 	SystemdUser    string `json:"systemd_user"`
 	JavaPath       string `json:"java_path"`
+	BuildModule       string `json:"build_module"`
+	BuildJarPattern   string `json:"build_jar_pattern"`
 	NginxHostID       uint   `json:"nginx_host_id"`
 	NginxUpstreamName string `json:"nginx_upstream_name"`
 	ActiveGroup       string `json:"active_group"`
@@ -68,6 +73,8 @@ func toAppView(a *model.Application) AppView {
 		HealthCheckURL: a.HealthCheckURL, JvmArgs: a.JvmArgs, EnvVars: a.EnvVars,
 		SystemdUser:       a.SystemdUser,
 		JavaPath:          a.JavaPath,
+		BuildModule:       a.BuildModule,
+		BuildJarPattern:   a.BuildJarPattern,
 		NginxHostID:       a.NginxHostID,
 		NginxUpstreamName: a.NginxUpstreamName,
 		ActiveGroup:       a.ActiveGroup,
@@ -111,6 +118,8 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 		JvmArgs:        in.JvmArgs, EnvVars: in.EnvVars,
 		SystemdUser:       strings.TrimSpace(in.SystemdUser),
 		JavaPath:          strings.TrimSpace(in.JavaPath),
+		BuildModule:       strings.TrimSpace(in.BuildModule),
+		BuildJarPattern:   strings.TrimSpace(in.BuildJarPattern),
 		NginxHostID:       in.NginxHostID,
 		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
 		ActiveGroup:       strings.TrimSpace(in.ActiveGroup),
@@ -168,6 +177,8 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.EnvVars = in.EnvVars
 	a.SystemdUser = strings.TrimSpace(in.SystemdUser)
 	a.JavaPath = strings.TrimSpace(in.JavaPath)
+	a.BuildModule = strings.TrimSpace(in.BuildModule)
+	a.BuildJarPattern = strings.TrimSpace(in.BuildJarPattern)
 	a.NginxHostID = in.NginxHostID
 	a.NginxUpstreamName = strings.TrimSpace(in.NginxUpstreamName)
 	a.ActiveGroup = strings.TrimSpace(in.ActiveGroup)

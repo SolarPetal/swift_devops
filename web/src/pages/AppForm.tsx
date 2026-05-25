@@ -34,6 +34,8 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         app_type: editing.app_type || 'jar',
         git_url: editing.git_url,
         git_cred_id: editing.git_cred_id,
+        build_module: editing.build_module,
+        build_jar_pattern: editing.build_jar_pattern,
         deploy_path: editing.deploy_path,
         port: editing.port,
         health_check_url: editing.health_check_url,
@@ -54,6 +56,8 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         java_path: '',
         git_url: '',
         git_cred_id: '',
+        build_module: '',
+        build_jar_pattern: '',
         nginx_host_id: 0,
         nginx_upstream_name: '',
         active_group: '',
@@ -88,6 +92,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
           app_code: 'basic', name: 'basic', app_type: 'basic',
           deploy_path: 'basic', port: 'basic', health_check_url: 'basic',
           git_url: 'build', git_cred_id: 'build',
+          build_module: 'build', build_jar_pattern: 'build',
           jvm_args: 'runtime', env_vars: 'runtime',
           systemd_user: 'runtime', java_path: 'runtime',
           nginx_host_id: 'bluegreen', nginx_upstream_name: 'bluegreen', active_group: 'bluegreen',
@@ -188,8 +193,23 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                       ]}
                     />
                   </Form.Item>
+                  <Form.Item
+                    name="build_module"
+                    label="构建模块（multi-module 项目用，可选）"
+                    tooltip="非空时给 mvn 加 -pl <module> -am，只编译该模块及其依赖，加速 + 避免多 jar 冲突。如 car-dealer-admin"
+                  >
+                    <Input placeholder="如：car-dealer-admin（留空构建整个项目）" />
+                  </Form.Item>
+                  <Form.Item
+                    name="build_jar_pattern"
+                    label="主 jar 路径模板（可选）"
+                    tooltip="多模块项目命中多 jar 时显式指定。相对 git 仓库根目录的 glob，如 car-dealer-admin/target/*.jar"
+                  >
+                    <Input placeholder="如：car-dealer-admin/target/*.jar" />
+                  </Form.Item>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    💡 没有凭证？去左侧菜单「🔑 Git 凭证」先创建一个，再回来选。
+                    💡 没有凭证？去左侧菜单「🔑 Git 凭证」先创建一个，再回来选。<br />
+                    💡 multi-module 项目命中多个 jar 时，填上「构建模块」或「主 jar 路径模板」其中一个即可。
                   </Typography.Text>
                 </>
               ),

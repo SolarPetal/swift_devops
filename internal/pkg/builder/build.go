@@ -18,6 +18,7 @@ type Plan struct {
 	GitRef        string      // 分支 / tag / commit
 	Cred          *Credential // nil = 公网匿名
 	MvnArgs       string      // 留空 = "clean package -DskipTests"
+	JarPattern    string      // glob 选 jar；空 = 自动扫描 + Spring Boot 探测。Sprint 5.4.7
 	Workspace     string      // build workspace 根目录（如 ./data/build/）
 	MavenCacheDir string      // -Dmaven.repo.local；空 = 走 ~/.m2
 	LogWriter     io.Writer   // git + mvn 全部 stdout/stderr 都写这里
@@ -86,6 +87,7 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 		LogWriter:     plan.LogWriter,
 		Timeout:       plan.BuildTimeout,
 		ExecEnv:       plan.ExecEnv,
+		JarPattern:    plan.JarPattern,
 	})
 	if err != nil {
 		return res, fmt.Errorf("maven: %w", err)

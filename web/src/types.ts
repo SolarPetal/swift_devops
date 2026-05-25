@@ -82,6 +82,8 @@ export type BuildTriggerInput = {
   git_ref?: string
   mvn_args?: string
   cred_id?: number
+  build_module?: string         // Sprint 5.4.7 临时覆盖
+  build_jar_pattern?: string    // Sprint 5.4.7 临时覆盖
 }
 
 // Sprint 5.4：构建机环境配置（单例）
@@ -117,6 +119,9 @@ export type App = {
   env_vars: string
   systemd_user: string
   java_path: string  // Sprint 3.7：应用级 java_path 覆盖；空 = 沿用 Host.java_path
+  // Sprint 5.4.7 构建参数（multi-module 项目）
+  build_module: string        // mvn -pl 用，如 "car-dealer-admin"
+  build_jar_pattern: string   // glob 选 jar，如 "car-dealer-admin/target/*.jar"
   // Sprint 4 蓝绿配置（可选）
   nginx_host_id: number       // 0 = 未启用蓝绿
   nginx_upstream_name: string // upstream block 名，与 nginx_host_id 同填同空

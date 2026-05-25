@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,9 +22,11 @@ import (
 
 // BuildTriggerInput 触发构建的入参。
 type BuildTriggerInput struct {
-	GitRef  string `json:"git_ref,omitempty"`  // 空 = "main"
-	MvnArgs string `json:"mvn_args,omitempty"` // 空 = builder 默认（clean package -DskipTests）
-	CredID  uint   `json:"cred_id,omitempty"`  // 0 = 公网匿名 / 走本机 SSH 默认
+	GitRef          string `json:"git_ref,omitempty"`           // 空 = "main"
+	MvnArgs         string `json:"mvn_args,omitempty"`          // 空 = builder 默认（clean package -DskipTests）
+	CredID          uint   `json:"cred_id,omitempty"`           // 0 = 公网匿名 / 走本机 SSH 默认
+	BuildModule     string `json:"build_module,omitempty"`      // 临时覆盖 app.BuildModule
+	BuildJarPattern string `json:"build_jar_pattern,omitempty"` // 临时覆盖 app.BuildJarPattern
 }
 
 // BuildRunView 构建任务响应视图。
@@ -253,10 +256,30 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
 	}
 
+	// 解析有效的 build_module / build_jar_pattern：触发时显式覆盖优先于 app 配置
+	effectiveModule := pickStr(in.BuildModule, app.BuildModule)
+	effectivePattern := pickStr(in.BuildJarPattern, app.BuildJarPattern)
+
+	// build_module 非空 → mvn 加 -pl <module> -am（编译该模块及其依赖），减少多 jar 命中 + 加速
+	finalMvnArgs := in.MvnArgs
+	if effectiveModule != "" {
+		prefix := fmt.Sprintf("-pl %s -am", effectiveModule)
+		if strings.TrimSpace(finalMvnArgs) == "" {
+			finalMvnArgs = prefix + " clean package -DskipTests"
+		} else {
+			finalMvnArgs = prefix + " " + finalMvnArgs
+		}
+		fmt.Fprintf(logFile, "[plan] mvn -pl %s -am 缩窄到该模块\n", effectiveModule)
+	}
+	if effectivePattern != "" {
+		fmt.Fprintf(logFile, "[plan] build_jar_pattern = %s\n", effectivePattern)
+	}
+
 	plan := builder.Plan{
 		AppCode: app.AppCode, GitURL: app.GitURL, GitRef: defaultRef(in.GitRef),
-		Cred: cred, MvnArgs: in.MvnArgs,
-		Workspace: s.workspace, MavenCacheDir: s.mavenCacheDir,
+		Cred: cred, MvnArgs: finalMvnArgs,
+		JarPattern: effectivePattern,
+		Workspace:  s.workspace, MavenCacheDir: s.mavenCacheDir,
 		LogWriter: io.MultiWriter(logFile),
 		ExecEnv:   execEnv,
 		BuildID:   buildID,
@@ -314,6 +337,14 @@ func defaultRef(ref string) string {
 		return "main"
 	}
 	return ref
+}
+
+// pickStr 返回第一个非空（trim 后）字符串，否则返回 fallback
+func pickStr(primary, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return strings.TrimSpace(primary)
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func shortSHA(sha string) string {

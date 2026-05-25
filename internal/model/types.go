@@ -39,6 +39,11 @@ type Application struct {
 	// JavaPath: 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
 	// 适用场景：同一台主机跑多个 JDK 版本的应用（jdk8 / jdk17 等）。
 	JavaPath          string `gorm:"size:255" json:"java_path"`
+	// Sprint 5.4.7 构建：multi-module 项目用
+	// BuildModule 非空 → mvn -pl <module> -am；只编译该模块及其依赖，加速 + 减少 jar 命中
+	// BuildJarPattern 非空 → glob 在 workspace 下匹配 jar；为空走 builder 默认扫描+Spring Boot 探测
+	BuildModule     string `gorm:"size:100" json:"build_module"`
+	BuildJarPattern string `gorm:"size:255" json:"build_jar_pattern"`
 	// Sprint 4 蓝绿：nginx 配置。空 = 未启用蓝绿。
 	// NginxHostID 指向 hosts 表中跑 nginx 的主机；NginxUpstreamName 是该 nginx 中的 upstream 名。
 	// ActiveGroup 记录当前对外提供服务的组（blue/green/空）；空 = 首次部署前。
