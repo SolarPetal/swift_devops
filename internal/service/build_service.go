@@ -157,12 +157,15 @@ func (s *BuildService) Trigger(appID uint, actor string, in BuildTriggerInput) (
 	}
 
 	// 5. 准备 log 文件路径
-	logPath := filepath.Join(s.workspace, fmt.Sprintf("%s-%d", app.AppCode, br.ID), "build.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+	// 关键：log 放在 subDir 外（跟 subDir 同级），避免 builder.Build 的
+	// "subDir 非空 → RemoveAll 重建" 把 log 文件一起删掉（unlinked fd 还能写，
+	// 但 disk 上文件没了，GetLog 读不到 → 前端看到空日志）
+	if err := os.MkdirAll(s.workspace, 0o755); err != nil {
 		s.releaseLock(appID)
-		s.finishBuild(br.ID, BuildStatusFailed, "", 0, "mkdir log dir: "+err.Error())
-		return BuildRunView{}, apperr.Wrap(err, "INTERNAL", "mkdir log dir", 500)
+		s.finishBuild(br.ID, BuildStatusFailed, "", 0, "mkdir workspace: "+err.Error())
+		return BuildRunView{}, apperr.Wrap(err, "INTERNAL", "mkdir workspace", 500)
 	}
+	logPath := filepath.Join(s.workspace, fmt.Sprintf("%s-%d.log", app.AppCode, br.ID))
 	br.LogPath = logPath
 	if err := s.db.Model(&model.BuildRun{}).Where("id = ?", br.ID).
 		Update("log_path", logPath).Error; err != nil {
