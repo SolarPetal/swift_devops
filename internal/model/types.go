@@ -23,6 +23,13 @@ type Host struct {
 }
 
 // Application 业务应用
+//
+// Sprint X.1 重构：从"单体 jar"演化为"业务系统层"。
+// per-runtime 字段（port/health/jvm/env/systemd_user/java_path/build_module/build_jar_pattern
+// /nginx_*/active_group）将逐步下沉到 [AppService]，X.1 阶段仍保留以兼容老 service/strategy/handler 代码；
+// 等 Sprint X.3/X.4 切流完成后再清掉。
+//
+// 新增 GitRef 字段：默认分支放顶层，多 service 共享一次构建。
 type Application struct {
 	ID             uint   `gorm:"primaryKey" json:"id"`
 	AppCode        string `gorm:"size:50;uniqueIndex;not null" json:"app_code"`
@@ -30,7 +37,12 @@ type Application struct {
 	AppType        string `gorm:"size:30" json:"app_type"` // jar / spring-cloud
 	GitURL         string `gorm:"size:255" json:"git_url"`
 	GitCredID      string `gorm:"size:100" json:"git_cred_id"`
+	// GitRef Sprint X.1：默认分支/tag/commit，多 service 一次构建共用。
+	// 触发构建时若未显式传 git_ref，使用本字段；空则兜底 "main"。
+	GitRef         string `gorm:"size:100" json:"git_ref"`
 	DeployPath     string `gorm:"size:255;not null" json:"deploy_path"`
+
+	// ===== 以下字段 Sprint X.1 标记为"待下沉到 AppService"，X.4 删除 =====
 	Port           int    `gorm:"not null" json:"port"`
 	HealthCheckURL string `gorm:"size:255;default:'/actuator/health'" json:"health_check_url"`
 	JvmArgs        string `gorm:"type:text" json:"jvm_args"`
@@ -50,11 +62,59 @@ type Application struct {
 	NginxHostID       uint   `gorm:"index" json:"nginx_host_id"`
 	NginxUpstreamName string `gorm:"size:100" json:"nginx_upstream_name"`
 	ActiveGroup       string `gorm:"size:20" json:"active_group"` // blue / green / 空
+	// ===== 待下沉字段结束 =====
+
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-// Artifact 制品
+// AppService 微服务层 —— Sprint X.1 新增。
+// 一个 Application 可挂 N 个 AppService（如 nacos 微服务里的 eureka / gateway / user-service / order-service）。
+//
+// 设计原则：
+//   - 单体 jar 应用 = 1 行 AppService（service_code 与 app_code 同名或 "default"）
+//   - per-runtime 字段（port / health / jvm / env / systemd_user / java_path）全部下沉到这里
+//   - 构建参数（build_module / build_jar_pattern）per-service：multi-module 项目每个 service 选一个 module
+//   - 启动序：StartupOrder 整数排序，小先起，同值并发；nacos 一般不在 swift-devops 管控，所以业务服务可全部用同一 wave
+//   - 蓝绿：per-service 蓝绿（Q1 答案 A）—— gateway 才挂 nginx_*，业务服务用 rolling
+//   - Optional：true 时该 service 失败不阻塞整个 run，snapshot 标 warning
+//   - Enabled：软下线开关，false 时部署/构建跳过该 service
+type AppService struct {
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	AppID       uint   `gorm:"uniqueIndex:idx_app_service;not null;index" json:"app_id"`
+	ServiceCode string `gorm:"uniqueIndex:idx_app_service;size:50;not null" json:"service_code"` // ^[a-z][a-z0-9-]{1,49}$
+	Name        string `gorm:"size:100" json:"name"`                                              // 展示名；空走 service_code
+
+	// 构建参数（multi-module Spring Boot）
+	BuildModule     string `gorm:"size:100" json:"build_module"`      // mvn -pl 用；空 = 全量 mvn package（单 module 项目）
+	BuildJarPattern string `gorm:"size:255" json:"build_jar_pattern"` // glob，空走默认扫描 + Spring Boot 探测
+
+	// per-runtime
+	Port           int    `gorm:"not null" json:"port"`
+	HealthCheckURL string `gorm:"size:255;default:'/actuator/health'" json:"health_check_url"`
+	JvmArgs        string `gorm:"type:text" json:"jvm_args"`
+	EnvVars        string `gorm:"type:text" json:"env_vars"` // JSON
+	SystemdUser    string `gorm:"size:32" json:"systemd_user"`
+	JavaPath       string `gorm:"size:255" json:"java_path"` // 空 = 沿用 Host.JavaPath
+
+	// 编排
+	StartupOrder int  `gorm:"default:100;index" json:"startup_order"` // 0=注册中心，10=网关，100=业务（默认）
+	Optional     bool `gorm:"default:false" json:"optional"`           // true = 失败不阻塞 run
+	Enabled      bool `gorm:"default:true" json:"enabled"`             // 软下线
+
+	// 蓝绿（per-service）—— gateway 才用
+	NginxHostID       uint   `gorm:"index" json:"nginx_host_id"`
+	NginxUpstreamName string `gorm:"size:100" json:"nginx_upstream_name"`
+	ActiveGroup       string `gorm:"size:20" json:"active_group"` // blue / green / 空
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Artifact 制品（旧表，Sprint X.1 之前的单 jar 模型）。
+//
+// Sprint X.1：保留兼容老 service/handler/strategy 代码；新代码请用 [ArtifactBundle] + [ArtifactItem]。
+// 等 Sprint X.4 完成切换后，本表退役（数据已在 X.1 cleanup 清空）。
 type Artifact struct {
 	ID           uint   `gorm:"primaryKey" json:"id"`
 	AppID        uint   `gorm:"index;not null" json:"app_id"`
@@ -68,25 +128,70 @@ type Artifact struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// Deployment 应用×主机部署关系
+// ArtifactBundle 版本一致性层 —— Sprint X.1 新增。
+// 一次构建 = 一个 Bundle = N 个 ArtifactItem（每个 AppService 一个 jar）。
+//
+// git_commit_sha 是"这 N 个 jar 是同一份代码出来的"的硬证据；回滚以 Bundle 为粒度（Q2 答案 A）。
+type ArtifactBundle struct {
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	AppID         uint   `gorm:"uniqueIndex:idx_bundle_app_version;not null;index" json:"app_id"`
+	VersionTag    string `gorm:"uniqueIndex:idx_bundle_app_version;size:50;not null" json:"version_tag"`
+	GitCommitSHA  string `gorm:"size:40;index" json:"git_commit_sha"`
+	BuildStatus   string `gorm:"size:20;not null" json:"build_status"` // success / failed / building
+	BuildLogPath  string `gorm:"size:255" json:"build_log_path"`        // 整组共享一份构建日志
+	TriggeredBy   string `gorm:"size:50" json:"triggered_by"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// ArtifactItem 产物明细 —— Sprint X.1 新增。
+// 每行 = Bundle 内一个 AppService 的 jar 文件。
+type ArtifactItem struct {
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	BundleID    uint   `gorm:"uniqueIndex:idx_item_bundle_service;not null;index" json:"bundle_id"`
+	ServiceCode string `gorm:"uniqueIndex:idx_item_bundle_service;size:50;not null" json:"service_code"`
+	FileName    string `gorm:"size:255;not null" json:"file_name"`
+	FilePath    string `gorm:"size:255;not null" json:"file_path"`
+	FileMD5     string `gorm:"size:32;not null" json:"file_md5"`
+	FileSize    int64  `json:"file_size"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// Deployment 应用×主机×服务 部署关系。
+//
+// Sprint X.1：唯一索引从 (app_id, host_id) 升级为 (app_id, host_id, service_code)，
+// 因为同一台主机可能跑多个 AppService。
+//   - 旧索引 idx_app_host 由 X.1 cleanup 脚本手动 DROP（GORM AutoMigrate 不会删旧索引）
+//   - 新增字段 ServiceCode：和 [AppService.ServiceCode] 配对
+//   - 新增字段 CurrentArtifactItemID / PreviousArtifactItemID：替代旧的 CurrentArtifactID / PreviousArtifactID
+//     旧 Artifact*ID 字段 X.4 删除
 type Deployment struct {
 	ID                 uint   `gorm:"primaryKey" json:"id"`
-	AppID              uint   `gorm:"uniqueIndex:idx_app_host;not null" json:"app_id"`
-	HostID             uint   `gorm:"uniqueIndex:idx_app_host;not null" json:"host_id"`
+	AppID              uint   `gorm:"uniqueIndex:idx_app_host_service;not null" json:"app_id"`
+	HostID             uint   `gorm:"uniqueIndex:idx_app_host_service;not null" json:"host_id"`
+	ServiceCode        string `gorm:"uniqueIndex:idx_app_host_service;size:50;not null;default:''" json:"service_code"` // Sprint X.1
 	GroupTag           string `gorm:"size:20" json:"group_tag"` // blue / green
-	CurrentArtifactID  uint   `json:"current_artifact_id"`
-	PreviousArtifactID uint   `json:"previous_artifact_id"` // 一键回滚用
+	// 旧产物指针（X.4 删除）
+	CurrentArtifactID  uint `json:"current_artifact_id"`
+	PreviousArtifactID uint `json:"previous_artifact_id"`
+	// 新产物指针（X.1 新增，指向 ArtifactItem）
+	CurrentArtifactItemID  uint `json:"current_artifact_item_id"`
+	PreviousArtifactItemID uint `json:"previous_artifact_item_id"`
 	Port               int    `json:"port"`
 	Status             string `gorm:"size:20" json:"status"` // running / stopped / failed
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
-// PipelineRun 一次发布或构建任务
+// PipelineRun 一次发布或构建任务。
+//
+// Sprint X.1：新增 BundleID / PreviousBundleID（指向 [ArtifactBundle]）；
+// 旧 ArtifactID 保留兼容，X.4 删除。回滚走整组 Bundle 粒度（Q2 答案 A）。
 type PipelineRun struct {
 	ID            uint       `gorm:"primaryKey" json:"id"`
 	AppID         uint       `gorm:"index;not null" json:"app_id"`
-	ArtifactID    uint       `json:"artifact_id"`
+	ArtifactID    uint       `json:"artifact_id"`           // 旧字段，X.4 删除
+	BundleID      uint       `gorm:"index" json:"bundle_id"` // Sprint X.1：当前发布的 Bundle
+	PreviousBundleID uint    `gorm:"index" json:"previous_bundle_id"` // Sprint X.1：整组回滚指针
 	Strategy      string     `gorm:"size:20" json:"strategy"` // build / single / rolling / blue_green / rollback
 	Status        string     `gorm:"size:20" json:"status"`   // pending / running / success / failed / cancelled
 	StateSnapshot string     `gorm:"type:text" json:"state_snapshot"`
@@ -96,12 +201,16 @@ type PipelineRun struct {
 	CreatedAt     time.Time  `json:"created_at"`
 }
 
-// PipelineRunHost 单次 run 在某台主机上的执行状态。
-// 与 StateSnapshot.steps 互补：steps 是阶段级时序，本表是 host 级聚合，便于 SQL 查询和未来 dashboard。
+// PipelineRunHost 单次 run 在某台主机×服务上的执行状态。
+// 与 StateSnapshot.steps 互补：steps 是阶段级时序，本表是 host×service 级聚合。
+//
+// Sprint X.1：唯一索引从 (run_id, host_id) 升级为 (run_id, host_id, service_code)，
+// 因为同一 run 在同一 host 上可能部署多个 service。旧索引 idx_run_host 由 cleanup 脚本 DROP。
 type PipelineRunHost struct {
 	ID           uint       `gorm:"primaryKey" json:"id"`
-	RunID        uint       `gorm:"uniqueIndex:idx_run_host;not null;index" json:"run_id"`
-	HostID       uint       `gorm:"uniqueIndex:idx_run_host;not null" json:"host_id"`
+	RunID        uint       `gorm:"uniqueIndex:idx_run_host_service;not null;index" json:"run_id"`
+	HostID       uint       `gorm:"uniqueIndex:idx_run_host_service;not null" json:"host_id"`
+	ServiceCode  string     `gorm:"uniqueIndex:idx_run_host_service;size:50;not null;default:''" json:"service_code"` // Sprint X.1
 	DeploymentID uint       `gorm:"index" json:"deployment_id"`
 	Status       string     `gorm:"size:20;not null" json:"status"`       // pending / running / success / failed / skipped
 	CurrentStage string     `gorm:"size:20" json:"current_stage"`         // dial / upload / write_unit / restart / health
