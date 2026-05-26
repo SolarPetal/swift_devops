@@ -132,6 +132,49 @@ export type App = {
 
 export type AppInput = Omit<App, 'id' | 'created_at' | 'updated_at'>
 
+// Sprint X.1/X.4：AppService 微服务层
+export type AppService = {
+  id: number
+  app_id: number
+  service_code: string
+  name: string
+  build_module: string
+  build_jar_pattern: string
+  port: number
+  health_check_url: string
+  jvm_args: string
+  env_vars: string
+  systemd_user: string
+  java_path: string
+  startup_order: number
+  optional: boolean
+  enabled: boolean
+  nginx_host_id: number
+  nginx_upstream_name: string
+  active_group: string
+  created_at: string
+  updated_at: string
+}
+
+export type AppServiceInput = {
+  service_code: string
+  name?: string
+  build_module?: string
+  build_jar_pattern?: string
+  port: number
+  health_check_url?: string
+  jvm_args?: string
+  env_vars?: string
+  systemd_user?: string
+  java_path?: string
+  startup_order?: number
+  optional?: boolean
+  enabled?: boolean
+  nginx_host_id?: number
+  nginx_upstream_name?: string
+  active_group?: string
+}
+
 export type Deployment = {
   id: number
   app_id: number

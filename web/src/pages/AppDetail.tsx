@@ -9,6 +9,7 @@ import {
 import type {
   App, Deployment, Host, Artifact, PipelineRun, RunSnapshot, StepResult, PipelineStage,
   BuildRun, GitCredential, BuilderEnv,
+  AppService, AppServiceInput,
 } from '../types'
 import { getApp } from '../api/app'
 import { listHosts } from '../api/host'
@@ -18,6 +19,7 @@ import { cancelPipeline, deployApp, getPipeline, listPipelines, rollbackApp } fr
 import { getBuild, getBuildLog, listBuilds, triggerBuild } from '../api/build'
 import { listGitCreds } from '../api/gitcred'
 import { getBuilderEnv } from '../api/builderEnv'
+import { listAppServices, createAppService, updateAppService, deleteAppService } from '../api/appService'
 import { buildWSURL, issueWSTicket, type PipelineWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
 
@@ -111,6 +113,7 @@ export default function AppDetail() {
           defaultActiveKey="hosts"
           items={[
             { key: 'hosts',     label: '主机绑定', children: <HostBindTab appId={appId} appPort={app.port} /> },
+            { key: 'services',  label: '微服务',   children: <ServicesTab appId={appId} app={app} /> },
             { key: 'artifacts', label: '制品',     children: <ArtifactTab app={app} /> },
             { key: 'pipelines', label: '部署历史', children: <PipelineTab app={app} /> },
           ]}
@@ -953,4 +956,203 @@ function WSStatusTag({ state }: { state: 'idle' | 'connecting' | 'open' | 'close
   if (state === 'error') return <Tag color="red">⚠ 连接失败 (轮询兜底)</Tag>
   if (state === 'closed') return <Tag>○ 已断开</Tag>
   return null
+}
+
+// ---------- 微服务 Tab (Sprint X.4) ----------
+//
+// 列表 + 新建/编辑/删除。单体 App 自动有一行 service_code="default"。
+// 多服务 App 通过这里加 N 行（每个 jar 一个 AppService）。
+function ServicesTab({ appId, app }: { appId: number; app: App }) {
+  const [items, setItems] = useState<AppService[]>([])
+  const [loading, setLoading] = useState(false)
+  const [editing, setEditing] = useState<AppService | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [form] = Form.useForm<AppServiceInput>()
+
+  const refresh = async () => {
+    setLoading(true)
+    try {
+      setItems(await listAppServices(appId))
+    } catch (e) {
+      message.error(formatError(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { refresh() }, [appId])
+
+  const openCreate = () => {
+    setCreating(true); setEditing(null)
+    form.resetFields()
+    form.setFieldsValue({
+      service_code: '', name: '',
+      port: app.port,
+      health_check_url: app.health_check_url || '/actuator/health',
+      jvm_args: app.jvm_args || '',
+      systemd_user: app.systemd_user || '',
+      startup_order: 100,
+      optional: false, enabled: true,
+    })
+  }
+  const openEdit = (row: AppService) => {
+    setEditing(row); setCreating(false)
+    form.resetFields()
+    form.setFieldsValue({
+      service_code: row.service_code, name: row.name,
+      build_module: row.build_module, build_jar_pattern: row.build_jar_pattern,
+      port: row.port, health_check_url: row.health_check_url,
+      jvm_args: row.jvm_args, env_vars: row.env_vars,
+      systemd_user: row.systemd_user, java_path: row.java_path,
+      startup_order: row.startup_order, optional: row.optional, enabled: row.enabled,
+      nginx_host_id: row.nginx_host_id, nginx_upstream_name: row.nginx_upstream_name,
+    })
+  }
+  const closeModal = () => { setCreating(false); setEditing(null); form.resetFields() }
+
+  const onSubmit = async () => {
+    try {
+      const values = await form.validateFields()
+      if (editing) {
+        await updateAppService(editing.id, values)
+        message.success('已更新')
+      } else {
+        await createAppService(appId, values)
+        message.success('已创建')
+      }
+      closeModal()
+      await refresh()
+    } catch (e: any) {
+      if (e?.errorFields) return // 表单校验
+      message.error(formatError(e))
+    }
+  }
+
+  const onDelete = (row: AppService) => {
+    Modal.confirm({
+      title: `删除 service ${row.service_code}?`,
+      content: '若仍被 deployment 绑定将拒绝。',
+      okType: 'danger', okText: '删除',
+      onOk: async () => {
+        try {
+          await deleteAppService(row.id)
+          message.success('已删除')
+          await refresh()
+        } catch (e) {
+          message.error(formatError(e))
+        }
+      },
+    })
+  }
+
+  return (
+    <Card
+      title="微服务列表"
+      size="small"
+      extra={<Button type="primary" onClick={openCreate}>+ 新建 Service</Button>}
+    >
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+        多 service 应用在这里增删。单体 App 已自动建 <code>default</code> 行；
+        Spring Cloud 项目可加 <code>eureka</code> / <code>gateway</code> / <code>user-service</code> 等。
+        部署按 <strong>startup_order</strong> 分波，同波内并发。
+      </Typography.Paragraph>
+      <Table
+        rowKey="id"
+        size="small"
+        loading={loading}
+        dataSource={items}
+        pagination={false}
+        columns={[
+          { title: 'service_code', dataIndex: 'service_code', render: (v: string) => <code>{v}</code> },
+          { title: '展示名', dataIndex: 'name' },
+          { title: 'Port', dataIndex: 'port', width: 80 },
+          { title: 'startup', dataIndex: 'startup_order', width: 80 },
+          { title: 'module', dataIndex: 'build_module', render: (v: string) => v || '—' },
+          {
+            title: '状态', width: 130,
+            render: (_: any, row: AppService) => (
+              <Space size={4}>
+                {row.enabled ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>}
+                {row.optional && <Tag color="orange">optional</Tag>}
+              </Space>
+            ),
+          },
+          {
+            title: '操作', width: 160,
+            render: (_: any, row: AppService) => (
+              <Space size={4}>
+                <Button size="small" onClick={() => openEdit(row)}>编辑</Button>
+                <Button size="small" danger onClick={() => onDelete(row)}>删除</Button>
+              </Space>
+            ),
+          },
+        ]}
+      />
+
+      <Modal
+        title={editing ? `编辑 service ${editing.service_code}` : '新建 service'}
+        open={creating || !!editing}
+        onCancel={closeModal}
+        onOk={onSubmit}
+        okText={editing ? '保存' : '创建'}
+        width={680}
+      >
+        <Form form={form} layout="vertical" size="small">
+          <Form.Item
+            name="service_code" label="service_code"
+            rules={[{ required: true, pattern: /^[a-z][a-z0-9-]{1,49}$/,
+              message: '小写字母开头，2-50 位，仅小写字母/数字/连字符' }]}
+            tooltip="systemd unit 命名一部分，创建后不可改"
+          >
+            <Input placeholder="eureka / gateway / user-service" disabled={!!editing} />
+          </Form.Item>
+          <Form.Item name="name" label="展示名">
+            <Input placeholder="留空走 service_code" />
+          </Form.Item>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="port" label="Port" rules={[{ required: true }]} style={{ flex: 1 }}>
+              <InputNumber min={1} max={65535} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="startup_order" label="startup_order" style={{ flex: 1 }}
+              tooltip="同值的 service 同波并发；小先起。注册中心 0，网关 10，业务 100"
+            >
+              <InputNumber min={0} max={9999} style={{ width: '100%' }} />
+            </Form.Item>
+          </Space>
+          <Form.Item name="health_check_url" label="健康检查 URL">
+            <Input placeholder="/actuator/health" />
+          </Form.Item>
+          <Form.Item name="build_module" label="build_module" tooltip="multi-module 项目用，mvn -pl">
+            <Input placeholder="user-service" />
+          </Form.Item>
+          <Form.Item name="build_jar_pattern" label="build_jar_pattern" tooltip="glob 在 workspace 下匹配 jar">
+            <Input placeholder="user-service/target/*.jar" />
+          </Form.Item>
+          <Form.Item name="jvm_args" label="JVM 参数">
+            <Input placeholder="-Xms512m -Xmx512m" />
+          </Form.Item>
+          <Form.Item name="env_vars" label="环境变量 (JSON)">
+            <Input.TextArea rows={2} placeholder='{"SPRING_PROFILES_ACTIVE":"prod"}' />
+          </Form.Item>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="systemd_user" label="systemd User" style={{ flex: 1 }}>
+              <Input placeholder="留空 = root" />
+            </Form.Item>
+            <Form.Item name="java_path" label="JavaPath 覆盖" style={{ flex: 1 }}>
+              <Input placeholder="留空 = 沿用 Host" />
+            </Form.Item>
+          </Space>
+          <Space style={{ display: 'flex' }}>
+            <Form.Item name="optional" label="Optional" valuePropName="checked" style={{ flex: 1 }}
+              tooltip="勾上则该 service 失败不阻塞整组部署"
+            >
+              <Input type="checkbox" />
+            </Form.Item>
+            <Form.Item name="enabled" label="Enabled" valuePropName="checked" style={{ flex: 1 }}>
+              <Input type="checkbox" />
+            </Form.Item>
+          </Space>
+        </Form>
+      </Modal>
+    </Card>
+  )
 }
