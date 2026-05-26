@@ -71,13 +71,25 @@ type HostOutcome struct {
 
 // Plan 一次 run 的执行计划（数据 + 配置）。
 // service 层组装，策略只读。
+//
+// Sprint X.3：strategy 内部仍按"一次 Run 处理一个 service × N host"工作，
+// wave 编排（按 startup_order 分波 + 同波多 service 并发）由 pipeline_service 在
+// strategy 外层完成。Plan 多挂当前 service / item 字段，让 deployHostService 拿到。
 type Plan struct {
 	RunID           uint
 	App             *model.Application
-	Artifact        *model.Artifact            // forward 模式（single/rolling/blue_green）的统一新版本；rollback 不用
-	ArtifactByDepID map[uint]*model.Artifact // rollback 用：每个 deployment 的 previous_artifact_id 对应的 art
-	Deps            []model.Deployment        // 已按 ID ASC 排好序
-	EnvMap          map[string]string         // 已解析的 env vars
+
+	// 旧字段（X.4 删除）：单 jar 链路
+	Artifact        *model.Artifact            // forward 模式的统一新版本；rollback 不用
+	ArtifactByDepID map[uint]*model.Artifact   // rollback：每 dep 的 previous_artifact_id 对应的 art
+
+	// Sprint X.3 新字段（多 service 链路）
+	Service         *model.AppService          // 本次 Run 部署的 service；wave 编排时由 pipeline_service 注入
+	Item            *model.ArtifactItem        // 本 service 在 Bundle 中的 jar 产物；rollback 不用
+	ItemByDepID     map[uint]*model.ArtifactItem // rollback：每 dep 的 previous item
+
+	Deps            []model.Deployment        // 已按 ID ASC 排好序；wave 编排后只含本 service 的 dep
+	EnvMap          map[string]string         // 已解析的 env vars（per-service）
 	BatchSize       int                       // rolling 专用；single/rollback 忽略；0/1 退化为单批
 	// 蓝绿专用（Sprint 4.3）：
 	TargetGroup string                                  // blue / green —— BlueGreen 部署到这个组

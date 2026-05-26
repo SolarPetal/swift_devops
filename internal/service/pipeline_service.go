@@ -365,6 +365,9 @@ func (s *PipelineService) Get(id uint) (PipelineRunView, error) {
 // execute 通用流水线执行器。caller（Trigger / Rollback）负责组装 plan 和挑 strat。
 //   - app 用于 releaseLock(app.ID) 和总超时计算
 //   - plan.Deps 决定总超时和 PipelineRunHost 数量
+//
+// Sprint X.3：当 app 已配置 AppService 时按 wave 调度（多 service 并发部署）；
+// 未配置时退化为单次 strat.Run，保持旧链路完全兼容。
 func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Application, plan *strategy.Plan, strat strategy.Strategy) {
 	defer s.releaseLock(app.ID)
 	defer s.unregisterCancel(runID)
@@ -377,15 +380,37 @@ func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Ap
 		snap.ArtifactID = plan.Artifact.ID
 	}
 
-	// 总超时：每 host 给 2 分钟，加 30 秒余量
+	// 总超时：每 host 给 2 分钟，加 30 秒余量；多 service 时不放大（同 host 多 service 顺序部署）
 	totalTimeout := time.Duration(len(plan.Deps))*2*time.Minute + 30*time.Second
+	if totalTimeout < 2*time.Minute {
+		totalTimeout = 2 * time.Minute
+	}
 	timeoutCtx, cancelTimeout := context.WithTimeout(ctx, totalTimeout)
 	defer cancelTimeout()
 
 	env := strategy.Env{HostSvc: s.hostSvc, SSHOpts: s.sshOpts}
 	hooks := &runHooks{svc: s, runID: runID}
 
-	outcomes, steps := strat.Run(timeoutCtx, env, plan, hooks)
+	var (
+		outcomes []strategy.HostOutcome
+		steps    []strategy.StepResult
+	)
+
+	// Sprint X.3：查 app 是否已配置 AppService
+	services, svcErr := s.loadEnabledServices(app.ID)
+	if svcErr != nil {
+		slog.Warn("load app services failed, fallback to legacy single-jar path", "app_id", app.ID, "err", svcErr)
+	}
+
+	if len(services) == 0 {
+		// 旧链路：单 jar 模式直接调 strat.Run，plan.Service == nil 触发 resolveServiceConfig 走 app 字段
+		outcomes, steps = strat.Run(timeoutCtx, env, plan, hooks)
+	} else {
+		// 多 service：按 startup_order 分波并发
+		waves := strategy.PartitionWaves(services)
+		build := s.buildSubPlanFunc(plan, strat, services)
+		outcomes, steps = strategy.RunWaves(timeoutCtx, env, waves, build, hooks)
+	}
 	snap.Steps = steps
 
 	// 用户取消 vs 自然结束：看父 ctx 是不是被显式 Cancel 过
@@ -394,6 +419,78 @@ func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Ap
 
 	s.finishRun(runID, &snap, finalStatus)
 	s.publishStatus(runID, finalStatus)
+}
+
+// loadEnabledServices 查 app 已启用的 AppService（按 startup_order ASC）。
+// 返回空切片 + nil err 表示 app 没配 service（走旧链路）。
+func (s *PipelineService) loadEnabledServices(appID uint) ([]model.AppService, error) {
+	var services []model.AppService
+	if err := s.db.Where("app_id = ? AND enabled = ?", appID, true).
+		Order("startup_order ASC, id ASC").Find(&services).Error; err != nil {
+		return nil, err
+	}
+	return services, nil
+}
+
+// buildSubPlanFunc 构造 SubPlanBuilder，给 RunWaves 用。
+//
+// 每个 service 拿到自己的 sub-plan：
+//   - sub.Service / sub.Deps（按 service_code 过滤）只属于该 service
+//   - 单 jar 旧链路：sub.Artifact 仍指向 plan.Artifact（兼容期）
+//   - 多 service Bundle 链路：sub.Artifact 由 plan.Bundle 的 service 对应 item 包装
+//   - rollback：sub.ArtifactByDepID 按本 service 的 dep 过滤
+func (s *PipelineService) buildSubPlanFunc(plan *strategy.Plan, strat strategy.Strategy, services []model.AppService) strategy.SubPlanBuilder {
+	return func(svc *model.AppService) (*strategy.Plan, strategy.Strategy, error) {
+		sub := *plan // 浅拷贝
+		sub.Service = svc
+		sub.Deps = depsForService(plan.Deps, svc.ServiceCode)
+		if len(sub.Deps) == 0 {
+			// 没有任何 host 绑定该 service → 跳过
+			return nil, nil, nil
+		}
+		// 解析该 service 的 EnvVars（per-service 优先）
+		if envMap, err := deploy.ParseEnvVarsJSON(svc.EnvVars); err == nil && len(envMap) > 0 {
+			sub.EnvMap = envMap
+		}
+		// rollback：过滤 ArtifactByDepID
+		if len(plan.ArtifactByDepID) > 0 {
+			subMap := map[uint]*model.Artifact{}
+			for _, d := range sub.Deps {
+				if a, ok := plan.ArtifactByDepID[d.ID]; ok {
+					subMap[d.ID] = a
+				}
+			}
+			sub.ArtifactByDepID = subMap
+			if len(subMap) == 0 {
+				return nil, nil, nil // 该 service 没有 previous artifact
+			}
+			return &sub, strat, nil
+		}
+		// forward：plan.Artifact 保持兼容（X.4 之后从 Bundle 取 item）
+		return &sub, strat, nil
+	}
+}
+
+// depsForService 按 service_code 过滤 deps。
+// 兼容矩阵：
+//   - 多 service 期间 svcCode 非空 → 严格匹配 dep.ServiceCode
+//   - svcCode 为 "default" → 匹配 dep.ServiceCode == "" || "default"（兼容旧数据）
+func depsForService(deps []model.Deployment, svcCode string) []model.Deployment {
+	out := make([]model.Deployment, 0, len(deps))
+	isDefault := svcCode == "" || svcCode == "default"
+	for i := range deps {
+		c := deps[i].ServiceCode
+		if isDefault {
+			if c == "" || c == "default" {
+				out = append(out, deps[i])
+			}
+		} else {
+			if c == svcCode {
+				out = append(out, deps[i])
+			}
+		}
+	}
+	return out
 }
 
 // seedRunHosts 为本次 run 的每台主机预建一行 PipelineRunHost（status=pending）。

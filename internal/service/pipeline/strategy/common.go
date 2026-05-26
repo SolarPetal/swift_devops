@@ -71,8 +71,13 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 	dispatcher := deploy.NewDispatcher(client.SSHClient())
 	sysctl := deploy.NewSystemctl(client)
 
-	// 计算 effective java_path：app 覆盖 host，最后兜底 /usr/bin/java
-	effectiveJava := strings.TrimSpace(app.JavaPath)
+	// Sprint X.3：根据 plan.Service 决定 service-aware 字段
+	// - 有 Service：service-level 配置覆盖 app-level，jar/unit 加 service_code 维度
+	// - 无 Service（旧链路）：完全用 app 字段，保持 Sprint X.3 之前的行为
+	svcCode, svcPort, svcHealth, svcJvm, svcEnvMap, svcSystemdUser, svcJavaPath := resolveServiceConfig(plan, app, dep)
+
+	// 计算 effective java_path：service 覆盖 app，再覆盖 host，最后兜底 /usr/bin/java
+	effectiveJava := strings.TrimSpace(svcJavaPath)
 	if effectiveJava == "" {
 		effectiveJava = strings.TrimSpace(host.JavaPath)
 	}
@@ -81,13 +86,13 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 	}
 
 	spec := deploy.AppSpec{
-		AppCode:        app.AppCode,
-		DeployPath:     app.DeployPath,
-		JvmArgs:        app.JvmArgs,
-		Port:           effectivePort(dep, app),
-		HealthCheckURL: app.HealthCheckURL,
-		EnvVars:        plan.EnvMap,
-		User:           app.SystemdUser,
+		AppCode:        unitNameKey(app.AppCode, svcCode), // unit 名前缀
+		DeployPath:     serviceDeployPath(app.DeployPath, svcCode),
+		JvmArgs:        svcJvm,
+		Port:           svcPort,
+		HealthCheckURL: svcHealth,
+		EnvVars:        svcEnvMap,
+		User:           svcSystemdUser,
 		JavaPath:       effectiveJava,
 	}
 
@@ -242,6 +247,68 @@ func effectivePort(dep *model.Deployment, app *model.Application) int {
 		return dep.Port
 	}
 	return app.Port
+}
+
+// resolveServiceConfig 解析当前 (host × service) 部署所需的 per-runtime 配置。
+//
+// Sprint X.3 兼容矩阵：
+//   - plan.Service 非 nil → 从 AppService 取（多 service 链路）
+//   - plan.Service 为 nil → 从 Application 取（X.3 之前的单 jar 兼容）
+//
+// 返回值：service_code, port, health_url, jvm_args, env_map, systemd_user, java_path
+func resolveServiceConfig(plan *Plan, app *model.Application, dep *model.Deployment) (
+	svcCode string, port int, health, jvm string, envMap map[string]string, systemdUser, javaPath string,
+) {
+	if plan.Service != nil {
+		s := plan.Service
+		svcCode = strings.TrimSpace(s.ServiceCode)
+		port = s.Port
+		if dep.Port > 0 {
+			port = dep.Port // dep 级覆盖仍生效（蓝绿/特殊 host 改端口场景）
+		}
+		health = s.HealthCheckURL
+		jvm = s.JvmArgs
+		systemdUser = s.SystemdUser
+		javaPath = s.JavaPath
+		// env_vars 优先 service-level，落空回 plan.EnvMap（兼容老调用方）
+		if parsed, err := deploy.ParseEnvVarsJSON(s.EnvVars); err == nil && len(parsed) > 0 {
+			envMap = parsed
+		} else {
+			envMap = plan.EnvMap
+		}
+		return
+	}
+	// 旧链路：完全从 app 取
+	svcCode = ""
+	port = effectivePort(dep, app)
+	health = app.HealthCheckURL
+	jvm = app.JvmArgs
+	systemdUser = app.SystemdUser
+	javaPath = app.JavaPath
+	envMap = plan.EnvMap
+	return
+}
+
+// unitNameKey 决定 systemd unit 命名的 app_code 部分。
+//   - svcCode 空 / "default" → 沿用旧名 "devops-<app>.service"
+//   - 其他 → "devops-<app>-<svc>.service"，避免同 app 多 service 的 unit 冲突
+func unitNameKey(appCode, svcCode string) string {
+	c := strings.TrimSpace(svcCode)
+	if c == "" || c == "default" {
+		return appCode
+	}
+	return appCode + "-" + c
+}
+
+// serviceDeployPath 决定 jar 在远端的部署根目录。
+//   - svcCode 空 / "default" → 直接用 app.DeployPath（旧布局，兼容单 jar 应用）
+//   - 其他 → "<deploy_path>/<svc>/"（多 service 独立子目录，日志/配置自然隔离）
+func serviceDeployPath(deployPath, svcCode string) string {
+	c := strings.TrimSpace(svcCode)
+	if c == "" || c == "default" {
+		return deployPath
+	}
+	return strings.TrimRight(deployPath, "/") + "/" + c
 }
 
 // humanizeSystemdError 从 systemctl status / journalctl 输出里识别常见错误码，
