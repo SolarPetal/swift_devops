@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -130,6 +131,12 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 				fmt.Sprintf("app_code %q 已存在", in.AppCode), 409)
 		}
 		return AppView{}, apperr.Wrap(err, "INTERNAL", "create app", 500)
+	}
+	// Sprint X.4：自动建一行 service_code="default" 的 AppService，
+	// 让单体 App 也能走多 service 链路（部署/构建 wave 调度找得到 service 行）。
+	if err := EnsureDefaultAppService(s.db, a); err != nil {
+		// 不阻塞 app 创建（已落库），但记日志
+		slog.Warn("ensure default service after app create", "app_id", a.ID, "err", err)
 	}
 	return toAppView(a), nil
 }

@@ -39,6 +39,7 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 
 	hostSvc := service.NewHostService(db, aes)
 	appSvc := service.NewAppService(db)
+	appServiceSvc := service.NewAppServiceService(db) // Sprint X.4：微服务层 CRUD
 	depSvc := service.NewDeploymentService(db)
 	artSvc := service.NewArtifactService(db, cfg.Storage.ArtifactDir, int64(cfg.Storage.MaxUploadMB)<<20)
 	gitCredSvc := service.NewGitCredentialService(db, aes)
@@ -74,6 +75,14 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/apps/:id", appH.Get)
 		v1.PUT("/apps/:id", appH.Update)
 		v1.DELETE("/apps/:id", appH.Delete)
+
+		// 微服务层 AppService（Sprint X.4）
+		asH := handler.NewAppServiceHandler(appServiceSvc)
+		v1.POST("/apps/:id/services", asH.Create)
+		v1.GET("/apps/:id/services", asH.List)
+		v1.GET("/app-services/:id", asH.Get)
+		v1.PUT("/app-services/:id", asH.Update)
+		v1.DELETE("/app-services/:id", asH.Delete)
 
 		// 应用 × 主机绑定（Deployment）
 		depH := handler.NewDeploymentHandler(depSvc)
