@@ -36,6 +36,8 @@ func main() {
 		runServe(args)
 	case "hash-pwd":
 		runHashPwd(args)
+	case "cleanup-apps":
+		runCleanupApps(args)
 	case "version", "-v", "--version":
 		fmt.Println(Version)
 	case "-h", "--help", "help":
@@ -52,6 +54,8 @@ func usage() {
 
 Usage:
   swift-devops serve --config <path>      Run the HTTP server
+  swift-devops cleanup-apps --config <p>  Wipe app data (apps/artifacts/deployments/runs)
+                                          and drop legacy unique indexes (Sprint X.1)
   swift-devops hash-pwd <password>        Output bcrypt hash for a password
   swift-devops version                    Show version`)
 }
