@@ -70,7 +70,8 @@ export type BuildRun = {
   cred_id: number
   status: 'building' | 'success' | 'failed' | 'cancelled'
   log_path: string
-  artifact_id: number
+  artifact_id: number  // 旧链路兼容；多 service / 重构后默认 0
+  bundle_id: number    // Sprint X.6：构建成功后回填的 ArtifactBundle id；旧构建为 0
   triggered_by: string
   error: string
   started_at?: string

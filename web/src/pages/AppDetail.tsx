@@ -239,6 +239,7 @@ function HostBindTab({ appId, appPort }: { appId: number; appPort: number }) {
 function ArtifactTab({ app }: { app: App }) {
   const appId = app.id
   const [list, setList] = useState<Artifact[]>([])
+  const [bundles, setBundles] = useState<ArtifactBundle[]>([])
   const [loading, setLoading] = useState(false)
   const [open, setOpen] = useState(false)
   const [form] = Form.useForm()
@@ -263,8 +264,16 @@ function ArtifactTab({ app }: { app: App }) {
 
   const refresh = async () => {
     setLoading(true)
-    try { setList(await listArtifacts(appId)) }
-    catch (e) { message.error(formatError(e)) }
+    try {
+      // Sprint X.6 修复：构建成功后落 ArtifactBundle 表，旧上传/注册落 Artifact 表。
+      // 两路并行拉，否则「从仓库构建」产出的 Bundle 在制品 Tab 里会完全看不见。
+      const [as, bs] = await Promise.all([
+        listArtifacts(appId),
+        listBundles(appId),
+      ])
+      setList(as)
+      setBundles(bs)
+    } catch (e) { message.error(formatError(e)) }
     finally { setLoading(false) }
   }
   const refreshBuilds = async () => {
@@ -449,13 +458,62 @@ function ArtifactTab({ app }: { app: App }) {
               { title: 'Commit', dataIndex: 'commit_sha', width: 90,
                 render: (s) => s ? <code>{s.substring(0, 7)}</code> : '-' },
               { title: '状态', dataIndex: 'status', width: 100, render: (s) => buildStatusTag(s) },
-              { title: '产物', dataIndex: 'artifact_id', width: 80,
-                render: (id) => id ? `#${id}` : '-' },
+              { title: '产物', width: 140,
+                render: (_, b) =>
+                  b.bundle_id ? <Tag color="blue">Bundle #{b.bundle_id}</Tag>
+                  : b.artifact_id ? `#${b.artifact_id}`
+                  : '-' },
               { title: '触发人', dataIndex: 'triggered_by', width: 110 },
               { title: '开始', dataIndex: 'started_at', width: 170,
                 render: (s) => s ? new Date(s).toLocaleString() : '-' },
               { title: '操作', width: 100,
                 render: (_, b) => <Button size="small" onClick={() => openLog(b)}>日志</Button> },
+            ]}
+          />
+        </Card>
+      )}
+
+      {/* Sprint X.6：整组制品（多 service 构建产出）。bundles 为空时不显示，
+          避免对仅用上传/注册的老应用造成视觉噪音。 */}
+      {bundles.length > 0 && (
+        <Card size="small"
+          title={`整组制品 Bundle（从仓库构建产出 · 共 ${bundles.length} 组）`}
+          style={{ marginBottom: 12 }}>
+          <Table<ArtifactBundle>
+            rowKey="id" size="small" pagination={false}
+            dataSource={bundles}
+            expandable={{
+              expandedRowRender: (b) => (
+                <Table
+                  rowKey="id" size="small" pagination={false}
+                  dataSource={b.items ?? []}
+                  columns={[
+                    { title: 'Service', dataIndex: 'service_code', width: 140,
+                      render: (v) => <Tag color="purple">{v}</Tag> },
+                    { title: '文件', dataIndex: 'file_name' },
+                    { title: '路径', dataIndex: 'file_path', ellipsis: true,
+                      render: (v) => <code>{v}</code> },
+                    { title: 'MD5', dataIndex: 'file_md5', width: 280,
+                      render: (v) => <code style={{ fontSize: 11 }}>{v}</code> },
+                    { title: '大小', dataIndex: 'file_size', width: 100,
+                      render: (n) => `${(n/1024).toFixed(1)} KB` },
+                  ]}
+                />
+              ),
+              rowExpandable: (b) => (b.items?.length ?? 0) > 0,
+            }}
+            columns={[
+              { title: '#', dataIndex: 'id', width: 60 },
+              { title: '版本', dataIndex: 'version_tag', width: 220,
+                render: (v) => <Tag color="blue">{v}</Tag> },
+              { title: 'Commit', dataIndex: 'git_commit_sha', width: 100,
+                render: (s) => s ? <code>{s.substring(0, 7)}</code> : '-' },
+              { title: 'Service 数', width: 100,
+                render: (_, b) => b.items?.length ?? 0 },
+              { title: '触发人', dataIndex: 'triggered_by', width: 110,
+                render: (v) => v || '-' },
+              { title: '创建', dataIndex: 'created_at', width: 170,
+                render: (s) => new Date(s).toLocaleString() },
             ]}
           />
         </Card>
