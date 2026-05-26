@@ -250,6 +250,8 @@ func (s *ArtifactService) Upload(in ArtifactUploadInput, src io.Reader) (Artifac
 //   - 拷贝到 {artifactDir}/{app_code}/{version_tag}{ext}
 //   - 计算 MD5 + size，落 Artifact 表
 //   - 不删 localPath（调用方决定是否清理 build workspace）
+//
+// Sprint X.2 注意：这是单 jar 旧链路，多 service 走 [IngestBundle]。
 func (s *ArtifactService) IngestLocalJar(appID uint, versionTag, localPath string) (ArtifactView, error) {
 	if s.artifactDir == "" {
 		return ArtifactView{}, apperr.New("INTERNAL", "storage.artifact_dir 未配置", 500)
@@ -391,4 +393,242 @@ func (s *ArtifactService) findByID(id uint) (*model.Artifact, error) {
 		return nil, apperr.Wrap(err, "INTERNAL", "get artifact", 500)
 	}
 	return &a, nil
+}
+
+// =============================================================================
+// Sprint X.2：ArtifactBundle + ArtifactItem 多 service 链路
+// =============================================================================
+
+// BundleItemInput IngestBundle 入参的单条 service 产物。
+type BundleItemInput struct {
+	ServiceCode string // 对应 AppService.ServiceCode；多 service 时必填，单 service 兜底 "default"
+	LocalPath   string // 构建产物绝对路径（一般在 build_workspace 内）
+}
+
+// ArtifactBundleView 整组制品视图。
+type ArtifactBundleView struct {
+	ID           uint                `json:"id"`
+	AppID        uint                `json:"app_id"`
+	VersionTag   string              `json:"version_tag"`
+	GitCommitSHA string              `json:"git_commit_sha"`
+	BuildStatus  string              `json:"build_status"`
+	BuildLogPath string              `json:"build_log_path"`
+	TriggeredBy  string              `json:"triggered_by"`
+	CreatedAt    string              `json:"created_at"`
+	Items        []ArtifactItemView  `json:"items"`
+}
+
+// ArtifactItemView 单 service 产物明细。
+type ArtifactItemView struct {
+	ID          uint   `json:"id"`
+	BundleID    uint   `json:"bundle_id"`
+	ServiceCode string `json:"service_code"`
+	FileName    string `json:"file_name"`
+	FilePath    string `json:"file_path"`
+	FileMD5     string `json:"file_md5"`
+	FileSize    int64  `json:"file_size"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func toBundleView(b *model.ArtifactBundle, items []model.ArtifactItem) ArtifactBundleView {
+	v := ArtifactBundleView{
+		ID: b.ID, AppID: b.AppID, VersionTag: b.VersionTag,
+		GitCommitSHA: b.GitCommitSHA, BuildStatus: b.BuildStatus,
+		BuildLogPath: b.BuildLogPath, TriggeredBy: b.TriggeredBy,
+		CreatedAt: b.CreatedAt.Format(time.RFC3339),
+	}
+	for i := range items {
+		it := &items[i]
+		v.Items = append(v.Items, ArtifactItemView{
+			ID: it.ID, BundleID: it.BundleID, ServiceCode: it.ServiceCode,
+			FileName: it.FileName, FilePath: it.FilePath,
+			FileMD5: it.FileMD5, FileSize: it.FileSize,
+			CreatedAt: it.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return v
+}
+
+// IngestBundle 接收一组 service jar，拷到 artifactDir，落 ArtifactBundle + N 条 ArtifactItem。
+// 整个过程事务化：任一 item 失败回滚整组（已拷出来的文件清理掉）。
+//
+// 落地路径：{artifactDir}/{app_code}/bundles/{sanitized_version}/{service_code}-{unixnano}{ext}
+func (s *ArtifactService) IngestBundle(appID uint, versionTag, commitSHA, triggeredBy, logPath string, items []BundleItemInput) (ArtifactBundleView, error) {
+	if s.artifactDir == "" {
+		return ArtifactBundleView{}, apperr.New("INTERNAL", "storage.artifact_dir 未配置", 500)
+	}
+	if strings.TrimSpace(versionTag) == "" {
+		return ArtifactBundleView{}, apperr.New("BAD_REQUEST", "version_tag 必填", 400)
+	}
+	if len(items) == 0 {
+		return ArtifactBundleView{}, apperr.New("BAD_REQUEST", "至少一个 service 产物", 400)
+	}
+
+	var app model.Application
+	if err := s.db.First(&app, appID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ArtifactBundleView{}, apperr.New("NOT_FOUND", fmt.Sprintf("应用 %d 不存在", appID), 404)
+		}
+		return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "find app", 500)
+	}
+
+	// 1. 准备目录
+	ver := sanitizeVersion(versionTag)
+	bundleDir := filepath.Join(s.artifactDir, app.AppCode, "bundles", ver)
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "mkdir bundle dir", 500)
+	}
+
+	// 2. 拷贝所有 jar + 计算 MD5；失败立刻清理已成功的文件
+	type stagedItem struct {
+		service string
+		dst     string
+		size    int64
+		md5     string
+		srcName string
+	}
+	var staged []stagedItem
+	rollback := func() {
+		for _, st := range staged {
+			_ = os.Remove(st.dst)
+		}
+	}
+
+	for _, it := range items {
+		svc := strings.TrimSpace(it.ServiceCode)
+		if svc == "" {
+			svc = "default"
+		}
+		src, err := os.Open(it.LocalPath)
+		if err != nil {
+			rollback()
+			return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "open src "+svc, 500)
+		}
+		st, err := src.Stat()
+		if err != nil {
+			src.Close()
+			rollback()
+			return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "stat src "+svc, 500)
+		}
+		ext := filepath.Ext(it.LocalPath)
+		if ext == "" {
+			ext = ".jar"
+		}
+		dst := filepath.Join(bundleDir, fmt.Sprintf("%s-%d%s", svc, time.Now().UnixNano(), ext))
+		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			src.Close()
+			rollback()
+			return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "create dst "+svc, 500)
+		}
+		h := md5.New()
+		mw := io.MultiWriter(f, h)
+		written, err := io.Copy(mw, src)
+		src.Close()
+		if err != nil {
+			f.Close()
+			_ = os.Remove(dst)
+			rollback()
+			return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "copy jar "+svc, 500)
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(dst)
+			rollback()
+			return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "close dst "+svc, 500)
+		}
+		if written != st.Size() {
+			_ = os.Remove(dst)
+			rollback()
+			return ArtifactBundleView{}, apperr.New("INTERNAL",
+				fmt.Sprintf("size mismatch service=%s src=%d written=%d", svc, st.Size(), written), 500)
+		}
+		staged = append(staged, stagedItem{
+			service: svc, dst: dst, size: written,
+			md5:     hex.EncodeToString(h.Sum(nil)),
+			srcName: filepath.Base(it.LocalPath),
+		})
+	}
+
+	// 3. 事务落库 Bundle + Items
+	var bundle model.ArtifactBundle
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		bundle = model.ArtifactBundle{
+			AppID: appID, VersionTag: versionTag,
+			GitCommitSHA: commitSHA, BuildStatus: "success",
+			BuildLogPath: logPath, TriggeredBy: triggeredBy,
+		}
+		if err := tx.Create(&bundle).Error; err != nil {
+			return err
+		}
+		for _, st := range staged {
+			it := model.ArtifactItem{
+				BundleID: bundle.ID, ServiceCode: st.service,
+				FileName: st.srcName, FilePath: st.dst,
+				FileMD5: st.md5, FileSize: st.size,
+			}
+			if err := tx.Create(&it).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		rollback()
+		return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "create bundle tx", 500)
+	}
+
+	// 4. 重新加载 items 拼 view
+	var dbItems []model.ArtifactItem
+	if err := s.db.Where("bundle_id = ?", bundle.ID).Order("service_code ASC").Find(&dbItems).Error; err != nil {
+		return ArtifactBundleView{}, apperr.Wrap(err, "INTERNAL", "load items", 500)
+	}
+	return toBundleView(&bundle, dbItems), nil
+}
+
+// GetBundle 加载一个 Bundle 含 items（部署链用）。
+func (s *ArtifactService) GetBundle(id uint) (*model.ArtifactBundle, []model.ArtifactItem, error) {
+	var b model.ArtifactBundle
+	if err := s.db.First(&b, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, apperr.ErrNotFound
+		}
+		return nil, nil, apperr.Wrap(err, "INTERNAL", "get bundle", 500)
+	}
+	var items []model.ArtifactItem
+	if err := s.db.Where("bundle_id = ?", id).Order("service_code ASC").Find(&items).Error; err != nil {
+		return nil, nil, apperr.Wrap(err, "INTERNAL", "list items", 500)
+	}
+	return &b, items, nil
+}
+
+// ListBundles 列应用的整组制品（最新优先）。
+func (s *ArtifactService) ListBundles(appID uint) ([]ArtifactBundleView, error) {
+	var bs []model.ArtifactBundle
+	q := s.db.Order("id DESC").Limit(200)
+	if appID > 0 {
+		q = q.Where("app_id = ?", appID)
+	}
+	if err := q.Find(&bs).Error; err != nil {
+		return nil, apperr.Wrap(err, "INTERNAL", "list bundles", 500)
+	}
+	if len(bs) == 0 {
+		return []ArtifactBundleView{}, nil
+	}
+	ids := make([]uint, len(bs))
+	for i := range bs {
+		ids[i] = bs[i].ID
+	}
+	var items []model.ArtifactItem
+	if err := s.db.Where("bundle_id IN ?", ids).Find(&items).Error; err != nil {
+		return nil, apperr.Wrap(err, "INTERNAL", "list items", 500)
+	}
+	byBundle := map[uint][]model.ArtifactItem{}
+	for _, it := range items {
+		byBundle[it.BundleID] = append(byBundle[it.BundleID], it)
+	}
+	out := make([]ArtifactBundleView, len(bs))
+	for i := range bs {
+		out[i] = toBundleView(&bs[i], byBundle[bs[i].ID])
+	}
+	return out, nil
 }

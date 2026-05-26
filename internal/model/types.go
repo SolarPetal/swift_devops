@@ -237,7 +237,7 @@ type GitCredential struct {
 
 // BuildRun 一次构建任务（Sprint 5.2）。
 //   - 与 PipelineRun 平级；构建/部署各自独立工作流
-//   - 成功时 ArtifactID 指向落库的 Artifact，前端可直接基于此触发部署
+//   - 成功时 ArtifactID 指向落库的 Artifact（旧链路，X.4 删除），BundleID 指向 ArtifactBundle（X.2 新链路）
 //   - LogPath 是相对 server 文件系统的绝对路径，里面是 git clone + mvn package 的合并输出
 type BuildRun struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
@@ -248,7 +248,8 @@ type BuildRun struct {
 	CredID      uint       `gorm:"index" json:"cred_id"`        // 关联 GitCredential；0 = 无凭证（公网仓）
 	Status      string     `gorm:"size:20;not null" json:"status"` // building / success / failed / cancelled
 	LogPath     string     `gorm:"size:255" json:"log_path"`    // build log 文件绝对路径
-	ArtifactID  uint       `gorm:"index" json:"artifact_id"`    // 成功时回填指向 Artifact
+	ArtifactID  uint       `gorm:"index" json:"artifact_id"`    // 旧：单 jar 链路，X.4 删除
+	BundleID    uint       `gorm:"index" json:"bundle_id"`      // Sprint X.2：成功时回填整组 Bundle
 	TriggeredBy string     `gorm:"size:50" json:"triggered_by"`
 	Error       string     `gorm:"type:text" json:"error"`
 	StartedAt   *time.Time `json:"started_at"`

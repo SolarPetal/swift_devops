@@ -22,6 +22,7 @@ type MavenOptions struct {
 	Timeout       time.Duration // 0 = 30 分钟兜底
 	ExecEnv       []string      // 注入到 mvn 子进程的环境变量；nil = os.Environ()。Sprint 5.4
 	JarPattern    string        // glob 显式指定主 jar，相对 WorkDir。非空 → 跳过自动扫描。Sprint 5.4.7
+	SkipJarScan   bool          // Sprint X.2 多 service 模式：跳过单 jar 收敛，调用方按各自 pattern 自己提取
 }
 
 // MavenResult 构建产物
@@ -73,6 +74,11 @@ func MvnPackage(ctx context.Context, opts MavenOptions) (MavenResult, error) {
 	}
 	if err := cmd.Run(); err != nil {
 		return MavenResult{}, fmt.Errorf("mvn package: %w", err)
+	}
+
+	// Sprint X.2 多 service 模式：调用方自己按 pattern 提取，跳过收敛
+	if opts.SkipJarScan {
+		return MavenResult{}, nil
 	}
 
 	// 扫 target/*.jar；排除 -sources / -javadoc / original- 前缀

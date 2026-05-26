@@ -39,7 +39,8 @@ type BuildRunView struct {
 	CredID      uint   `json:"cred_id"`
 	Status      string `json:"status"`
 	LogPath     string `json:"log_path"`
-	ArtifactID  uint   `json:"artifact_id"`
+	ArtifactID  uint   `json:"artifact_id"` // 旧链路，X.4 删除
+	BundleID    uint   `json:"bundle_id"`   // Sprint X.2：成功后回填
 	TriggeredBy string `json:"triggered_by"`
 	Error       string `json:"error"`
 	StartedAt   string `json:"started_at,omitempty"`
@@ -59,7 +60,7 @@ func toBuildRunView(b *model.BuildRun) BuildRunView {
 	v := BuildRunView{
 		ID: b.ID, AppID: b.AppID, GitRef: b.GitRef, CommitSHA: b.CommitSHA,
 		MvnArgs: b.MvnArgs, CredID: b.CredID, Status: b.Status,
-		LogPath: b.LogPath, ArtifactID: b.ArtifactID,
+		LogPath: b.LogPath, ArtifactID: b.ArtifactID, BundleID: b.BundleID,
 		TriggeredBy: b.TriggeredBy, Error: b.Error,
 		CreatedAt: b.CreatedAt.Format(time.RFC3339),
 	}
@@ -165,7 +166,7 @@ func (s *BuildService) Trigger(appID uint, actor string, in BuildTriggerInput) (
 	// 但 disk 上文件没了，GetLog 读不到 → 前端看到空日志）
 	if err := os.MkdirAll(s.workspace, 0o755); err != nil {
 		s.releaseLock(appID)
-		s.finishBuild(br.ID, BuildStatusFailed, "", 0, "mkdir workspace: "+err.Error())
+		s.finishBuild(br.ID, BuildStatusFailed, "", 0, 0, "mkdir workspace: "+err.Error())
 		return BuildRunView{}, apperr.Wrap(err, "INTERNAL", "mkdir workspace", 500)
 	}
 	logPath := filepath.Join(s.workspace, fmt.Sprintf("%s-%d.log", app.AppCode, br.ID))
@@ -237,7 +238,7 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		s.finishBuild(buildID, BuildStatusFailed, "", 0, "open log file: "+err.Error())
+		s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, "open log file: "+err.Error())
 		return
 	}
 	defer logFile.Close()
@@ -256,56 +257,106 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
 	}
 
-	// 解析有效的 build_module / build_jar_pattern：触发时显式覆盖优先于 app 配置
-	effectiveModule := pickStr(in.BuildModule, app.BuildModule)
-	effectivePattern := pickStr(in.BuildJarPattern, app.BuildJarPattern)
-
-	// build_module 非空 → mvn 加 -pl <module> -am（编译该模块及其依赖），减少多 jar 命中 + 加速
-	finalMvnArgs := in.MvnArgs
-	if effectiveModule != "" {
-		prefix := fmt.Sprintf("-pl %s -am", effectiveModule)
-		if strings.TrimSpace(finalMvnArgs) == "" {
-			finalMvnArgs = prefix + " clean package -DskipTests"
-		} else {
-			finalMvnArgs = prefix + " " + finalMvnArgs
-		}
-		fmt.Fprintf(logFile, "[plan] mvn -pl %s -am 缩窄到该模块\n", effectiveModule)
+	// Sprint X.2：决定走 multi-service 还是单 service 兼容
+	specs, err := s.loadServiceBuildSpecs(app, in)
+	if err != nil {
+		fmt.Fprintf(logFile, "\n[BUILD FAILED] load service specs: %v\n", err)
+		s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, err.Error())
+		return
 	}
-	if effectivePattern != "" {
-		fmt.Fprintf(logFile, "[plan] build_jar_pattern = %s\n", effectivePattern)
+	for _, sp := range specs {
+		fmt.Fprintf(logFile, "[plan] service=%s build_module=%q jar_pattern=%q\n",
+			sp.ServiceCode, sp.BuildModule, sp.JarPattern)
 	}
 
 	plan := builder.Plan{
 		AppCode: app.AppCode, GitURL: app.GitURL, GitRef: defaultRef(in.GitRef),
-		Cred: cred, MvnArgs: finalMvnArgs,
-		JarPattern: effectivePattern,
+		Cred: cred, MvnArgs: in.MvnArgs,
 		Workspace:  s.workspace, MavenCacheDir: s.mavenCacheDir,
 		LogWriter: io.MultiWriter(logFile),
 		ExecEnv:   execEnv,
 		BuildID:   buildID,
+		Services:  specs,
 	}
 	res, err := builder.Build(ctx, plan)
 	if err != nil {
 		fmt.Fprintf(logFile, "\n[BUILD FAILED] %v\n", err)
-		s.finishBuild(buildID, BuildStatusFailed, res.CommitSHA, 0, err.Error())
+		s.finishBuild(buildID, BuildStatusFailed, res.CommitSHA, 0, 0, err.Error())
 		return
 	}
 
-	// 落 Artifact：jar 拷到 artifactDir，version_tag = "git-<shortSHA>"
+	// Sprint X.2：落 Bundle + N 条 Item
 	versionTag := fmt.Sprintf("git-%s-%d", shortSHA(res.CommitSHA), buildID)
-	fmt.Fprintf(logFile, "\n[ARTIFACT] registering %s as version_tag=%s ...\n",
-		res.JarPath, versionTag)
+	fmt.Fprintf(logFile, "\n[ARTIFACT] registering bundle version_tag=%s with %d items ...\n",
+		versionTag, len(res.JarPaths))
 
-	artView, err := s.artSvc.IngestLocalJar(app.ID, versionTag, res.JarPath)
+	bundleItems := make([]BundleItemInput, 0, len(specs))
+	for _, sp := range specs {
+		jar := res.JarPaths[sp.ServiceCode]
+		if jar == "" {
+			err := fmt.Errorf("service %s 未找到 jar 产物", sp.ServiceCode)
+			fmt.Fprintf(logFile, "[ARTIFACT FAILED] %v\n", err)
+			s.finishBuild(buildID, BuildStatusFailed, res.CommitSHA, 0, 0, err.Error())
+			return
+		}
+		bundleItems = append(bundleItems, BundleItemInput{ServiceCode: sp.ServiceCode, LocalPath: jar})
+	}
+
+	bundleView, err := s.artSvc.IngestBundle(app.ID, versionTag, res.CommitSHA, "", logPath, bundleItems)
 	if err != nil {
 		fmt.Fprintf(logFile, "[ARTIFACT FAILED] %v\n", err)
-		s.finishBuild(buildID, BuildStatusFailed, res.CommitSHA, 0,
-			"build success but artifact register failed: "+err.Error())
+		s.finishBuild(buildID, BuildStatusFailed, res.CommitSHA, 0, 0,
+			"build success but bundle register failed: "+err.Error())
 		return
 	}
 
-	fmt.Fprintf(logFile, "[BUILD SUCCESS] artifact=#%d (%s)\n", artView.ID, artView.FileName)
-	s.finishBuild(buildID, BuildStatusSuccess, res.CommitSHA, artView.ID, "")
+	// Sprint X.2 兼容：单 service "default" 模式额外落一条 Artifact，
+	// 给老部署链（pipeline_service 走 artifact_id）兜底，X.3 切到 Bundle 后删除。
+	var legacyArtifactID uint
+	if len(specs) == 1 && specs[0].ServiceCode == "default" {
+		if art, lerr := s.artSvc.IngestLocalJar(app.ID, versionTag+"-legacy", res.JarPath); lerr != nil {
+			fmt.Fprintf(logFile, "[WARN] legacy artifact ingest failed (X.3 之前部署链会用不到): %v\n", lerr)
+		} else {
+			legacyArtifactID = art.ID
+			fmt.Fprintf(logFile, "[LEGACY] artifact=#%d 兼容旧部署链\n", art.ID)
+		}
+	}
+
+	fmt.Fprintf(logFile, "[BUILD SUCCESS] bundle=#%d items=%d\n", bundleView.ID, len(bundleView.Items))
+	s.finishBuild(buildID, BuildStatusSuccess, res.CommitSHA, legacyArtifactID, bundleView.ID, "")
+}
+
+// loadServiceBuildSpecs 决定构建模式：
+//   - app 已有 AppService 行 → 多 service 模式（每行一个 spec）
+//   - 没有 AppService → 单 service 兼容，service_code="default"，从 app 顶层字段取
+//
+// X.2 阶段：app_services 表为空（X.4 才会有 CRUD）；Trigger 入参的临时覆盖仍尊重。
+func (s *BuildService) loadServiceBuildSpecs(app *model.Application, in BuildTriggerInput) ([]builder.ServiceBuildSpec, error) {
+	var services []model.AppService
+	if err := s.db.Where("app_id = ? AND enabled = ?", app.ID, true).
+		Order("startup_order ASC, id ASC").Find(&services).Error; err != nil {
+		return nil, fmt.Errorf("load app_services: %w", err)
+	}
+	if len(services) > 0 {
+		specs := make([]builder.ServiceBuildSpec, 0, len(services))
+		for _, svc := range services {
+			specs = append(specs, builder.ServiceBuildSpec{
+				ServiceCode: svc.ServiceCode,
+				BuildModule: svc.BuildModule,
+				JarPattern:  svc.BuildJarPattern,
+			})
+		}
+		return specs, nil
+	}
+
+	// 单 service 兼容：service_code=default，从 app 顶层字段读
+	module := pickStr(in.BuildModule, app.BuildModule)
+	pattern := pickStr(in.BuildJarPattern, app.BuildJarPattern)
+	return []builder.ServiceBuildSpec{{
+		ServiceCode: "default",
+		BuildModule: module,
+		JarPattern:  pattern,
+	}}, nil
 }
 
 func (s *BuildService) releaseLock(appID uint) {
@@ -314,7 +365,7 @@ func (s *BuildService) releaseLock(appID uint) {
 	s.mu.Unlock()
 }
 
-func (s *BuildService) finishBuild(buildID uint, status, sha string, artifactID uint, errMsg string) {
+func (s *BuildService) finishBuild(buildID uint, status, sha string, artifactID, bundleID uint, errMsg string) {
 	now := time.Now()
 	updates := map[string]any{
 		"status":      status,
@@ -326,6 +377,9 @@ func (s *BuildService) finishBuild(buildID uint, status, sha string, artifactID 
 	}
 	if artifactID > 0 {
 		updates["artifact_id"] = artifactID
+	}
+	if bundleID > 0 {
+		updates["bundle_id"] = bundleID
 	}
 	if err := s.db.Model(&model.BuildRun{}).Where("id = ?", buildID).Updates(updates).Error; err != nil {
 		slog.Error("finish build", "id", buildID, "err", err)
