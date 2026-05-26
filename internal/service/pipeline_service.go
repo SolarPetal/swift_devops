@@ -110,6 +110,9 @@ func (s *PipelineService) SetPublisher(p Publisher) { s.pub = p }
 type TriggerOptions struct {
 	Strategy  string // "single" / "rolling" / "rollback"（"" 默认 single）
 	BatchSize int    // rolling 专用：批大小（>=1）
+	// Sprint X.6：BundleID > 0 → 走多 service Bundle 链路（artifactID 必填 0 或忽略）
+	// 0 → 走老 Artifact 链路（artifactID 必填）
+	BundleID uint
 }
 
 // Trigger 触发一次部署。
@@ -133,15 +136,39 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts Tri
 		}
 		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "find app", 500)
 	}
-	// 2. 校验 artifact
-	art, err := s.artSvc.GetModel(artifactID)
-	if err != nil {
-		return PipelineRunView{}, err
+
+	// 2. 校验产物：Sprint X.6 优先走 Bundle 路径；BundleID==0 时回 Artifact 兼容
+	var (
+		art           *model.Artifact
+		bundle        *model.ArtifactBundle
+		itemByService map[string]*model.ArtifactItem
+	)
+	if opts.BundleID > 0 {
+		b, items, berr := s.artSvc.GetBundle(opts.BundleID)
+		if berr != nil {
+			return PipelineRunView{}, berr
+		}
+		if b.AppID != appID {
+			return PipelineRunView{}, apperr.New("BAD_REQUEST",
+				fmt.Sprintf("bundle %d 属于应用 %d，不是 %d", opts.BundleID, b.AppID, appID), 400)
+		}
+		bundle = b
+		itemByService = make(map[string]*model.ArtifactItem, len(items))
+		for i := range items {
+			itemByService[items[i].ServiceCode] = &items[i]
+		}
+	} else {
+		a, aerr := s.artSvc.GetModel(artifactID)
+		if aerr != nil {
+			return PipelineRunView{}, aerr
+		}
+		if a.AppID != appID {
+			return PipelineRunView{}, apperr.New("BAD_REQUEST",
+				fmt.Sprintf("artifact %d 属于应用 %d，不是 %d", artifactID, a.AppID, appID), 400)
+		}
+		art = a
 	}
-	if art.AppID != appID {
-		return PipelineRunView{}, apperr.New("BAD_REQUEST",
-			fmt.Sprintf("artifact %d 属于应用 %d，不是 %d", artifactID, art.AppID, appID), 400)
-	}
+
 	// 3. deployment 至少一个
 	var deps []model.Deployment
 	if err := s.db.Where("app_id = ?", appID).Order("id ASC").Find(&deps).Error; err != nil {
@@ -180,6 +207,9 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts Tri
 		TriggeredBy:   actor,
 		StartedAt:     &now,
 	}
+	if bundle != nil {
+		run.BundleID = bundle.ID
+	}
 	if err := s.db.Create(run).Error; err != nil {
 		s.releaseLock(appID)
 		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "create run", 500)
@@ -192,6 +222,10 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts Tri
 	plan := &strategy.Plan{
 		RunID: run.ID, App: &app, Artifact: art, Deps: deps, EnvMap: envMap,
 		BatchSize: opts.BatchSize,
+	}
+	if bundle != nil {
+		plan.Bundle = bundle
+		plan.ItemByServiceCode = itemByService
 	}
 
 	// 蓝绿专属：自动选目标组 + 注入 NginxApply 闭包
@@ -466,7 +500,26 @@ func (s *PipelineService) buildSubPlanFunc(plan *strategy.Plan, strat strategy.S
 			}
 			return &sub, strat, nil
 		}
-		// forward：plan.Artifact 保持兼容（X.4 之后从 Bundle 取 item）
+		// Sprint X.6：forward 走 Bundle 链路 —— 用本 service 对应的 ArtifactItem
+		if plan.Bundle != nil && plan.ItemByServiceCode != nil {
+			item, ok := plan.ItemByServiceCode[svc.ServiceCode]
+			if !ok {
+				// 该 service 在 Bundle 里没有产物 → 跳过（构建侧应该已经报错，这里防御）
+				return nil, nil, nil
+			}
+			sub.Item = item
+			// 包装成临时 Artifact 透传给 strategy（strategy 内部 dispatcher.Upload 只读 FilePath/FileMD5）
+			sub.Artifact = &model.Artifact{
+				ID:       0, // 用 0 表示这是 Bundle Item 适配,不指向真实 artifacts 行
+				AppID:    plan.App.ID,
+				FileName: item.FileName,
+				FilePath: item.FilePath,
+				FileMD5:  item.FileMD5,
+				FileSize: item.FileSize,
+			}
+			return &sub, strat, nil
+		}
+		// forward 兼容：plan.Artifact 仍指向旧 Artifact（单 service "default" 路径）
 		return &sub, strat, nil
 	}
 }
@@ -755,12 +808,21 @@ func (h *runHooks) OnHostStatus(deploymentID, hostID uint, status, stage, errMsg
 	}
 }
 
-func (h *runHooks) OnDeploymentSuccess(dep *model.Deployment, newArtifactID uint) {
-	if err := h.svc.db.Model(&model.Deployment{}).Where("id = ?", dep.ID).Updates(map[string]any{
-		"previous_artifact_id": dep.CurrentArtifactID,
-		"current_artifact_id":  newArtifactID,
-		"status":               "running",
-	}).Error; err != nil {
+func (h *runHooks) OnDeploymentSuccess(dep *model.Deployment, newArtifactID, newArtifactItemID uint) {
+	updates := map[string]any{
+		"status": "running",
+	}
+	// 旧字段（X.8 删）：单 service 链路或兼容期
+	if newArtifactID > 0 {
+		updates["previous_artifact_id"] = dep.CurrentArtifactID
+		updates["current_artifact_id"] = newArtifactID
+	}
+	// Sprint X.6 新字段：多 service Bundle 链路
+	if newArtifactItemID > 0 {
+		updates["previous_artifact_item_id"] = dep.CurrentArtifactItemID
+		updates["current_artifact_item_id"] = newArtifactItemID
+	}
+	if err := h.svc.db.Model(&model.Deployment{}).Where("id = ?", dep.ID).Updates(updates).Error; err != nil {
 		slog.Warn("update deployment artifact", "dep_id", dep.ID, "err", err)
 	}
 }

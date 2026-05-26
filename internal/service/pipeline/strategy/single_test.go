@@ -50,7 +50,7 @@ func (h *captureHooks) OnHostStatus(depID, hostID uint, status, stage, errMsg st
 	defer h.mu.Unlock()
 	h.statuses = append(h.statuses, hostStatus{depID, hostID, status, stage, errMsg})
 }
-func (h *captureHooks) OnDeploymentSuccess(dep *model.Deployment, _ uint) {
+func (h *captureHooks) OnDeploymentSuccess(dep *model.Deployment, _, _ uint) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.deploys = append(h.deploys, dep.ID)

@@ -79,14 +79,18 @@ type Plan struct {
 	RunID           uint
 	App             *model.Application
 
-	// 旧字段（X.4 删除）：单 jar 链路
+	// 旧字段（X.8 删除）：单 jar 链路
 	Artifact        *model.Artifact            // forward 模式的统一新版本；rollback 不用
 	ArtifactByDepID map[uint]*model.Artifact   // rollback：每 dep 的 previous_artifact_id 对应的 art
 
-	// Sprint X.3 新字段（多 service 链路）
+	// Sprint X.3 新字段（多 service 链路，sub-plan 维度）
 	Service         *model.AppService          // 本次 Run 部署的 service；wave 编排时由 pipeline_service 注入
 	Item            *model.ArtifactItem        // 本 service 在 Bundle 中的 jar 产物；rollback 不用
 	ItemByDepID     map[uint]*model.ArtifactItem // rollback：每 dep 的 previous item
+
+	// Sprint X.6 新字段（多 service 链路，顶层维度）—— Trigger 阶段填，buildSubPlanFunc 拆到 sub-plan
+	Bundle             *model.ArtifactBundle           // 整组制品；存在则走 Bundle 链路
+	ItemByServiceCode  map[string]*model.ArtifactItem // service_code → item，sub-plan 拆解时按 service 找 jar
 
 	Deps            []model.Deployment        // 已按 ID ASC 排好序；wave 编排后只含本 service 的 dep
 	EnvMap          map[string]string         // 已解析的 env vars（per-service）
@@ -116,7 +120,10 @@ type Hooks interface {
 	// OnHostStatus host 级状态变更：进入 running / 成功 / 失败 / 跳过。
 	OnHostStatus(deploymentID, hostID uint, status, currentStage, errMsg string)
 	// OnDeploymentSuccess 单台主机部署成功，更新 deployment 表的制品指针。
-	OnDeploymentSuccess(dep *model.Deployment, newArtifactID uint)
+	//
+	// newArtifactItemID 是 Sprint X.6 新增的 ArtifactItem 指针；多 service 链路
+	// 走 Bundle 时填本 service 在 Bundle 内对应的 item id；旧链路传 0。
+	OnDeploymentSuccess(dep *model.Deployment, newArtifactID, newArtifactItemID uint)
 	// OnGroupSwitched 蓝绿专用：目标组切流成功后，由策略调用一次，
 	// service 实现里更新 App.ActiveGroup。
 	OnGroupSwitched(group string)

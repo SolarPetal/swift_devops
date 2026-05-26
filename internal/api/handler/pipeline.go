@@ -19,19 +19,28 @@ func NewPipelineHandler(svc *service.PipelineService) *PipelineHandler {
 	return &PipelineHandler{svc: svc}
 }
 
-// Deploy POST /apps/:id/deploy  body: {"artifact_id": N, "strategy": "single|rolling", "batch_size": 2}
+// Deploy POST /apps/:id/deploy  body: {"artifact_id": N, "bundle_id": M, "strategy": "single|rolling", "batch_size": 2}
+//
+// Sprint X.6：body 加 bundle_id（多 service Bundle 链路，优先于 artifact_id）。
+// 二选一：artifact_id 是旧单 jar 链路兼容；bundle_id 是新多 service 链路。
 func (h *PipelineHandler) Deploy(c *gin.Context) {
 	appID, ok := parseID(c)
 	if !ok {
 		return
 	}
 	var body struct {
-		ArtifactID uint   `json:"artifact_id" binding:"required"`
-		Strategy   string `json:"strategy,omitempty"`    // 默认 single
-		BatchSize  int    `json:"batch_size,omitempty"` // rolling 必填，>=1
+		ArtifactID uint   `json:"artifact_id,omitempty"`  // 旧链路；bundle_id==0 时必填
+		BundleID   uint   `json:"bundle_id,omitempty"`    // Sprint X.6 新链路
+		Strategy   string `json:"strategy,omitempty"`     // 默认 single
+		BatchSize  int    `json:"batch_size,omitempty"`   // rolling 必填，>=1
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		apperr.Respond(c, apperr.Wrap(err, "BAD_REQUEST", err.Error(), http.StatusBadRequest))
+		return
+	}
+	if body.ArtifactID == 0 && body.BundleID == 0 {
+		apperr.Respond(c, apperr.New("BAD_REQUEST",
+			"必须提供 artifact_id 或 bundle_id 之一", http.StatusBadRequest))
 		return
 	}
 	actor := "unknown"
@@ -43,6 +52,7 @@ func (h *PipelineHandler) Deploy(c *gin.Context) {
 	out, err := h.svc.Trigger(appID, body.ArtifactID, actor, service.TriggerOptions{
 		Strategy:  body.Strategy,
 		BatchSize: body.BatchSize,
+		BundleID:  body.BundleID,
 	})
 	if err != nil {
 		apperr.Respond(c, err)

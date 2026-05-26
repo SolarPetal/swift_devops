@@ -218,6 +218,30 @@ export type ArtifactInput = {
   file_name?: string
 }
 
+// Sprint X.6：ArtifactBundle / ArtifactItem 整组制品
+export type ArtifactItemView = {
+  id: number
+  bundle_id: number
+  service_code: string
+  file_name: string
+  file_path: string
+  file_md5: string
+  file_size: number
+  created_at: string
+}
+
+export type ArtifactBundle = {
+  id: number
+  app_id: number
+  version_tag: string
+  git_commit_sha: string
+  build_status: string
+  build_log_path: string
+  triggered_by: string
+  created_at: string
+  items: ArtifactItemView[]
+}
+
 // --- 流水线 ---
 
 export type PipelineStage = 'dial' | 'env_check' | 'upload' | 'write_unit' | 'restart' | 'health' | 'nginx_apply'

@@ -9,12 +9,12 @@ import {
 import type {
   App, Deployment, Host, Artifact, PipelineRun, RunSnapshot, StepResult, PipelineStage,
   BuildRun, GitCredential, BuilderEnv,
-  AppService, AppServiceInput,
+  AppService, AppServiceInput, ArtifactBundle,
 } from '../types'
 import { getApp } from '../api/app'
 import { listHosts } from '../api/host'
 import { bindHost, listDeployments, unbindDeployment, updateDeploymentGroup } from '../api/deployment'
-import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact } from '../api/artifact'
+import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact, listBundles } from '../api/artifact'
 import { cancelPipeline, deployApp, getPipeline, listPipelines, rollbackApp } from '../api/pipeline'
 import { getBuild, getBuildLog, listBuilds, triggerBuild } from '../api/build'
 import { listGitCreds } from '../api/gitcred'
@@ -611,6 +611,7 @@ function ArtifactTab({ app }: { app: App }) {
 function PipelineTab({ app }: { app: App }) {
   const [list, setList] = useState<PipelineRun[]>([])
   const [arts, setArts] = useState<Artifact[]>([])
+  const [bundles, setBundles] = useState<ArtifactBundle[]>([])
   const [loading, setLoading] = useState(false)
   const [open, setOpen] = useState(false)
   const [form] = Form.useForm()
@@ -619,8 +620,12 @@ function PipelineTab({ app }: { app: App }) {
   const refresh = async () => {
     setLoading(true)
     try {
-      const [ps, as] = await Promise.all([listPipelines(app.id), listArtifacts(app.id)])
-      setList(ps); setArts(as)
+      const [ps, as, bs] = await Promise.all([
+        listPipelines(app.id),
+        listArtifacts(app.id),
+        listBundles(app.id),
+      ])
+      setList(ps); setArts(as); setBundles(bs)
     } catch (e) {
       message.error(formatError(e))
     } finally { setLoading(false) }
@@ -651,7 +656,11 @@ function PipelineTab({ app }: { app: App }) {
       const v = await form.validateFields()
       const strategy = (v.strategy ?? 'single') as 'single' | 'rolling' | 'blue_green'
       const batchSize = strategy === 'rolling' ? Number(v.batch_size ?? 1) : undefined
-      const run = await deployApp(app.id, v.artifact_id, strategy, batchSize)
+      const sourceType = (v.source_type ?? 'bundle') as 'bundle' | 'artifact'
+      const source = sourceType === 'bundle'
+        ? { bundle_id: Number(v.bundle_id) }
+        : { artifact_id: Number(v.artifact_id) }
+      const run = await deployApp(app.id, source, strategy, batchSize)
       const detail =
         strategy === 'rolling' ? `, batch=${batchSize}` :
         strategy === 'blue_green' ? `（目标组由后端自动选）` : ''
@@ -694,14 +703,24 @@ function PipelineTab({ app }: { app: App }) {
   return (
     <>
       <Space style={{ marginBottom: 12 }}>
-        <Button type="primary" disabled={arts.length === 0}
-          onClick={() => { form.resetFields(); form.setFieldsValue({ strategy: 'single', batch_size: 2 }); setOpen(true) }}>
+        <Button type="primary" disabled={arts.length === 0 && bundles.length === 0}
+          onClick={() => {
+            form.resetFields()
+            const defaultSource = bundles.length > 0 ? 'bundle' : 'artifact'
+            form.setFieldsValue({
+              strategy: 'single', batch_size: 2,
+              source_type: defaultSource,
+              bundle_id: bundles[0]?.id,
+              artifact_id: arts[0]?.id,
+            })
+            setOpen(true)
+          }}>
           🚀 触发部署
         </Button>
         <Button danger onClick={handleRollback}>↩ 回滚</Button>
         <Button onClick={refresh}>刷新</Button>
-        {arts.length === 0 && (
-          <Typography.Text type="secondary">先去"制品"页注册一个 jar，再来触发部署。</Typography.Text>
+        {arts.length === 0 && bundles.length === 0 && (
+          <Typography.Text type="secondary">先去"制品"页注册一个 jar 或触发构建产出 Bundle，再来部署。</Typography.Text>
         )}
       </Space>
       <Table<PipelineRun>
@@ -710,7 +729,15 @@ function PipelineTab({ app }: { app: App }) {
         columns={[
           { title: '#', dataIndex: 'id', width: 60 },
           { title: '策略', dataIndex: 'strategy', width: 90, render: (v) => <Tag>{v}</Tag> },
-          { title: '制品', dataIndex: 'artifact_id', width: 80, render: (id) => `#${id}` },
+          {
+            title: '产物', width: 110,
+            render: (_: any, r: PipelineRun) => {
+              const anyR = r as any
+              if (anyR.bundle_id) return <Tag color="blue">Bundle #{anyR.bundle_id}</Tag>
+              if (r.artifact_id) return <Tag>Art #{r.artifact_id}</Tag>
+              return '-'
+            },
+          },
           { title: '状态', dataIndex: 'status', width: 110, render: (s) => pipeStatusTag(s) },
           { title: '触发人', dataIndex: 'triggered_by', width: 110 },
           { title: '开始', dataIndex: 'started_at', width: 170, render: (s) => s ? new Date(s).toLocaleString() : '-' },
@@ -718,14 +745,43 @@ function PipelineTab({ app }: { app: App }) {
           { title: '操作', width: 90, render: (_, r) => <Button size="small" onClick={() => setDrawerRun(r)}>详情</Button> },
         ]}
       />
-      <Modal title={`触发部署 - ${app.name}`} open={open} onOk={handleDeploy} onCancel={() => setOpen(false)} okText="触发" cancelText="取消" maskClosable={false} keyboard={false}>
-        <Form form={form} layout="vertical" initialValues={{ strategy: 'single', batch_size: 2 }}>
-          <Form.Item name="artifact_id" label="选择制品" rules={[{ required: true }]}>
-            <Select placeholder="选择要部署的版本"
-              options={arts.map((a) => ({
-                value: a.id,
-                label: `#${a.id}  ${a.version_tag}  (${a.file_name})`,
-              }))} />
+      <Modal title={`触发部署 - ${app.name}`} open={open} onOk={handleDeploy} onCancel={() => setOpen(false)} okText="触发" cancelText="取消" maskClosable={false} keyboard={false} width={600}>
+        <Form form={form} layout="vertical" initialValues={{ strategy: 'single', batch_size: 2, source_type: 'bundle' }}>
+          <Form.Item name="source_type" label="产物来源" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 'bundle', label: 'Bundle（多 service 整组制品 · X.6 推荐）', disabled: bundles.length === 0 },
+                { value: 'artifact', label: 'Artifact（单 jar · 老链路兼容）', disabled: arts.length === 0 },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, cur) => prev.source_type !== cur.source_type}
+          >
+            {({ getFieldValue }) => {
+              const t = getFieldValue('source_type')
+              if (t === 'bundle') {
+                return (
+                  <Form.Item name="bundle_id" label="选择 Bundle" rules={[{ required: true }]}>
+                    <Select placeholder="选择整组制品"
+                      options={bundles.map((b) => ({
+                        value: b.id,
+                        label: `#${b.id}  ${b.version_tag}  (${b.items?.length ?? 0} services, ${b.git_commit_sha?.slice(0, 7) || ''})`,
+                      }))} />
+                  </Form.Item>
+                )
+              }
+              return (
+                <Form.Item name="artifact_id" label="选择制品" rules={[{ required: true }]}>
+                  <Select placeholder="选择要部署的版本"
+                    options={arts.map((a) => ({
+                      value: a.id,
+                      label: `#${a.id}  ${a.version_tag}  (${a.file_name})`,
+                    }))} />
+                </Form.Item>
+              )
+            }}
           </Form.Item>
           <Form.Item name="strategy" label="部署策略" rules={[{ required: true }]}>
             <Select

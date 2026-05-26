@@ -18,16 +18,16 @@ export async function getPipeline(id: number): Promise<PipelineRun> {
 //   - strategy='rolling'：分批并行，batchSize 必传 >=1
 //   - strategy='blue_green'：后端按 active_group 自动选目标组（active→opposite，空→blue）
 //     需要 App 已配 nginx_host_id + nginx_upstream_name；前端不必传 target_group
+//   - Sprint X.6：源可选 artifact_id（旧单 jar）或 bundle_id（多 service 整组）
 export async function deployApp(
   appId: number,
-  artifactId: number,
+  source: { artifact_id?: number; bundle_id?: number },
   strategy: 'single' | 'rolling' | 'blue_green' = 'single',
   batchSize?: number,
 ): Promise<PipelineRun> {
-  const body: Record<string, unknown> = {
-    artifact_id: artifactId,
-    strategy,
-  }
+  const body: Record<string, unknown> = { strategy }
+  if (source.bundle_id) body.bundle_id = source.bundle_id
+  if (source.artifact_id) body.artifact_id = source.artifact_id
   if (strategy === 'rolling') {
     body.batch_size = batchSize ?? 1
   }

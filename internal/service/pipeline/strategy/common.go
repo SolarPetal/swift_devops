@@ -224,7 +224,12 @@ echo "RESOLVED=$RESOLVED"
 	outcome.CurrentStage = StageHealth
 	outcome.EndedAt = &ended
 	hooks.OnHostStatus(dep.ID, dep.HostID, HostStatusSuccess, StageHealth, "")
-	hooks.OnDeploymentSuccess(dep, art.ID)
+	// Sprint X.6：多 service 链路时 plan.Item 指向本 service 对应 ArtifactItem，回填 current_artifact_item_id
+	var itemID uint
+	if plan.Item != nil {
+		itemID = plan.Item.ID
+	}
+	hooks.OnDeploymentSuccess(dep, art.ID, itemID)
 	return outcome, steps
 }
 

@@ -158,3 +158,22 @@ func (h *ArtifactHandler) Delete(c *gin.Context) {
 	}
 	c.Status(http.StatusNoContent)
 }
+
+// ListBundles GET /bundles?app_id=N （Sprint X.6 多 service 制品组）
+func (h *ArtifactHandler) ListBundles(c *gin.Context) {
+	var appID uint
+	if s := c.Query("app_id"); s != "" {
+		n, err := strconv.ParseUint(s, 10, 32)
+		if err != nil {
+			apperr.Respond(c, apperr.New("BAD_REQUEST", "app_id 必须是整数", http.StatusBadRequest))
+			return
+		}
+		appID = uint(n)
+	}
+	out, err := h.svc.ListBundles(appID)
+	if err != nil {
+		apperr.Respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": out})
+}

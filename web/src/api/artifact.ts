@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { Artifact, ArtifactInput } from '../types'
+import type { Artifact, ArtifactBundle, ArtifactInput } from '../types'
 
 export async function listArtifacts(appId?: number): Promise<Artifact[]> {
   const r = await api.get<{ items: Artifact[] }>('/artifacts', {
@@ -45,4 +45,12 @@ export async function uploadArtifact(
     },
   })
   return r.data
+}
+
+// Sprint X.6：多 service 整组制品（ArtifactBundle）
+export async function listBundles(appId?: number): Promise<ArtifactBundle[]> {
+  const r = await api.get<{ items: ArtifactBundle[] }>('/bundles', {
+    params: appId ? { app_id: appId } : undefined,
+  })
+  return r.data.items ?? []
 }
