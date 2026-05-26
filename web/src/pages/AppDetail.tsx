@@ -677,10 +677,10 @@ function PipelineTab({ app }: { app: App }) {
       title: `回滚 ${app.name}？`,
       content: (
         <>
-          <div>每台已绑定主机会退回到自己的 <code>previous_artifact_id</code>。</div>
+          <div>多 service 应用整组退到上一个 Bundle（Sprint X.7）；单 jar 应用退到自己的 <code>previous_artifact_id</code>。</div>
           <div style={{ marginTop: 8 }}>
             <Typography.Text type="secondary">
-              没有 previous 的主机会被跳过；任一主机失败将停止后续。
+              没有 previous 的主机会被跳过；按 startup_order 分波退回，任一 service 失败将停止后续 wave。
             </Typography.Text>
           </div>
         </>

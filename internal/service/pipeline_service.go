@@ -295,10 +295,15 @@ func (s *PipelineService) List(appID uint) ([]PipelineRunView, error) {
 }
 
 // Rollback 触发一键回滚。
-//   - 每个 deployment 退到自己的 previous_artifact_id
-//   - 至少一台主机有 previous_artifact_id 才能触发；全为 0 → BAD_REQUEST
+//   - 每个 deployment 退到自己的 previous_artifact_item_id (Sprint X.7 优先) 或 previous_artifact_id (旧路径兼容)
+//   - 至少一台主机有 previous → 才能触发；全无 → BAD_REQUEST
 //   - 制品已被清理（GetModel ErrNotFound）的 dep 仍可执行，由 strategy 标 skipped
 //   - 同 app 互斥
+//
+// Sprint X.7：整组 Bundle 回滚语义（Q2 决策 A）：
+//   - 所有 dep 都按 previous_artifact_item_id 取本 service 的 prev item
+//   - 各 service 退到自己的上一个 item，配合 wave 调度按 startup_order 回退
+//   - 当某 dep 没有 item 历史（X.6 之前数据）→ fallback 老 artifact 路径
 func (s *PipelineService) Rollback(appID uint, actor string) (PipelineRunView, error) {
 	// 1. 校验 app
 	var app model.Application
@@ -317,21 +322,39 @@ func (s *PipelineService) Rollback(appID uint, actor string) (PipelineRunView, e
 		return PipelineRunView{}, apperr.New("BAD_REQUEST", "应用尚未绑定任何主机，无法回滚", 400)
 	}
 
-	// 3. 预查 previous artifacts；至少一台主机能回滚
+	// 3. 预查 previous：优先 ArtifactItem (X.7)，落空回 Artifact (兼容旧数据)
+	//    至少一台主机能回滚才能触发。
+	itemByDep := map[uint]*model.ArtifactItem{}
 	artByDep := map[uint]*model.Artifact{}
+	var previousBundleID uint
 	for i := range deps {
-		if deps[i].PreviousArtifactID == 0 {
-			continue
+		dep := &deps[i]
+		// 优先：ArtifactItem 链路
+		if dep.PreviousArtifactItemID > 0 {
+			var item model.ArtifactItem
+			if err := s.db.First(&item, dep.PreviousArtifactItemID).Error; err == nil {
+				itemByDep[dep.ID] = &item
+				if previousBundleID == 0 {
+					previousBundleID = item.BundleID
+				}
+				continue
+			} else {
+				slog.Warn("rollback: previous item missing",
+					"dep_id", dep.ID, "previous_item_id", dep.PreviousArtifactItemID, "err", err)
+			}
 		}
-		art, err := s.artSvc.GetModel(deps[i].PreviousArtifactID)
-		if err != nil {
-			slog.Warn("rollback: previous artifact missing",
-				"dep_id", deps[i].ID, "previous_id", deps[i].PreviousArtifactID, "err", err)
-			continue
+		// fallback：旧 Artifact 链路
+		if dep.PreviousArtifactID > 0 {
+			art, err := s.artSvc.GetModel(dep.PreviousArtifactID)
+			if err != nil {
+				slog.Warn("rollback: previous artifact missing",
+					"dep_id", dep.ID, "previous_id", dep.PreviousArtifactID, "err", err)
+				continue
+			}
+			artByDep[dep.ID] = art
 		}
-		artByDep[deps[i].ID] = art
 	}
-	if len(artByDep) == 0 {
+	if len(itemByDep) == 0 && len(artByDep) == 0 {
 		return PipelineRunView{}, apperr.New("BAD_REQUEST",
 			"应用所有主机都没有可回滚的历史版本", 400)
 	}
@@ -359,6 +382,7 @@ func (s *PipelineService) Rollback(appID uint, actor string) (PipelineRunView, e
 	snapJSON, _ := json.Marshal(snap)
 	run := &model.PipelineRun{
 		AppID: appID, ArtifactID: 0,
+		PreviousBundleID: previousBundleID, // Sprint X.7：回滚目标 Bundle 留痕
 		Strategy: "rollback", Status: RunStatusRunning,
 		StateSnapshot: string(snapJSON),
 		TriggeredBy:   actor,
@@ -374,6 +398,7 @@ func (s *PipelineService) Rollback(appID uint, actor string) (PipelineRunView, e
 	plan := &strategy.Plan{
 		RunID: run.ID, App: &app, Deps: deps, EnvMap: envMap,
 		ArtifactByDepID: artByDep,
+		ItemByDepID:     itemByDep,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(run.ID, cancel)
@@ -470,9 +495,10 @@ func (s *PipelineService) loadEnabledServices(appID uint) ([]model.AppService, e
 //
 // 每个 service 拿到自己的 sub-plan：
 //   - sub.Service / sub.Deps（按 service_code 过滤）只属于该 service
-//   - 单 jar 旧链路：sub.Artifact 仍指向 plan.Artifact（兼容期）
-//   - 多 service Bundle 链路：sub.Artifact 由 plan.Bundle 的 service 对应 item 包装
-//   - rollback：sub.ArtifactByDepID 按本 service 的 dep 过滤
+//   - forward 单 jar 旧链路：sub.Artifact 仍指向 plan.Artifact（兼容期）
+//   - forward 多 service Bundle 链路：sub.Artifact 由 plan.Bundle 的 service 对应 item 包装
+//   - rollback 多 service Item 链路：sub.ArtifactByDepID 由 plan.ItemByDepID 按本 service 过滤后逐 dep 包装 (X.7)
+//   - rollback 单 jar 旧链路：sub.ArtifactByDepID 直接按本 service dep 过滤 (X.7 fallback)
 func (s *PipelineService) buildSubPlanFunc(plan *strategy.Plan, strat strategy.Strategy, services []model.AppService) strategy.SubPlanBuilder {
 	return func(svc *model.AppService) (*strategy.Plan, strategy.Strategy, error) {
 		sub := *plan // 浅拷贝
@@ -486,7 +512,40 @@ func (s *PipelineService) buildSubPlanFunc(plan *strategy.Plan, strat strategy.S
 		if envMap, err := deploy.ParseEnvVarsJSON(svc.EnvVars); err == nil && len(envMap) > 0 {
 			sub.EnvMap = envMap
 		}
-		// rollback：过滤 ArtifactByDepID
+		// Sprint X.7：rollback 优先 ItemByDepID（每 dep 包装临时 Artifact 透传给 strategy.Rollback）
+		if len(plan.ItemByDepID) > 0 {
+			subMap := map[uint]*model.Artifact{}
+			subItemMap := map[uint]*model.ArtifactItem{}
+			for _, d := range sub.Deps {
+				if it, ok := plan.ItemByDepID[d.ID]; ok {
+					subItemMap[d.ID] = it
+					subMap[d.ID] = &model.Artifact{
+						ID:       0,
+						AppID:    plan.App.ID,
+						FileName: it.FileName,
+						FilePath: it.FilePath,
+						FileMD5:  it.FileMD5,
+						FileSize: it.FileSize,
+					}
+				}
+			}
+			// 旧 ArtifactByDepID 作为 fallback（item 缺时回老路径）
+			for _, d := range sub.Deps {
+				if _, has := subMap[d.ID]; has {
+					continue
+				}
+				if a, ok := plan.ArtifactByDepID[d.ID]; ok {
+					subMap[d.ID] = a
+				}
+			}
+			if len(subMap) == 0 {
+				return nil, nil, nil // 该 service 没有可回滚的历史
+			}
+			sub.ArtifactByDepID = subMap
+			sub.ItemByDepID = subItemMap
+			return &sub, strat, nil
+		}
+		// rollback 旧链路：plan.ArtifactByDepID
 		if len(plan.ArtifactByDepID) > 0 {
 			subMap := map[uint]*model.Artifact{}
 			for _, d := range sub.Deps {

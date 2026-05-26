@@ -224,10 +224,14 @@ echo "RESOLVED=$RESOLVED"
 	outcome.CurrentStage = StageHealth
 	outcome.EndedAt = &ended
 	hooks.OnHostStatus(dep.ID, dep.HostID, HostStatusSuccess, StageHealth, "")
-	// Sprint X.6：多 service 链路时 plan.Item 指向本 service 对应 ArtifactItem，回填 current_artifact_item_id
+	// Sprint X.6/X.7：多 service 链路时回填 current_artifact_item_id
+	//   - forward：plan.Item 指向本 service 在 Bundle 内的 item
+	//   - rollback：plan.ItemByDepID[dep.ID] 指向本 dep 的 previous item
 	var itemID uint
 	if plan.Item != nil {
 		itemID = plan.Item.ID
+	} else if it, ok := plan.ItemByDepID[dep.ID]; ok && it != nil {
+		itemID = it.ID
 	}
 	hooks.OnDeploymentSuccess(dep, art.ID, itemID)
 	return outcome, steps
