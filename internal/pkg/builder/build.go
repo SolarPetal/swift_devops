@@ -26,6 +26,8 @@ type Plan struct {
 	GitRef        string      // 分支 / tag / commit
 	Cred          *Credential // nil = 公网匿名
 	MvnArgs       string      // 留空 = "clean package -DskipTests"
+	MvnBin        string      // mvn 可执行绝对路径（Sprint X.8 必填，杜绝 LookPath）
+	GitBin        string      // git 可执行绝对路径（Sprint X.8 必填，杜绝 LookPath）
 	JarPattern    string      // 旧字段：单 service 模式 glob；Sprint X.2 之后建议走 Services
 	Workspace     string      // build workspace 根目录（如 ./data/build/）
 	MavenCacheDir string      // -Dmaven.repo.local；空 = 走 ~/.m2
@@ -65,6 +67,12 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 	if strings.TrimSpace(plan.GitURL) == "" {
 		return Result{}, errors.New("git url is empty")
 	}
+	if strings.TrimSpace(plan.MvnBin) == "" {
+		return Result{}, errors.New("mvn_bin is empty (Sprint X.8 要求注入绝对路径)")
+	}
+	if strings.TrimSpace(plan.GitBin) == "" {
+		return Result{}, errors.New("git_bin is empty (Sprint X.8 要求注入绝对路径)")
+	}
 
 	// 1. 创建工作区子目录：<workspace>/<app_code>-<build_id>
 	subDir := filepath.Join(plan.Workspace,
@@ -83,6 +91,7 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 	// 2. git clone
 	sha, err := Clone(ctx, CloneOptions{
 		URL: plan.GitURL, Ref: plan.GitRef, TargetDir: subDir,
+		GitBin:    plan.GitBin,
 		Cred:      plan.Cred,
 		LogWriter: plan.LogWriter,
 		Timeout:   plan.CloneTimeout,
@@ -98,6 +107,7 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 		mvnArgs := mergeMultiModuleArgs(plan.MvnArgs, plan.Services)
 		mvn, err := MvnPackage(ctx, MavenOptions{
 			WorkDir:       subDir,
+			MvnBin:        plan.MvnBin,
 			ExtraArgs:     mvnArgs,
 			MavenCacheDir: plan.MavenCacheDir,
 			LogWriter:     plan.LogWriter,
@@ -138,6 +148,7 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 	// 4. 单 service 模式（旧行为）
 	mvn, err := MvnPackage(ctx, MavenOptions{
 		WorkDir:       subDir,
+		MvnBin:        plan.MvnBin,
 		ExtraArgs:     plan.MvnArgs,
 		MavenCacheDir: plan.MavenCacheDir,
 		LogWriter:     plan.LogWriter,

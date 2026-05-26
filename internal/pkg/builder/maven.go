@@ -16,6 +16,7 @@ import (
 // MavenOptions mvn package 的输入。
 type MavenOptions struct {
 	WorkDir       string        // pom.xml 所在目录
+	MvnBin        string        // mvn 可执行文件绝对路径（必填）。Sprint X.8：杜绝 exec.Command("mvn") 走 LookPath 在 WSL 翻到 Windows mvn.cmd
 	ExtraArgs     string        // 用户指定的额外 mvn 参数（空 → 默认 "clean package -DskipTests"）
 	MavenCacheDir string        // -Dmaven.repo.local=<dir>；空 = 走 ~/.m2
 	LogWriter     io.Writer     // 命令输出
@@ -37,6 +38,9 @@ type MavenResult struct {
 func MvnPackage(ctx context.Context, opts MavenOptions) (MavenResult, error) {
 	if strings.TrimSpace(opts.WorkDir) == "" {
 		return MavenResult{}, errors.New("work_dir is empty")
+	}
+	if strings.TrimSpace(opts.MvnBin) == "" {
+		return MavenResult{}, errors.New("mvn_bin is empty (need absolute path to mvn; LookPath fallback is forbidden to avoid WSL picking up Windows mvn.cmd)")
 	}
 	if _, err := os.Stat(filepath.Join(opts.WorkDir, "pom.xml")); err != nil {
 		return MavenResult{}, fmt.Errorf("pom.xml not found in %s: %w", opts.WorkDir, err)
@@ -62,8 +66,8 @@ func MvnPackage(ctx context.Context, opts MavenOptions) (MavenResult, error) {
 	mctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
-	fmt.Fprintf(logw, "$ cd %s && mvn %s\n", opts.WorkDir, strings.Join(args, " "))
-	cmd := exec.CommandContext(mctx, "mvn", args...)
+	fmt.Fprintf(logw, "$ cd %s && %s %s\n", opts.WorkDir, opts.MvnBin, strings.Join(args, " "))
+	cmd := exec.CommandContext(mctx, opts.MvnBin, args...)
 	cmd.Dir = opts.WorkDir
 	cmd.Stdout = logw
 	cmd.Stderr = logw

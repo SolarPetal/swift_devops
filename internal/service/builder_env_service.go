@@ -173,19 +173,31 @@ func (s *BuilderEnvService) Detect() (BuilderEnvView, error) {
 	// 3. git --version
 	gitBin := strings.TrimSpace(e.GitPath)
 	if gitBin == "" {
-		// 空 → 走 PATH 找
-		gitBin = "git"
+		// Sprint X.8：不再 fallback 到 "git" 走 LookPath（WSL 会翻到 /mnt/c/.../git.exe）。
+		// 兜底用硬路径 /usr/bin/git；存在即用，否则要求用户去 UI 配 GitPath 绝对路径。
+		if fileExecutable("/usr/bin/git") {
+			gitBin = "/usr/bin/git"
+		} else {
+			msgs = append(msgs, "✗ git_path 未配且 /usr/bin/git 不存在；请在「构建环境」填 git 绝对路径")
+			allOK = false
+		}
 	}
-	cmd := exec.CommandContext(ctx, gitBin, "--version")
-	out, err := cmd.CombinedOutput()
-	ver := firstLine(string(out))
-	if err != nil || ver == "" {
-		msgs = append(msgs, "✗ git 不可用: "+strings.TrimSpace(string(out))+" ("+strings.TrimSpace(err.Error())+")")
-		allOK = false
-		e.GitVersion = ""
-	} else {
-		e.GitVersion = ver
-		msgs = append(msgs, "✓ git: "+ver)
+	if gitBin != "" {
+		cmd := exec.CommandContext(ctx, gitBin, "--version")
+		out, err := cmd.CombinedOutput()
+		ver := firstLine(string(out))
+		if err != nil || ver == "" {
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			msgs = append(msgs, "✗ git 不可用: "+strings.TrimSpace(string(out))+" ("+errStr+")")
+			allOK = false
+			e.GitVersion = ""
+		} else {
+			e.GitVersion = ver
+			msgs = append(msgs, "✓ git: "+ver)
+		}
 	}
 
 	now := time.Now()
@@ -234,6 +246,40 @@ func (s *BuilderEnvService) RequireValid() error {
 			"构建环境未配置或检测失败，请去「⚙ 构建环境」配置 java_home / maven_home 并点「检测」", 400)
 	}
 	return nil
+}
+
+// Bins 返回 mvn / git 的绝对可执行路径，给 BuildService 注入到 builder.Plan。
+// Sprint X.8：杜绝 exec.Command("mvn"/"git", ...) 走 LookPath 在 WSL 误命中 Windows 同名程序。
+//   - mvnBin = MavenHome/bin/mvn（valid 状态下必非空）
+//   - gitBin = GitPath；空则兜底 /usr/bin/git；不存在则报 400 引导去配
+func (s *BuilderEnvService) Bins() (mvnBin, gitBin string, err error) {
+	e, err := s.Load()
+	if err != nil {
+		return "", "", err
+	}
+	if !e.Valid {
+		return "", "", apperr.New("BAD_REQUEST",
+			"构建环境未配置或检测失败，请去「⚙ 构建环境」检测后再触发构建", 400)
+	}
+	mvnBin = filepath.Join(e.MavenHome, "bin", "mvn")
+	if !fileExecutable(mvnBin) {
+		return "", "", apperr.New("BAD_REQUEST",
+			fmt.Sprintf("maven_home/bin/mvn 不可执行：%s。请「构建环境」重新检测", mvnBin), 400)
+	}
+	gitBin = strings.TrimSpace(e.GitPath)
+	if gitBin == "" {
+		if fileExecutable("/usr/bin/git") {
+			gitBin = "/usr/bin/git"
+		} else {
+			return "", "", apperr.New("BAD_REQUEST",
+				"git_path 未配且 /usr/bin/git 不存在；请在「构建环境」填 git 绝对路径", 400)
+		}
+	}
+	if !fileExecutable(gitBin) {
+		return "", "", apperr.New("BAD_REQUEST",
+			fmt.Sprintf("git_path 不可执行：%s。请「构建环境」重新检测", gitBin), 400)
+	}
+	return mvnBin, gitBin, nil
 }
 
 // --- 辅助 ---

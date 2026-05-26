@@ -257,6 +257,15 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
 	}
 
+	// Sprint X.8：拿 mvn/git 绝对路径，杜绝 exec.Command("mvn"/"git") 走 LookPath 在 WSL 翻到 Windows 同名程序
+	mvnBin, gitBin, binsErr := s.envSvc.Bins()
+	if binsErr != nil {
+		fmt.Fprintf(logFile, "\n[BUILD FAILED] load builder bins: %v\n", binsErr)
+		s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, binsErr.Error())
+		return
+	}
+	fmt.Fprintf(logFile, "[bins] mvn=%s git=%s\n", mvnBin, gitBin)
+
 	// Sprint X.2：决定走 multi-service 还是单 service 兼容
 	specs, err := s.loadServiceBuildSpecs(app, in)
 	if err != nil {
@@ -272,6 +281,8 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 	plan := builder.Plan{
 		AppCode: app.AppCode, GitURL: app.GitURL, GitRef: defaultRef(in.GitRef),
 		Cred: cred, MvnArgs: in.MvnArgs,
+		MvnBin:    mvnBin,
+		GitBin:    gitBin,
 		Workspace:  s.workspace, MavenCacheDir: s.mavenCacheDir,
 		LogWriter: io.MultiWriter(logFile),
 		ExecEnv:   execEnv,

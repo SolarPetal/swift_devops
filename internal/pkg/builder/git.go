@@ -37,6 +37,7 @@ type Credential struct {
 // CloneOptions clone 的输入。
 type CloneOptions struct {
 	URL       string
+	GitBin    string        // git 可执行文件绝对路径（必填）。Sprint X.8：禁用 LookPath 避免 WSL 翻到 /mnt/c/.../git.exe
 	Ref       string        // 分支 / tag / commit；空 = 远端默认分支
 	TargetDir string        // clone 目标目录（必须为空或不存在）
 	Cred      *Credential   // nil = 匿名
@@ -50,6 +51,9 @@ type CloneOptions struct {
 func Clone(ctx context.Context, opts CloneOptions) (string, error) {
 	if strings.TrimSpace(opts.URL) == "" {
 		return "", errors.New("git url is empty")
+	}
+	if strings.TrimSpace(opts.GitBin) == "" {
+		return "", errors.New("git_bin is empty (need absolute path to git; LookPath fallback is forbidden to avoid WSL picking up Windows git.exe)")
 	}
 	if strings.TrimSpace(opts.TargetDir) == "" {
 		return "", errors.New("target dir is empty")
@@ -79,18 +83,18 @@ func Clone(ctx context.Context, opts CloneOptions) (string, error) {
 		args = append(args, "-b", opts.Ref)
 	}
 	args = append(args, "--", cloneURL, opts.TargetDir)
-	fmt.Fprintf(logw, "$ git %s\n", redactArgs(args))
+	fmt.Fprintf(logw, "$ %s %s\n", opts.GitBin, redactArgs(args))
 
-	if err := runCmd(cctx, "", logw, opts.ExecEnv, extraEnv, "git", args...); err != nil {
+	if err := runCmd(cctx, "", logw, opts.ExecEnv, extraEnv, opts.GitBin, args...); err != nil {
 		// fallback：纯 commit SHA 时 -b 会报错，去掉 -b 重试 + 后续 checkout
 		if opts.Ref != "" && looksLikeSHA(opts.Ref) {
 			_ = os.RemoveAll(opts.TargetDir)
 			fmt.Fprintf(logw, "[fallback] -b %s 失败，回退为 clone 默认分支 + checkout\n", opts.Ref)
 			retry := []string{"clone", "--", cloneURL, opts.TargetDir}
-			if err2 := runCmd(cctx, "", logw, opts.ExecEnv, extraEnv, "git", retry...); err2 != nil {
+			if err2 := runCmd(cctx, "", logw, opts.ExecEnv, extraEnv, opts.GitBin, retry...); err2 != nil {
 				return "", fmt.Errorf("git clone retry: %w", err2)
 			}
-			if err2 := runCmd(cctx, opts.TargetDir, logw, opts.ExecEnv, extraEnv, "git", "checkout", opts.Ref); err2 != nil {
+			if err2 := runCmd(cctx, opts.TargetDir, logw, opts.ExecEnv, extraEnv, opts.GitBin, "checkout", opts.Ref); err2 != nil {
 				return "", fmt.Errorf("git checkout %s: %w", opts.Ref, err2)
 			}
 		} else {
@@ -99,7 +103,7 @@ func Clone(ctx context.Context, opts CloneOptions) (string, error) {
 	}
 
 	// 2. 取 HEAD commit SHA
-	revCmd := exec.CommandContext(cctx, "git", "-C", opts.TargetDir, "rev-parse", "HEAD")
+	revCmd := exec.CommandContext(cctx, opts.GitBin, "-C", opts.TargetDir, "rev-parse", "HEAD")
 	if opts.ExecEnv != nil {
 		revCmd.Env = append([]string{}, opts.ExecEnv...)
 	}
