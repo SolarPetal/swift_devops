@@ -129,6 +129,10 @@ export type App = {
   nginx_host_id: number       // 0 = 未启用蓝绿
   nginx_upstream_name: string // upstream block 名，与 nginx_host_id 同填同空
   active_group: string        // 'blue' | 'green' | ''；蓝绿部署成功后由后端写入
+  // Sprint X.10：部署模式
+  //   'systemd' → 写 /etc/systemd/system/devops-<app>.service + systemctl 管控（默认，需 root/sudo）
+  //   'nohup'   → 写 <deploy_path>/start.sh + nohup java -jar + app.pid（免 root，crash 不自愈）
+  deploy_mode: 'systemd' | 'nohup' | ''
   created_at: string
   updated_at: string
 }
@@ -155,6 +159,8 @@ export type AppService = {
   nginx_host_id: number
   nginx_upstream_name: string
   active_group: string
+  // Sprint X.10：部署模式，覆盖 Application.DeployMode。空串 = 沿用 app 字段。
+  deploy_mode: 'systemd' | 'nohup' | ''
   created_at: string
   updated_at: string
 }
@@ -176,6 +182,8 @@ export type AppServiceInput = {
   nginx_host_id?: number
   nginx_upstream_name?: string
   active_group?: string
+  // Sprint X.10：部署模式（覆盖 app 字段；空 = 沿用）
+  deploy_mode?: 'systemd' | 'nohup' | ''
 }
 
 export type Deployment = {

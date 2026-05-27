@@ -43,6 +43,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         env_vars: editing.env_vars,
         systemd_user: editing.systemd_user,
         java_path: editing.java_path,
+        deploy_mode: editing.deploy_mode || 'systemd',
         nginx_host_id: editing.nginx_host_id || 0,
         nginx_upstream_name: editing.nginx_upstream_name,
         active_group: editing.active_group,
@@ -54,6 +55,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         health_check_url: '/actuator/health',
         jvm_args: '-Xms512m -Xmx512m',
         java_path: '',
+        deploy_mode: 'systemd',
         git_url: '',
         git_cred_id: '',
         build_module: '',
@@ -94,7 +96,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
           git_url: 'build', git_cred_id: 'build',
           build_module: 'build', build_jar_pattern: 'build',
           jvm_args: 'runtime', env_vars: 'runtime',
-          systemd_user: 'runtime', java_path: 'runtime',
+          systemd_user: 'runtime', java_path: 'runtime', deploy_mode: 'runtime',
           nginx_host_id: 'bluegreen', nginx_upstream_name: 'bluegreen', active_group: 'bluegreen',
         }
         if (errField && tabOf[errField]) setActiveTab(tabOf[errField])
@@ -220,6 +222,19 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
               forceRender: true,
               children: (
                 <>
+                  <Form.Item
+                    name="deploy_mode"
+                    label="部署模式"
+                    tooltip="systemd：写 /etc/systemd/system/devops-<app>.service + systemctl 管控（需 root 或 sudo NOPASSWD，crash 自动重启）；nohup：写 <deploy_path>/start.sh + nohup java -jar + app.pid（免 root，crash 不会自愈，需手动拉起）"
+                  >
+                    <Select
+                      placeholder="选择部署模式（默认 systemd）"
+                      options={[
+                        { value: 'systemd', label: 'systemd 服务（推荐，crash 自愈，需 root/sudo）' },
+                        { value: 'nohup', label: 'nohup java -jar（免 root，crash 不自愈）' },
+                      ]}
+                    />
+                  </Form.Item>
                   <Form.Item name="jvm_args" label="JVM 启动参数">
                     <Input placeholder="-Xms512m -Xmx512m -XX:+UseG1GC" />
                   </Form.Item>

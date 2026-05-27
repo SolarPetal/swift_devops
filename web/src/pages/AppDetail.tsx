@@ -84,6 +84,13 @@ export default function AppDetail() {
               : <Typography.Text type="secondary">（沿用 SSH 账号）</Typography.Text>}
           </Descriptions.Item>
           <Descriptions.Item label="JVM 参数"><code>{app.jvm_args || '-'}</code></Descriptions.Item>
+          <Descriptions.Item label="部署模式">
+            {(() => {
+              const m = (app.deploy_mode || 'systemd')
+              if (m === 'nohup') return <Tag color="orange">nohup（免 root，crash 不自愈）</Tag>
+              return <Tag color="blue">systemd（推荐，crash 自愈）</Tag>
+            })()}
+          </Descriptions.Item>
           <Descriptions.Item label="Java 路径覆盖">
             {app.java_path
               ? <code>{app.java_path}</code>
@@ -1104,6 +1111,7 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
       health_check_url: app.health_check_url || '/actuator/health',
       jvm_args: app.jvm_args || '',
       systemd_user: app.systemd_user || '',
+      deploy_mode: (app.deploy_mode || '') as 'systemd' | 'nohup' | '',
       startup_order: 100,
       optional: false, enabled: true,
     })
@@ -1117,6 +1125,7 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
       port: row.port, health_check_url: row.health_check_url,
       jvm_args: row.jvm_args, env_vars: row.env_vars,
       systemd_user: row.systemd_user, java_path: row.java_path,
+      deploy_mode: (row.deploy_mode || '') as 'systemd' | 'nohup' | '',
       startup_order: row.startup_order, optional: row.optional, enabled: row.enabled,
       nginx_host_id: row.nginx_host_id, nginx_upstream_name: row.nginx_upstream_name,
     })
@@ -1246,6 +1255,20 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
           </Form.Item>
           <Form.Item name="env_vars" label="环境变量 (JSON)">
             <Input.TextArea rows={2} placeholder='{"SPRING_PROFILES_ACTIVE":"prod"}' />
+          </Form.Item>
+          <Form.Item
+            name="deploy_mode"
+            label="部署模式（覆盖 app 默认）"
+            tooltip="留空 = 沿用 app 的 deploy_mode。systemd 需 root/sudo，crash 自愈；nohup 免 root，crash 不自愈。"
+          >
+            <Select
+              allowClear
+              placeholder="留空 = 沿用 app 默认"
+              options={[
+                { value: 'systemd', label: 'systemd（推荐，crash 自愈）' },
+                { value: 'nohup', label: 'nohup（免 root，crash 不自愈）' },
+              ]}
+            />
           </Form.Item>
           <Space style={{ display: 'flex' }} align="start">
             <Form.Item name="systemd_user" label="systemd User" style={{ flex: 1 }}>
