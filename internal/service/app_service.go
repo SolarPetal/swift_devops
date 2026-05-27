@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"swift-devops/internal/model"
+	"swift-devops/internal/pkg/deploy"
 	apperr "swift-devops/internal/pkg/errors"
 )
 
@@ -40,6 +41,9 @@ type AppInput struct {
 	NginxHostID       uint   `json:"nginx_host_id,omitempty"`
 	NginxUpstreamName string `json:"nginx_upstream_name,omitempty"`
 	ActiveGroup       string `json:"active_group,omitempty"`
+	// DeployMode 部署模式（Sprint X.10）：systemd（默认，写 unit + systemctl）/ nohup（写 start.sh + nohup java -jar）。
+	// 空 = systemd（向后兼容）。
+	DeployMode string `json:"deploy_mode,omitempty"`
 }
 
 // AppView 应用响应
@@ -62,6 +66,7 @@ type AppView struct {
 	NginxHostID       uint   `json:"nginx_host_id"`
 	NginxUpstreamName string `json:"nginx_upstream_name"`
 	ActiveGroup       string `json:"active_group"`
+	DeployMode        string `json:"deploy_mode"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
 }
@@ -79,6 +84,7 @@ func toAppView(a *model.Application) AppView {
 		NginxHostID:       a.NginxHostID,
 		NginxUpstreamName: a.NginxUpstreamName,
 		ActiveGroup:       a.ActiveGroup,
+		DeployMode:        a.DeployMode,
 		CreatedAt:         a.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:         a.UpdatedAt.Format(time.RFC3339),
 	}
@@ -124,6 +130,7 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 		NginxHostID:       in.NginxHostID,
 		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
 		ActiveGroup:       strings.TrimSpace(in.ActiveGroup),
+		DeployMode:        deploy.NormalizeDeployMode(in.DeployMode),
 	}
 	if err := s.db.Create(a).Error; err != nil {
 		if isUniqueConstraint(err) {
@@ -189,6 +196,7 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.NginxHostID = in.NginxHostID
 	a.NginxUpstreamName = strings.TrimSpace(in.NginxUpstreamName)
 	a.ActiveGroup = strings.TrimSpace(in.ActiveGroup)
+	a.DeployMode = deploy.NormalizeDeployMode(in.DeployMode)
 	if err := s.db.Save(a).Error; err != nil {
 		if isUniqueConstraint(err) {
 			return AppView{}, apperr.New("CONFLICT",
@@ -268,6 +276,9 @@ func validateAppInput(in AppInput) error {
 	}
 	if err := validateJavaPath(in.JavaPath); err != nil {
 		return err
+	}
+	if err := deploy.ValidateDeployMode(in.DeployMode); err != nil {
+		return apperr.New("BAD_REQUEST", err.Error(), 400)
 	}
 	return nil
 }

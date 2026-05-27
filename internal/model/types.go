@@ -51,6 +51,11 @@ type Application struct {
 	// JavaPath: 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
 	// 适用场景：同一台主机跑多个 JDK 版本的应用（jdk8 / jdk17 等）。
 	JavaPath          string `gorm:"size:255" json:"java_path"`
+	// DeployMode 部署模式（Sprint X.10）：
+	//   "" / "systemd" → 写 /etc/systemd/system/devops-<app>.service + systemctl 管控（默认，向后兼容）
+	//   "nohup"        → 写 <deploy_path>/start.sh + nohup java -jar + app.pid 守护（免 root，crash 不自愈）
+	// 单 service 应用沿用本字段；多 service 链路下，AppService.DeployMode 覆盖本字段。
+	DeployMode        string `gorm:"size:20;default:'systemd'" json:"deploy_mode"`
 	// Sprint 5.4.7 构建：multi-module 项目用
 	// BuildModule 非空 → mvn -pl <module> -am；只编译该模块及其依赖，加速 + 减少 jar 命中
 	// BuildJarPattern 非空 → glob 在 workspace 下匹配 jar；为空走 builder 默认扫描+Spring Boot 探测
@@ -96,6 +101,11 @@ type AppService struct {
 	EnvVars        string `gorm:"type:text" json:"env_vars"` // JSON
 	SystemdUser    string `gorm:"size:32" json:"systemd_user"`
 	JavaPath       string `gorm:"size:255" json:"java_path"` // 空 = 沿用 Host.JavaPath
+	// DeployMode 部署模式（Sprint X.10）：
+	//   "" / "systemd" → systemd unit + systemctl（默认，向后兼容）
+	//   "nohup"        → nohup java -jar + app.pid（免 root，crash 不自愈）
+	// 空时回退 Application.DeployMode；都空 → "systemd"。
+	DeployMode     string `gorm:"size:20;default:'systemd'" json:"deploy_mode"`
 
 	// 编排
 	StartupOrder int  `gorm:"default:100;index" json:"startup_order"` // 0=注册中心，10=网关，100=业务（默认）

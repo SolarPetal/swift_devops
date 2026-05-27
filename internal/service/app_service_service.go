@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"swift-devops/internal/model"
+	"swift-devops/internal/pkg/deploy"
 	apperr "swift-devops/internal/pkg/errors"
 )
 
@@ -36,6 +37,8 @@ type AppServiceInput struct {
 	NginxHostID       uint   `json:"nginx_host_id,omitempty"`
 	NginxUpstreamName string `json:"nginx_upstream_name,omitempty"`
 	ActiveGroup       string `json:"active_group,omitempty"`
+	// DeployMode 部署模式（Sprint X.10）：systemd / nohup；空 → 回退 Application.DeployMode → systemd
+	DeployMode        string `json:"deploy_mode,omitempty"`
 }
 
 // AppServiceView AppService 响应。
@@ -58,6 +61,7 @@ type AppServiceView struct {
 	NginxHostID       uint   `json:"nginx_host_id"`
 	NginxUpstreamName string `json:"nginx_upstream_name"`
 	ActiveGroup       string `json:"active_group"`
+	DeployMode        string `json:"deploy_mode"`
 	CreatedAt         string `json:"created_at"`
 	UpdatedAt         string `json:"updated_at"`
 }
@@ -83,6 +87,7 @@ func toAppServiceView(s *model.AppService) AppServiceView {
 		SystemdUser: s.SystemdUser, JavaPath: s.JavaPath,
 		StartupOrder: s.StartupOrder, Optional: s.Optional, Enabled: s.Enabled,
 		NginxHostID: s.NginxHostID, NginxUpstreamName: s.NginxUpstreamName, ActiveGroup: s.ActiveGroup,
+		DeployMode: s.DeployMode,
 		CreatedAt: s.CreatedAt.Format(time.RFC3339),
 		UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
 	}
@@ -94,6 +99,9 @@ func (s *AppServiceService) Create(appID uint, in AppServiceInput) (AppServiceVi
 	if !serviceCodeRE.MatchString(code) {
 		return AppServiceView{}, apperr.New("BAD_REQUEST",
 			"service_code 必须以小写字母开头，2-50 位，仅含小写字母/数字/连字符", 400)
+	}
+	if err := deploy.ValidateDeployMode(in.DeployMode); err != nil {
+		return AppServiceView{}, apperr.New("BAD_REQUEST", err.Error(), 400)
 	}
 	// app 存在
 	if err := s.db.First(&model.Application{}, appID).Error; err != nil {
@@ -117,6 +125,7 @@ func (s *AppServiceService) Create(appID uint, in AppServiceInput) (AppServiceVi
 		NginxHostID: in.NginxHostID,
 		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
 		ActiveGroup: strings.TrimSpace(in.ActiveGroup),
+		DeployMode: strings.TrimSpace(in.DeployMode),
 	}
 	if row.StartupOrder == 0 {
 		row.StartupOrder = 100
@@ -160,6 +169,9 @@ func (s *AppServiceService) Update(id uint, in AppServiceInput) (AppServiceView,
 	if err != nil {
 		return AppServiceView{}, err
 	}
+	if err := deploy.ValidateDeployMode(in.DeployMode); err != nil {
+		return AppServiceView{}, apperr.New("BAD_REQUEST", err.Error(), 400)
+	}
 	// service_code 不可改（参考 app_code 也不可改的语义）
 	if strings.TrimSpace(in.ServiceCode) != "" && strings.TrimSpace(in.ServiceCode) != r.ServiceCode {
 		return AppServiceView{}, apperr.New("BAD_REQUEST",
@@ -186,6 +198,7 @@ func (s *AppServiceService) Update(id uint, in AppServiceInput) (AppServiceView,
 	r.NginxHostID = in.NginxHostID
 	r.NginxUpstreamName = strings.TrimSpace(in.NginxUpstreamName)
 	r.ActiveGroup = strings.TrimSpace(in.ActiveGroup)
+	r.DeployMode = strings.TrimSpace(in.DeployMode)
 	if err := s.db.Save(r).Error; err != nil {
 		return AppServiceView{}, apperr.Wrap(err, "INTERNAL", "update app_service", 500)
 	}
@@ -249,6 +262,7 @@ func EnsureDefaultAppService(db *gorm.DB, app *model.Application) error {
 		NginxHostID: app.NginxHostID,
 		NginxUpstreamName: app.NginxUpstreamName,
 		ActiveGroup: app.ActiveGroup,
+		DeployMode: strings.TrimSpace(app.DeployMode), // Sprint X.10：从 app 继承
 	}
 	if err := db.Create(row).Error; err != nil {
 		if isUniqueConstraintErr(err) {

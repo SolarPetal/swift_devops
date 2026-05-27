@@ -69,12 +69,16 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 		fmt.Sprintf("connected %s@%s:%d", target.User, target.IP, target.Port), "", dialStart))
 
 	dispatcher := deploy.NewDispatcher(client.SSHClient())
-	sysctl := deploy.NewSystemctl(client)
 
 	// Sprint X.3：根据 plan.Service 决定 service-aware 字段
 	// - 有 Service：service-level 配置覆盖 app-level，jar/unit 加 service_code 维度
 	// - 无 Service（旧链路）：完全用 app 字段，保持 Sprint X.3 之前的行为
-	svcCode, svcPort, svcHealth, svcJvm, svcEnvMap, svcSystemdUser, svcJavaPath := resolveServiceConfig(plan, app, dep)
+	// Sprint X.10：增加 deploy_mode 维度（systemd / nohup）
+	svcCode, svcPort, svcHealth, svcJvm, svcEnvMap, svcSystemdUser, svcJavaPath, svcDeployMode := resolveServiceConfig(plan, app, dep)
+
+	// Sprint X.10：按 deploy_mode 选 runtime。systemd / nohup 共用 dial/env_check/upload/health 阶段，
+	// 只在 write_unit / restart / status_dump 这三处分派。
+	runtime := deploy.PickRuntime(svcDeployMode, client)
 
 	// 计算 effective java_path：service 覆盖 app，再覆盖 host，最后兜底 /usr/bin/java
 	effectiveJava := strings.TrimSpace(svcJavaPath)
@@ -160,36 +164,33 @@ echo "RESOLVED=$RESOLVED"
 	emit(mkStepTimed(host.ID, host.Name, host.IP, StageUpload, true,
 		fmt.Sprintf("uploaded %s (%d bytes, md5=%s)", spec.JarPath(), art.FileSize, md5sum), "", upStart))
 
-	// 阶段 3：写 unit 文件
+	// 阶段 3：写启动文件（systemd → unit 文件；nohup → start.sh + stop.sh）
+	// Sprint X.10：先 best-effort 清理另一种模式的残留，避免切模式时新旧并存
 	unitStart := time.Now()
-	unitText, err := deploy.RenderUnit(spec)
-	if err != nil {
-		return fail(StageUnit, "render: "+err.Error(), unitStart, host.Name, host.IP, "")
+	_ = runtime.StopOther(ctx, spec)
+	if err := runtime.PrepareUnit(ctx, spec); err != nil {
+		return fail(StageUnit, fmt.Sprintf("[%s] %s", runtime.Name(), err.Error()),
+			unitStart, host.Name, host.IP, "")
 	}
-	if err := dispatcher.WriteFile(spec.UnitPath(), unitText, 0o644); err != nil {
-		return fail(StageUnit, "write unit: "+err.Error(), unitStart, host.Name, host.IP, "")
-	}
-	emit(mkStepTimed(host.ID, host.Name, host.IP, StageUnit, true, spec.UnitPath(), "", unitStart))
+	emit(mkStepTimed(host.ID, host.Name, host.IP, StageUnit, true,
+		fmt.Sprintf("%s (mode=%s)", runtime.UnitArtifactPath(spec), runtime.Name()), "", unitStart))
 
-	// 阶段 4：daemon-reload + restart + WaitActive（Sprint 3.6）
+	// 阶段 4：重启 + 等 active
+	// systemd：daemon-reload + enable + restart + WaitActive
+	// nohup：stop.sh → start.sh → 轮询 pid 文件 + kill -0
 	rsStart := time.Now()
-	if err := sysctl.DaemonReload(ctx); err != nil {
-		return fail(StageRestart, "daemon-reload: "+err.Error(), rsStart, host.Name, host.IP, "")
-	}
-	if err := sysctl.EnableAndRestart(ctx, spec.UnitName()); err != nil {
-		return fail(StageRestart, err.Error(), rsStart, host.Name, host.IP, "")
-	}
-	// systemctl restart 是异步的，主动等 10s 内进入 active —— 否则立刻拉 status + journal
-	st, waited, waitErr := sysctl.WaitActive(ctx, spec.UnitName(), 10*time.Second)
+	waited, waitErr := runtime.RestartAndWait(ctx, spec, 10*time.Second)
 	if waitErr != nil {
-		dump := sysctl.StatusDump(ctx, spec.UnitName(), 200)
-		hint := humanizeSystemdError(dump)
-		errStr := fmt.Sprintf("%s%s\n\n--- diagnostics ---\n%s", hint, waitErr.Error(), dump)
+		dump := runtime.StatusDump(ctx, spec, 200)
+		hint := runtime.HumanizeError(dump)
+		errStr := fmt.Sprintf("%s[%s] %s\n\n--- diagnostics ---\n%s",
+			hint, runtime.Name(), waitErr.Error(), dump)
 		return fail(StageRestart, errStr, rsStart, host.Name, host.IP,
-			fmt.Sprintf("is-active=%s waited=%s", st, waited.Round(time.Millisecond)))
+			fmt.Sprintf("mode=%s waited=%s", runtime.Name(), waited.Round(time.Millisecond)))
 	}
 	emit(mkStepTimed(host.ID, host.Name, host.IP, StageRestart, true,
-		fmt.Sprintf("%s active in %s", spec.UnitName(), waited.Round(time.Millisecond)), "", rsStart))
+		fmt.Sprintf("%s started in %s (mode=%s)",
+			spec.UnitName(), waited.Round(time.Millisecond), runtime.Name()), "", rsStart))
 
 	// 阶段 5：health probe
 	hStart := time.Now()
@@ -207,10 +208,10 @@ echo "RESOLVED=$RESOLVED"
 		if errStr == "" {
 			errStr = "probe failed"
 		}
-		// Sprint 3.6：health 失败时附 status + journal，便于看到 Java 异常 / OOM / 端口冲突
-		dump := sysctl.StatusDump(ctx, spec.UnitName(), 200)
+		// Sprint 3.6 / X.10：health 失败时附 runtime 诊断，便于看到 Java 异常 / OOM / 端口冲突
+		dump := runtime.StatusDump(ctx, spec, 200)
 		if dump != "" {
-			hint := humanizeSystemdError(dump)
+			hint := runtime.HumanizeError(dump)
 			errStr = hint + errStr + "\n\n--- diagnostics ---\n" + dump
 		}
 		return fail(StageHealth, errStr, hStart, host.Name, host.IP, detail)
@@ -264,9 +265,14 @@ func effectivePort(dep *model.Deployment, app *model.Application) int {
 //   - plan.Service 非 nil → 从 AppService 取（多 service 链路）
 //   - plan.Service 为 nil → 从 Application 取（X.3 之前的单 jar 兼容）
 //
-// 返回值：service_code, port, health_url, jvm_args, env_map, systemd_user, java_path
+// Sprint X.10：新增 deploy_mode 返回值。规则：
+//   - service.DeployMode 非空 → 用 service
+//   - 落空 → app.DeployMode
+//   - 都空 → "systemd"（向后兼容）
+//
+// 返回值：service_code, port, health_url, jvm_args, env_map, systemd_user, java_path, deploy_mode
 func resolveServiceConfig(plan *Plan, app *model.Application, dep *model.Deployment) (
-	svcCode string, port int, health, jvm string, envMap map[string]string, systemdUser, javaPath string,
+	svcCode string, port int, health, jvm string, envMap map[string]string, systemdUser, javaPath, deployMode string,
 ) {
 	if plan.Service != nil {
 		s := plan.Service
@@ -279,6 +285,11 @@ func resolveServiceConfig(plan *Plan, app *model.Application, dep *model.Deploym
 		jvm = s.JvmArgs
 		systemdUser = s.SystemdUser
 		javaPath = s.JavaPath
+		// deploy_mode：service 优先，落空回 app，再落空 → 由 deploy.PickRuntime 兜底
+		deployMode = strings.TrimSpace(s.DeployMode)
+		if deployMode == "" {
+			deployMode = strings.TrimSpace(app.DeployMode)
+		}
 		// env_vars 优先 service-level，落空回 plan.EnvMap（兼容老调用方）
 		if parsed, err := deploy.ParseEnvVarsJSON(s.EnvVars); err == nil && len(parsed) > 0 {
 			envMap = parsed
@@ -294,6 +305,7 @@ func resolveServiceConfig(plan *Plan, app *model.Application, dep *model.Deploym
 	jvm = app.JvmArgs
 	systemdUser = app.SystemdUser
 	javaPath = app.JavaPath
+	deployMode = strings.TrimSpace(app.DeployMode)
 	envMap = plan.EnvMap
 	return
 }
@@ -320,39 +332,8 @@ func serviceDeployPath(deployPath, svcCode string) string {
 	return strings.TrimRight(deployPath, "/") + "/" + c
 }
 
-// humanizeSystemdError 从 systemctl status / journalctl 输出里识别常见错误码，
-// 返回友好的中文 hint（"⚠ Java 可执行文件不存在/权限不足..."），便于用户立刻定位。
-// 没命中任何已知模式时返回空串，调用方应直接展示原始 dump。
-//
-// Sprint 3.7：先支持 5 个最常见的 systemd 错误模式，覆盖 80% 部署失败场景。
-func humanizeSystemdError(dump string) string {
-	if dump == "" {
-		return ""
-	}
-	lower := strings.ToLower(dump)
-	switch {
-	case strings.Contains(dump, "status=203/EXEC"):
-		return "⚠ Java 可执行文件不存在或权限不足（systemd 203/EXEC）。请检查主机配置的 java_path，或确认远端已装 JDK。\n\n"
-	case strings.Contains(dump, "status=200/CHDIR"):
-		return "⚠ WorkingDirectory 不存在或无权访问（systemd 200/CHDIR）。请确认应用 deploy_path 在远端可写。\n\n"
-	case strings.Contains(dump, "status=200/USER"):
-		return "⚠ systemd User= 在远端不存在（200/USER）。请去掉应用的 systemd_user，或在远端创建该用户。\n\n"
-	case strings.Contains(dump, "status=200/EXEC"):
-		return "⚠ 进程启动时 exec 失败（200/EXEC）。常见原因：jar 文件损坏 / class not found。检查 jar 完整性与 JVM 参数。\n\n"
-	case strings.Contains(dump, "status=143"):
-		return "ℹ 进程收到 SIGTERM 退出（143）。一般是正常停止流程；若不是预期，检查 RestartSec 与外部信号源。\n\n"
-	case strings.Contains(lower, "killed") && strings.Contains(lower, "signal=kill"),
-		strings.Contains(dump, "status=137"),
-		strings.Contains(lower, "out of memory"),
-		strings.Contains(lower, "oom-killer"):
-		return "⚠ 进程被 OOM Killer 杀死（status=137 或 signal=KILL）。建议调大 -Xmx 或扩容主机内存。\n\n"
-	case strings.Contains(lower, "address already in use"),
-		strings.Contains(lower, "bindexception"),
-		strings.Contains(dump, "Port already in use"):
-		return "⚠ 端口已被占用。常见原因：上一进程未释放，或同主机已有别的应用占用此端口。检查 server.port 配置。\n\n"
-	}
-	return ""
-}
+// Sprint X.10：humanizeSystemdError 已搬到 internal/pkg/deploy/systemd_runtime.go
+// （作为 systemdRuntime.HumanizeError 方法）。deployHost 通过 Runtime 接口调用，本包不再持有。
 
 func mkStepTimed(hostID uint, hostName, hostIP, stage string, ok bool, detail, errStr string, start time.Time) StepResult {
 	return StepResult{
