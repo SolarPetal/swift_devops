@@ -75,24 +75,24 @@ func toBuildRunView(b *model.BuildRun) BuildRunView {
 
 // BuildService 构建编排：触发 / 异步执行 / 查询 / 读日志。
 type BuildService struct {
-	db            *gorm.DB
-	artSvc        *ArtifactService
-	credSvc       *GitCredentialService
-	envSvc        *BuilderEnvService
-	workspace     string // build_workspace 根目录
-	mavenCacheDir string
+	db        *gorm.DB
+	artSvc    *ArtifactService
+	credSvc   *GitCredentialService
+	envSvc    *BuilderEnvService
+	workspace string // build_workspace 根目录
+	// Sprint X.9：maven_cache_dir 不再从 config 注入；改到 BuilderEnv.MavenLocalRepo（UI 配置）
+	// 触发构建时 envSvc.ResolveBuildInputs() 返回，允许留空走 settings.xml 默认。
 
 	mu       sync.Mutex
 	busyApps map[uint]struct{} // 同 app 互斥（构建 + 部署可分开管，但构建本身互斥）
 }
 
 func NewBuildService(db *gorm.DB, artSvc *ArtifactService, credSvc *GitCredentialService,
-	envSvc *BuilderEnvService, workspace, mavenCacheDir string) *BuildService {
+	envSvc *BuilderEnvService, workspace string) *BuildService {
 	return &BuildService{
 		db: db, artSvc: artSvc, credSvc: credSvc, envSvc: envSvc,
-		workspace:     workspace,
-		mavenCacheDir: mavenCacheDir,
-		busyApps:      map[uint]struct{}{},
+		workspace: workspace,
+		busyApps:  map[uint]struct{}{},
 	}
 }
 
@@ -257,14 +257,19 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
 	}
 
-	// Sprint X.8：拿 mvn/git 绝对路径，杜绝 exec.Command("mvn"/"git") 走 LookPath 在 WSL 翻到 Windows 同名程序
-	mvnBin, gitBin, binsErr := s.envSvc.Bins()
+	// Sprint X.8 + X.9：拿 mvn/git 绝对路径 + maven_local_repo（覆盖 settings.xml 的 <localRepository>，空 = 用默认）
+	inputs, binsErr := s.envSvc.ResolveBuildInputs()
 	if binsErr != nil {
-		fmt.Fprintf(logFile, "\n[BUILD FAILED] load builder bins: %v\n", binsErr)
+		fmt.Fprintf(logFile, "\n[BUILD FAILED] load builder inputs: %v\n", binsErr)
 		s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, binsErr.Error())
 		return
 	}
-	fmt.Fprintf(logFile, "[bins] mvn=%s git=%s\n", mvnBin, gitBin)
+	localRepoDisplay := inputs.MavenLocalRepo
+	if localRepoDisplay == "" {
+		localRepoDisplay = "(空 → 用 settings.xml 默认)"
+	}
+	fmt.Fprintf(logFile, "[bins] mvn=%s git=%s maven_local_repo=%s\n",
+		inputs.MvnBin, inputs.GitBin, localRepoDisplay)
 
 	// Sprint X.2：决定走 multi-service 还是单 service 兼容
 	specs, err := s.loadServiceBuildSpecs(app, in)
@@ -281,9 +286,9 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 	plan := builder.Plan{
 		AppCode: app.AppCode, GitURL: app.GitURL, GitRef: defaultRef(in.GitRef),
 		Cred: cred, MvnArgs: in.MvnArgs,
-		MvnBin:    mvnBin,
-		GitBin:    gitBin,
-		Workspace:  s.workspace, MavenCacheDir: s.mavenCacheDir,
+		MvnBin:    inputs.MvnBin,
+		GitBin:    inputs.GitBin,
+		Workspace: s.workspace, MavenCacheDir: inputs.MavenLocalRepo,
 		LogWriter: io.MultiWriter(logFile),
 		ExecEnv:   execEnv,
 		BuildID:   buildID,

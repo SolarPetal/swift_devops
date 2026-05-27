@@ -265,6 +265,10 @@ type BuilderEnv struct {
 	JavaHome      string     `gorm:"size:255" json:"java_home"`
 	MavenHome     string     `gorm:"size:255" json:"maven_home"`
 	GitPath       string     `gorm:"size:255" json:"git_path"` // 一般 /usr/bin/git；空 = 走 PATH 找
+	// Sprint X.9：maven 本地仓库（覆盖 settings.xml 里的 <localRepository>）。
+	// 空 = 不传 -Dmaven.repo.local，让 mvn 自己用 settings.xml 默认（推荐）。
+	// 非空必须绝对路径，触发构建时作为 -Dmaven.repo.local=<dir> 传给 mvn。
+	MavenLocalRepo string    `gorm:"size:255" json:"maven_local_repo"`
 	JavaVersion   string     `gorm:"size:100" json:"java_version"`
 	MavenVersion  string     `gorm:"size:100" json:"maven_version"`
 	GitVersion    string     `gorm:"size:100" json:"git_version"`

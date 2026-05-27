@@ -92,6 +92,7 @@ export type BuilderEnv = {
   java_home: string
   maven_home: string
   git_path: string
+  maven_local_repo: string  // Sprint X.9：空 = 用 mvn settings.xml 默认 <localRepository>
   java_version: string
   maven_version: string
   git_version: string
@@ -104,6 +105,7 @@ export type BuilderEnvInput = {
   java_home: string
   maven_home: string
   git_path?: string
+  maven_local_repo?: string  // Sprint X.9
 }
 
 export type App = {

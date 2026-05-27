@@ -24,7 +24,8 @@ storage:
 
 builder:
   docker_enabled: false   # 装了 docker 再开
-  maven_cache_dir: ./data/.m2
+  # maven 本地仓库 (maven_local_repo) 不在 config 里配，
+  # 登录 UI 后到「⚙ 构建环境」页填写；留空 = 用 mvn settings.xml 里的 <localRepository>
 
 ssh:
   pool_size_per_host: 2

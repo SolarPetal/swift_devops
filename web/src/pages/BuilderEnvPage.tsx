@@ -21,6 +21,7 @@ export default function BuilderEnvPage() {
         java_home: e.java_home,
         maven_home: e.maven_home,
         git_path: e.git_path,
+        maven_local_repo: e.maven_local_repo,
       })
     } catch (e) { message.error(formatError(e)) }
     finally { setLoading(false) }
@@ -97,12 +98,22 @@ export default function BuilderEnvPage() {
         <Form.Item
           name="git_path"
           label="Git 可执行路径（可选）"
-          tooltip="留空走 PATH 找 git；填写后用绝对路径，如 /usr/bin/git"
+          tooltip="留空兜底 /usr/bin/git；填写后用绝对路径，如 /usr/bin/git"
           rules={[
             { pattern: /^(\/[^\\]*)?$/, message: '必须是绝对路径或留空，且不能含反斜杠' },
           ]}
         >
-          <Input placeholder="留空走 PATH；或填 /usr/bin/git" />
+          <Input placeholder="留空兜底 /usr/bin/git；或填 /usr/bin/git" />
+        </Form.Item>
+        <Form.Item
+          name="maven_local_repo"
+          label="Maven 本地仓库（可选）"
+          tooltip="留空 = 用 mvn settings.xml 里的 <localRepository>（推荐，能复用本机 maven 缓存）；非空必须绝对路径，触发构建时作为 -Dmaven.repo.local=<dir> 传给 mvn 覆盖 settings.xml"
+          rules={[
+            { pattern: /^(\/[^\\]*)?$/, message: '必须是绝对路径或留空，且不能含反斜杠' },
+          ]}
+        >
+          <Input placeholder="留空 = 用 settings.xml 默认；或填 /home/wwkj/maven/maven_rep 之类的绝对路径" />
         </Form.Item>
         <Form.Item>
           <Space>
@@ -123,6 +134,11 @@ export default function BuilderEnvPage() {
             {env.java_version && <Descriptions.Item label="Java"><code>{env.java_version}</code></Descriptions.Item>}
             {env.maven_version && <Descriptions.Item label="Maven"><code>{env.maven_version}</code></Descriptions.Item>}
             {env.git_version && <Descriptions.Item label="Git"><code>{env.git_version}</code></Descriptions.Item>}
+            <Descriptions.Item label="Maven 本地仓库">
+              {env.maven_local_repo
+                ? <code>{env.maven_local_repo}</code>
+                : <Typography.Text type="secondary">（空 → 用 mvn settings.xml 里的 &lt;localRepository&gt;）</Typography.Text>}
+            </Descriptions.Item>
             <Descriptions.Item label="状态">
               {env.valid ? <Tag color="green">✓ 全部通过</Tag> : <Tag color="red">✗ 检测失败</Tag>}
             </Descriptions.Item>

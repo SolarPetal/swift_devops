@@ -18,28 +18,31 @@ import (
 
 // BuilderEnvInput 更新构建环境的入参。
 type BuilderEnvInput struct {
-	JavaHome  string `json:"java_home"`
-	MavenHome string `json:"maven_home"`
-	GitPath   string `json:"git_path,omitempty"`
+	JavaHome       string `json:"java_home"`
+	MavenHome      string `json:"maven_home"`
+	GitPath        string `json:"git_path,omitempty"`
+	MavenLocalRepo string `json:"maven_local_repo,omitempty"` // Sprint X.9：空 = 用 settings.xml 默认
 }
 
 // BuilderEnvView 响应视图。
 type BuilderEnvView struct {
-	JavaHome      string `json:"java_home"`
-	MavenHome     string `json:"maven_home"`
-	GitPath       string `json:"git_path"`
-	JavaVersion   string `json:"java_version"`
-	MavenVersion  string `json:"maven_version"`
-	GitVersion    string `json:"git_version"`
-	DetectedAt    string `json:"detected_at,omitempty"`
-	Valid         bool   `json:"valid"`
-	DetectMessage string `json:"detect_message"`
+	JavaHome       string `json:"java_home"`
+	MavenHome      string `json:"maven_home"`
+	GitPath        string `json:"git_path"`
+	MavenLocalRepo string `json:"maven_local_repo"`
+	JavaVersion    string `json:"java_version"`
+	MavenVersion   string `json:"maven_version"`
+	GitVersion     string `json:"git_version"`
+	DetectedAt     string `json:"detected_at,omitempty"`
+	Valid          bool   `json:"valid"`
+	DetectMessage  string `json:"detect_message"`
 }
 
 func toBuilderEnvView(e *model.BuilderEnv) BuilderEnvView {
 	v := BuilderEnvView{
 		JavaHome: e.JavaHome, MavenHome: e.MavenHome, GitPath: e.GitPath,
-		JavaVersion: e.JavaVersion, MavenVersion: e.MavenVersion, GitVersion: e.GitVersion,
+		MavenLocalRepo: e.MavenLocalRepo,
+		JavaVersion:    e.JavaVersion, MavenVersion: e.MavenVersion, GitVersion: e.GitVersion,
 		Valid: e.Valid, DetectMessage: e.DetectMessage,
 	}
 	if e.DetectedAt != nil {
@@ -94,6 +97,9 @@ func (s *BuilderEnvService) Update(in BuilderEnvInput) (BuilderEnvView, error) {
 	if err := validatePathAbs("git_path", in.GitPath, false); err != nil {
 		return BuilderEnvView{}, err
 	}
+	if err := validatePathAbs("maven_local_repo", in.MavenLocalRepo, false); err != nil {
+		return BuilderEnvView{}, err
+	}
 	e, err := s.Load()
 	if err != nil {
 		return BuilderEnvView{}, err
@@ -101,6 +107,7 @@ func (s *BuilderEnvService) Update(in BuilderEnvInput) (BuilderEnvView, error) {
 	e.JavaHome = normalizePath(in.JavaHome)
 	e.MavenHome = normalizePath(in.MavenHome)
 	e.GitPath = normalizePath(in.GitPath)
+	e.MavenLocalRepo = normalizePath(in.MavenLocalRepo)
 	// 改完路径要重新 detect，先把 valid 清掉
 	e.Valid = false
 	e.DetectMessage = "已更新配置，请点「检测」按钮验证"
@@ -248,38 +255,51 @@ func (s *BuilderEnvService) RequireValid() error {
 	return nil
 }
 
-// Bins 返回 mvn / git 的绝对可执行路径，给 BuildService 注入到 builder.Plan。
-// Sprint X.8：杜绝 exec.Command("mvn"/"git", ...) 走 LookPath 在 WSL 误命中 Windows 同名程序。
-//   - mvnBin = MavenHome/bin/mvn（valid 状态下必非空）
-//   - gitBin = GitPath；空则兜底 /usr/bin/git；不存在则报 400 引导去配
-func (s *BuilderEnvService) Bins() (mvnBin, gitBin string, err error) {
+// BuildPlanInputs 给 BuildService 注入到 builder.Plan 的可执行路径与 maven 配置。
+// Sprint X.9：从 Bins() 重构而来，加 MavenLocalRepo 字段。
+type BuildPlanInputs struct {
+	MvnBin         string // mvn 可执行绝对路径（必非空）
+	GitBin         string // git 可执行绝对路径（必非空，空时兜底 /usr/bin/git）
+	MavenLocalRepo string // -Dmaven.repo.local；空 = 不传，让 mvn 用 settings.xml 默认（推荐）
+}
+
+// ResolveBuildInputs 收集本次构建所需的可执行路径与 maven 仓库设置。
+// Sprint X.9：替代旧 Bins()，扩展支持 maven_local_repo。
+//   - mvnBin = MavenHome/bin/mvn（valid 状态下必非空，文件不可执行报 400）
+//   - gitBin = GitPath；空则兜底 /usr/bin/git；不存在报 400
+//   - mavenLocalRepo = e.MavenLocalRepo（允许空 = 用 settings.xml 里的 <localRepository>）
+func (s *BuilderEnvService) ResolveBuildInputs() (BuildPlanInputs, error) {
 	e, err := s.Load()
 	if err != nil {
-		return "", "", err
+		return BuildPlanInputs{}, err
 	}
 	if !e.Valid {
-		return "", "", apperr.New("BAD_REQUEST",
+		return BuildPlanInputs{}, apperr.New("BAD_REQUEST",
 			"构建环境未配置或检测失败，请去「⚙ 构建环境」检测后再触发构建", 400)
 	}
-	mvnBin = filepath.Join(e.MavenHome, "bin", "mvn")
+	mvnBin := filepath.Join(e.MavenHome, "bin", "mvn")
 	if !fileExecutable(mvnBin) {
-		return "", "", apperr.New("BAD_REQUEST",
+		return BuildPlanInputs{}, apperr.New("BAD_REQUEST",
 			fmt.Sprintf("maven_home/bin/mvn 不可执行：%s。请「构建环境」重新检测", mvnBin), 400)
 	}
-	gitBin = strings.TrimSpace(e.GitPath)
+	gitBin := strings.TrimSpace(e.GitPath)
 	if gitBin == "" {
 		if fileExecutable("/usr/bin/git") {
 			gitBin = "/usr/bin/git"
 		} else {
-			return "", "", apperr.New("BAD_REQUEST",
+			return BuildPlanInputs{}, apperr.New("BAD_REQUEST",
 				"git_path 未配且 /usr/bin/git 不存在；请在「构建环境」填 git 绝对路径", 400)
 		}
 	}
 	if !fileExecutable(gitBin) {
-		return "", "", apperr.New("BAD_REQUEST",
+		return BuildPlanInputs{}, apperr.New("BAD_REQUEST",
 			fmt.Sprintf("git_path 不可执行：%s。请「构建环境」重新检测", gitBin), 400)
 	}
-	return mvnBin, gitBin, nil
+	return BuildPlanInputs{
+		MvnBin:         mvnBin,
+		GitBin:         gitBin,
+		MavenLocalRepo: strings.TrimSpace(e.MavenLocalRepo), // 允许空
+	}, nil
 }
 
 // --- 辅助 ---
