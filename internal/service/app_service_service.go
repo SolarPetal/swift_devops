@@ -38,7 +38,7 @@ type AppServiceInput struct {
 	NginxUpstreamName string `json:"nginx_upstream_name,omitempty"`
 	ActiveGroup       string `json:"active_group,omitempty"`
 	// DeployMode 部署模式（Sprint X.10）：systemd / nohup；空 → 回退 Application.DeployMode → systemd
-	DeployMode        string `json:"deploy_mode,omitempty"`
+	DeployMode string `json:"deploy_mode,omitempty"`
 }
 
 // AppServiceView AppService 响应。
@@ -88,8 +88,8 @@ func toAppServiceView(s *model.AppService) AppServiceView {
 		StartupOrder: s.StartupOrder, Optional: s.Optional, Enabled: s.Enabled,
 		NginxHostID: s.NginxHostID, NginxUpstreamName: s.NginxUpstreamName, ActiveGroup: s.ActiveGroup,
 		DeployMode: s.DeployMode,
-		CreatedAt: s.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+		CreatedAt:  s.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:  s.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -114,18 +114,18 @@ func (s *AppServiceService) Create(appID uint, in AppServiceInput) (AppServiceVi
 	en := boolDeref(in.Enabled, true)
 	row := &model.AppService{
 		AppID: appID, ServiceCode: code, Name: strings.TrimSpace(in.Name),
-		BuildModule: strings.TrimSpace(in.BuildModule),
+		BuildModule:     strings.TrimSpace(in.BuildModule),
 		BuildJarPattern: strings.TrimSpace(in.BuildJarPattern),
-		Port: in.Port, HealthCheckURL: defaultHealthURL(in.HealthCheckURL),
+		Port:            in.Port, HealthCheckURL: defaultHealthURL(in.HealthCheckURL),
 		JvmArgs: in.JvmArgs, EnvVars: in.EnvVars,
-		SystemdUser: strings.TrimSpace(in.SystemdUser),
-		JavaPath: strings.TrimSpace(in.JavaPath),
+		SystemdUser:  strings.TrimSpace(in.SystemdUser),
+		JavaPath:     strings.TrimSpace(in.JavaPath),
 		StartupOrder: in.StartupOrder,
-		Optional: opt, Enabled: en,
-		NginxHostID: in.NginxHostID,
+		Optional:     opt, Enabled: en,
+		NginxHostID:       in.NginxHostID,
 		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
-		ActiveGroup: strings.TrimSpace(in.ActiveGroup),
-		DeployMode: strings.TrimSpace(in.DeployMode),
+		ActiveGroup:       strings.TrimSpace(in.ActiveGroup),
+		DeployMode:        strings.TrimSpace(in.DeployMode),
 	}
 	if row.StartupOrder == 0 {
 		row.StartupOrder = 100
@@ -259,10 +259,10 @@ func EnsureDefaultAppService(db *gorm.DB, app *model.Application) error {
 		JvmArgs: app.JvmArgs, EnvVars: app.EnvVars,
 		SystemdUser: app.SystemdUser, JavaPath: app.JavaPath,
 		StartupOrder: 100, Optional: false, Enabled: true,
-		NginxHostID: app.NginxHostID,
+		NginxHostID:       app.NginxHostID,
 		NginxUpstreamName: app.NginxUpstreamName,
-		ActiveGroup: app.ActiveGroup,
-		DeployMode: strings.TrimSpace(app.DeployMode), // Sprint X.10：从 app 继承
+		ActiveGroup:       app.ActiveGroup,
+		DeployMode:        strings.TrimSpace(app.DeployMode), // Sprint X.10：从 app 继承
 	}
 	if err := db.Create(row).Error; err != nil {
 		if isUniqueConstraintErr(err) {

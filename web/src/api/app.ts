@@ -24,3 +24,9 @@ export async function updateApp(id: number, input: AppInput) {
 export async function deleteApp(id: number) {
   await api.delete(`/apps/${id}`)
 }
+
+export async function listBranches(appId: number, credId?: number) {
+  const params = credId ? { cred_id: credId } : {}
+  const r = await api.get<{ branches: string[] }>(`/apps/${appId}/branches`, { params })
+  return r.data.branches
+}

@@ -27,7 +27,7 @@ type AppInput struct {
 	Port           int    `json:"port" binding:"required,min=1,max=65535"`
 	HealthCheckURL string `json:"health_check_url,omitempty"`
 	JvmArgs        string `json:"jvm_args,omitempty"`
-	EnvVars        string `json:"env_vars,omitempty"` // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
+	EnvVars        string `json:"env_vars,omitempty"`     // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
 	SystemdUser    string `json:"systemd_user,omitempty"` // 留空 = 用启动 sshd 的账号（一般 root）
 	// JavaPath 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
 	// 适用：同主机跑多 JDK 版本（jdk8 / jdk17）。
@@ -48,27 +48,27 @@ type AppInput struct {
 
 // AppView 应用响应
 type AppView struct {
-	ID             uint   `json:"id"`
-	AppCode        string `json:"app_code"`
-	Name           string `json:"name"`
-	AppType        string `json:"app_type"`
-	GitURL         string `json:"git_url"`
-	GitCredID      string `json:"git_cred_id"`
-	DeployPath     string `json:"deploy_path"`
-	Port           int    `json:"port"`
-	HealthCheckURL string `json:"health_check_url"`
-	JvmArgs        string `json:"jvm_args"`
-	EnvVars        string `json:"env_vars"`
-	SystemdUser    string `json:"systemd_user"`
-	JavaPath       string `json:"java_path"`
+	ID                uint   `json:"id"`
+	AppCode           string `json:"app_code"`
+	Name              string `json:"name"`
+	AppType           string `json:"app_type"`
+	GitURL            string `json:"git_url"`
+	GitCredID         string `json:"git_cred_id"`
+	DeployPath        string `json:"deploy_path"`
+	Port              int    `json:"port"`
+	HealthCheckURL    string `json:"health_check_url"`
+	JvmArgs           string `json:"jvm_args"`
+	EnvVars           string `json:"env_vars"`
+	SystemdUser       string `json:"systemd_user"`
+	JavaPath          string `json:"java_path"`
 	BuildModule       string `json:"build_module"`
 	BuildJarPattern   string `json:"build_jar_pattern"`
 	NginxHostID       uint   `json:"nginx_host_id"`
 	NginxUpstreamName string `json:"nginx_upstream_name"`
 	ActiveGroup       string `json:"active_group"`
 	DeployMode        string `json:"deploy_mode"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 func toAppView(a *model.Application) AppView {

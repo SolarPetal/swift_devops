@@ -117,13 +117,21 @@ export default function AppDetail() {
 
       <Card>
         <Tabs
-          defaultActiveKey="hosts"
-          items={[
-            { key: 'hosts',     label: '主机绑定', children: <HostBindTab appId={appId} appPort={app.port} /> },
-            { key: 'services',  label: '微服务',   children: <ServicesTab appId={appId} app={app} /> },
-            { key: 'artifacts', label: '制品',     children: <ArtifactTab app={app} /> },
-            { key: 'pipelines', label: '部署历史', children: <PipelineTab app={app} /> },
-          ]}
+          defaultActiveKey={app.app_type === 'spring-cloud' ? 'services' : 'hosts'}
+          items={
+            app.app_type === 'spring-cloud'
+              ? [
+                  { key: 'services',  label: '微服务配置', children: <ServicesTab appId={appId} app={app} /> },
+                  { key: 'hosts',     label: '主机绑定', children: <HostBindTab appId={appId} appPort={app.port} /> },
+                  { key: 'artifacts', label: '制品 & 构建', children: <ArtifactTab app={app} /> },
+                  { key: 'pipelines', label: '部署历史', children: <PipelineTab app={app} /> },
+                ]
+              : [
+                  { key: 'hosts',     label: '主机绑定', children: <HostBindTab appId={appId} appPort={app.port} /> },
+                  { key: 'artifacts', label: '制品 & 构建', children: <ArtifactTab app={app} /> },
+                  { key: 'pipelines', label: '部署历史', children: <PipelineTab app={app} /> },
+                ]
+          }
         />
       </Card>
     </div>
@@ -1146,6 +1154,12 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
   const [creating, setCreating] = useState(false)
   const [form] = Form.useForm<AppServiceInput>()
 
+  // 构建 Modal 状态（复用 ArtifactTab 的逻辑）
+  const [bdOpen, setBdOpen] = useState(false)
+  const [bdForm] = Form.useForm()
+  const [creds, setCreds] = useState<GitCredential[]>([])
+  const [builderEnv, setBuilderEnv] = useState<BuilderEnv | null>(null)
+
   const refresh = async () => {
     setLoading(true)
     try {
@@ -1156,7 +1170,10 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
       setLoading(false)
     }
   }
-  useEffect(() => { refresh() }, [appId])
+  useEffect(() => {
+    refresh()
+    getBuilderEnv().then(setBuilderEnv).catch(() => {})
+  }, [appId])
 
   const openCreate = () => {
     setCreating(true); setEditing(null)
@@ -1223,18 +1240,74 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
     })
   }
 
+  // 构建：拉远端代码 + mvn package（复用 ArtifactTab 逻辑）
+  const openBuild = async () => {
+    try { setCreds(await listGitCreds()) } catch (e) { message.error(formatError(e)) }
+    bdForm.resetFields()
+    bdForm.setFieldsValue({
+      git_ref: 'main',
+      mvn_args: 'clean package -DskipTests',
+      cred_id: 0,
+      build_module: app.build_module || '',
+      build_jar_pattern: app.build_jar_pattern || '',
+    })
+    setBdOpen(true)
+  }
+  const handleBuild = async () => {
+    try {
+      const v = await bdForm.validateFields()
+      const payload: any = {
+        git_ref: v.git_ref || 'main',
+        mvn_args: v.mvn_args || '',
+      }
+      if (v.cred_id && v.cred_id > 0) payload.cred_id = v.cred_id
+      if (v.build_module && v.build_module.trim() !== '') payload.build_module = v.build_module.trim()
+      if (v.build_jar_pattern && v.build_jar_pattern.trim() !== '') payload.build_jar_pattern = v.build_jar_pattern.trim()
+      const r = await triggerBuild(appId, payload)
+      message.success(`已触发构建：#${r.id}，请到「制品 & 构建」Tab 查看日志`)
+      setBdOpen(false)
+    } catch (e) {
+      if ((e as any)?.errorFields) return
+      message.error(formatError(e))
+    }
+  }
+
   return (
-    <Card
-      title="微服务列表"
-      size="small"
-      extra={<Button type="primary" onClick={openCreate}>+ 新建 Service</Button>}
-    >
-      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-        多 service 应用在这里增删。单体 App 已自动建 <code>default</code> 行；
-        Spring Cloud 项目可加 <code>eureka</code> / <code>gateway</code> / <code>user-service</code> 等。
-        部署按 <strong>startup_order</strong> 分波，同波内并发。
-      </Typography.Paragraph>
-      <Table
+    <>
+      {/* 顶部提示 + 快捷操作 */}
+      {items.length === 0 && (
+        <Typography.Paragraph type="warning" style={{ marginBottom: 16, padding: 12, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 4 }}>
+          ℹ️ <strong>请先配置微服务列表，再触发构建。</strong><br />
+          点击下方「+ 新建 Service」添加各个微服务模块（如 user-service、order-service、gateway），
+          每个模块配置 <code>build_module</code> 和 <code>build_jar_pattern</code>。
+        </Typography.Paragraph>
+      )}
+      {items.length > 0 && (
+        <Space style={{ marginBottom: 16 }}>
+          <Button
+            type="primary"
+            icon={<span>⚙</span>}
+            onClick={openBuild}
+            disabled={!app.git_url || !builderEnv?.valid}
+          >
+            从仓库构建
+          </Button>
+          {!app.git_url && <Typography.Text type="secondary">（未配置 Git URL）</Typography.Text>}
+          {app.git_url && !builderEnv?.valid && <Typography.Text type="secondary">（构建环境未就绪）</Typography.Text>}
+        </Space>
+      )}
+
+      <Card
+        title="微服务列表"
+        size="small"
+        extra={<Button type="primary" onClick={openCreate}>+ 新建 Service</Button>}
+      >
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+          多 service 应用在这里增删。单体 App 已自动建 <code>default</code> 行；
+          Spring Cloud 项目可加 <code>eureka</code> / <code>gateway</code> / <code>user-service</code> 等。
+          部署按 <strong>startup_order</strong> 分波，同波内并发。
+        </Typography.Paragraph>
+        <Table
         rowKey="id"
         size="small"
         loading={loading}
@@ -1346,6 +1419,47 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
           </Space>
         </Form>
       </Modal>
+
+      {/* 构建 Modal（复用 ArtifactTab 的逻辑） */}
+      <Modal
+        title={`从仓库构建 - ${app.name}`}
+        open={bdOpen}
+        onCancel={() => setBdOpen(false)}
+        onOk={handleBuild}
+        okText="触发构建"
+        width={600}
+      >
+        <Form form={bdForm} layout="vertical">
+          <Form.Item name="git_ref" label="Git 分支/Tag/Commit" rules={[{ required: true }]}>
+            <Input placeholder="main" />
+          </Form.Item>
+          <Form.Item name="cred_id" label="Git 凭证">
+            <Select
+              placeholder="选凭证"
+              options={[
+                { value: 0, label: '— 无凭证（公网 / 本机 SSH 默认）—' },
+                ...creds.map((c) => ({
+                  value: c.id,
+                  label: `${c.name} (${c.type === 'token' ? 'HTTPS Token' : 'SSH Key'})`,
+                })),
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="mvn_args" label="Maven 参数">
+            <Input placeholder="clean package -DskipTests" />
+          </Form.Item>
+          <Form.Item name="build_module" label="构建模块（可选）">
+            <Input placeholder="留空构建整个项目" />
+          </Form.Item>
+          <Form.Item name="build_jar_pattern" label="主 jar 路径模板（可选）">
+            <Input placeholder="如：module/target/*.jar" />
+          </Form.Item>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            💡 构建日志请到「制品 & 构建」Tab 查看。
+          </Typography.Text>
+        </Form>
+      </Modal>
     </Card>
+    </>
   )
 }

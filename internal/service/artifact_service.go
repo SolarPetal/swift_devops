@@ -408,15 +408,15 @@ type BundleItemInput struct {
 
 // ArtifactBundleView 整组制品视图。
 type ArtifactBundleView struct {
-	ID           uint                `json:"id"`
-	AppID        uint                `json:"app_id"`
-	VersionTag   string              `json:"version_tag"`
-	GitCommitSHA string              `json:"git_commit_sha"`
-	BuildStatus  string              `json:"build_status"`
-	BuildLogPath string              `json:"build_log_path"`
-	TriggeredBy  string              `json:"triggered_by"`
-	CreatedAt    string              `json:"created_at"`
-	Items        []ArtifactItemView  `json:"items"`
+	ID           uint               `json:"id"`
+	AppID        uint               `json:"app_id"`
+	VersionTag   string             `json:"version_tag"`
+	GitCommitSHA string             `json:"git_commit_sha"`
+	BuildStatus  string             `json:"build_status"`
+	BuildLogPath string             `json:"build_log_path"`
+	TriggeredBy  string             `json:"triggered_by"`
+	CreatedAt    string             `json:"created_at"`
+	Items        []ArtifactItemView `json:"items"`
 }
 
 // ArtifactItemView 单 service 产物明细。

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Modal, Form, Input, InputNumber, Radio, Select, Tabs, Typography, message } from 'antd'
+import { Modal, Form, Input, InputNumber, Radio, Select, Tabs, Typography, message, Button } from 'antd'
 
 import type { App, AppInput, Host, GitCredential } from '../types'
-import { createApp, updateApp } from '../api/app'
+import { createApp, updateApp, listBranches } from '../api/app'
 import { listHosts } from '../api/host'
 import { listGitCreds } from '../api/gitcred'
 import { formatError } from '../api/client'
@@ -18,6 +18,8 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
   const [form] = Form.useForm<AppInput>()
   const [hosts, setHosts] = useState<Host[]>([])
   const [creds, setCreds] = useState<GitCredential[]>([])
+  const [branches, setBranches] = useState<string[]>([])
+  const [loadingBranches, setLoadingBranches] = useState(false)
   const [activeTab, setActiveTab] = useState('basic')
   const isEdit = !!editing
 
@@ -32,6 +34,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         app_code: editing.app_code,
         name: editing.name,
         app_type: editing.app_type || 'jar',
+        build_mode: editing.build_mode || 'local-jar',
         git_url: editing.git_url,
         git_cred_id: editing.git_cred_id,
         build_module: editing.build_module,
@@ -47,10 +50,17 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         nginx_host_id: editing.nginx_host_id || 0,
         nginx_upstream_name: editing.nginx_upstream_name,
         active_group: editing.active_group,
+        docker_registry: editing.docker_registry || '',
+        docker_image_name: editing.docker_image_name || '',
+        docker_image_tag: editing.docker_image_tag || 'latest',
+        dockerfile: editing.dockerfile || '',
+        docker_build_args: editing.docker_build_args || '',
+        docker_run_args: editing.docker_run_args || '',
       })
     } else {
       form.setFieldsValue({
         app_type: 'jar',
+        build_mode: 'local-jar',
         port: 8080,
         health_check_url: '/actuator/health',
         jvm_args: '-Xms512m -Xmx512m',
@@ -63,9 +73,45 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         nginx_host_id: 0,
         nginx_upstream_name: '',
         active_group: '',
+        docker_registry: '',
+        docker_image_name: '',
+        docker_image_tag: 'latest',
+        dockerfile: '',
+        docker_build_args: '',
+        docker_run_args: '',
       })
     }
   }, [open, editing, form])
+
+  const fetchBranches = async () => {
+    if (!editing?.id) {
+      message.warning('请先保存应用后再获取分支')
+      return
+    }
+    const gitUrl = form.getFieldValue('git_url')
+    if (!gitUrl || gitUrl.trim() === '') {
+      message.warning('请先填写 Git 仓库地址')
+      return
+    }
+
+    setLoadingBranches(true)
+    try {
+      const credId = form.getFieldValue('git_cred_id')
+      const credIdNum = credId ? parseInt(credId, 10) : undefined
+      const branchList = await listBranches(editing.id, credIdNum)
+      setBranches(branchList)
+      if (branchList.length === 0) {
+        message.info('未找到分支')
+      } else {
+        message.success(`获取到 ${branchList.length} 个分支`)
+      }
+    } catch (e: any) {
+      message.error(formatError(e))
+      setBranches([])
+    } finally {
+      setLoadingBranches(false)
+    }
+  }
 
   const submit = async () => {
     try {
@@ -91,12 +137,14 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
       if (e?.errorFields && e.errorFields.length > 0) {
         const errField = e.errorFields[0].name?.[0]
         const tabOf: Record<string, string> = {
-          app_code: 'basic', name: 'basic', app_type: 'basic',
+          app_code: 'basic', name: 'basic', app_type: 'basic', build_mode: 'basic', deploy_mode: 'basic',
           deploy_path: 'basic', port: 'basic', health_check_url: 'basic',
           git_url: 'build', git_cred_id: 'build',
           build_module: 'build', build_jar_pattern: 'build',
+          docker_registry: 'build', docker_image_name: 'build', docker_image_tag: 'build',
+          dockerfile: 'build', docker_build_args: 'build',
           jvm_args: 'runtime', env_vars: 'runtime',
-          systemd_user: 'runtime', java_path: 'runtime', deploy_mode: 'runtime',
+          systemd_user: 'runtime', java_path: 'runtime', docker_run_args: 'runtime',
           nginx_host_id: 'bluegreen', nginx_upstream_name: 'bluegreen', active_group: 'bluegreen',
         }
         if (errField && tabOf[errField]) setActiveTab(tabOf[errField])
@@ -147,12 +195,49 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                   <Form.Item name="name" label="应用名称" rules={[{ required: true }]}>
                     <Input placeholder="如：用户服务" />
                   </Form.Item>
-                  <Form.Item name="app_type" label="应用类型" rules={[{ required: true }]}>
+                  <Form.Item
+                    name="app_type"
+                    label="应用类型"
+                    rules={[{ required: true }]}
+                    tooltip="单体应用：一个 Git 仓库编译出一个 jar；微服务应用：一个 Git 仓库编译出多个 jar（如 Spring Cloud 多模块项目）"
+                  >
                     <Radio.Group>
-                      <Radio.Button value="jar">单体 Jar</Radio.Button>
-                      <Radio.Button value="spring-cloud">Spring Cloud</Radio.Button>
+                      <Radio.Button value="jar">单体应用（一个 jar）</Radio.Button>
+                      <Radio.Button value="spring-cloud">微服务应用（多个 jar）</Radio.Button>
                     </Radio.Group>
                   </Form.Item>
+                  {form.getFieldValue('app_type') === 'spring-cloud' && (
+                    <Typography.Text type="warning" style={{ fontSize: 12, display: 'block', marginTop: -16, marginBottom: 16 }}>
+                      💡 创建后请先在「微服务配置」Tab 添加各个微服务模块，再触发构建。
+                    </Typography.Text>
+                  )}
+
+                  <Form.Item
+                    name="build_mode"
+                    label="构建方式"
+                    rules={[{ required: true }]}
+                    tooltip="本地 jar：Maven 打包 jar；本地 Docker：在 swift-devops 机器上 docker build 并推送到镜像仓库；远端 Docker：在远端构建机上 docker build 并推送到镜像仓库"
+                  >
+                    <Radio.Group>
+                      <Radio.Button value="local-jar">本地 jar 构建</Radio.Button>
+                      <Radio.Button value="local-docker">本地 Docker 镜像构建</Radio.Button>
+                      <Radio.Button value="remote-docker">远端 Docker 镜像构建</Radio.Button>
+                    </Radio.Group>
+                  </Form.Item>
+
+                  <Form.Item
+                    name="deploy_mode"
+                    label="部署方式"
+                    rules={[{ required: true }]}
+                    tooltip="systemd：在目标主机上用 systemd service 管理（需 root/sudo）；nohup：在目标主机上用 nohup java -jar 启动（免 root，crash 不自愈）；Docker：在目标主机上用 docker run 启动容器"
+                  >
+                    <Radio.Group>
+                      <Radio.Button value="systemd">systemd（目标主机）</Radio.Button>
+                      <Radio.Button value="nohup">nohup（目标主机）</Radio.Button>
+                      <Radio.Button value="docker">Docker（目标主机）</Radio.Button>
+                    </Radio.Group>
+                  </Form.Item>
+
                   <Form.Item name="deploy_path" label="部署绝对路径" rules={[{ required: true }]}>
                     <Input placeholder="如：/opt/apps/user-service" />
                   </Form.Item>
@@ -195,6 +280,34 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                       ]}
                     />
                   </Form.Item>
+
+                  {/* 分支选择器（Sprint X.11） */}
+                  {isEdit && (
+                    <Form.Item label="默认分支">
+                      <Input.Group compact style={{ display: 'flex', gap: 8 }}>
+                        <Select
+                          placeholder="选择分支或手动输入"
+                          showSearch
+                          allowClear
+                          style={{ flex: 1 }}
+                          options={branches.map(b => ({ value: b, label: b }))}
+                          notFoundContent={branches.length === 0 ? '点击右侧按钮获取分支' : '未找到'}
+                          disabled={loadingBranches}
+                        />
+                        <Button
+                          type="primary"
+                          onClick={fetchBranches}
+                          loading={loadingBranches}
+                        >
+                          获取分支
+                        </Button>
+                      </Input.Group>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        💡 获取远程仓库的分支列表，方便选择。触发构建时可以临时指定其他分支。
+                      </Typography.Text>
+                    </Form.Item>
+                  )}
+
                   <Form.Item
                     name="build_module"
                     label="构建模块（multi-module 项目用，可选）"
@@ -209,6 +322,52 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                   >
                     <Input placeholder="如：car-dealer-admin/target/*.jar" />
                   </Form.Item>
+
+                  {/* Docker 构建配置 */}
+                  {(form.getFieldValue('build_mode') === 'local-docker' || form.getFieldValue('build_mode') === 'remote-docker') && (
+                    <>
+                      <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>Docker 镜像配置</Typography.Title>
+                      <Form.Item
+                        name="docker_registry"
+                        label="镜像仓库地址"
+                        tooltip="镜像推送的目标仓库，如 docker.io / harbor.example.com。构建完成后推送到此仓库，目标主机从此仓库拉取镜像。留空则镜像只在本地，无法推送到远端主机"
+                      >
+                        <Input placeholder="如：docker.io 或 harbor.example.com" />
+                      </Form.Item>
+                      <Form.Item
+                        name="docker_image_name"
+                        label="镜像名"
+                        tooltip="镜像的名称，如 myapp/user-service。留空则自动生成为 <app_code>/<service_code>"
+                      >
+                        <Input placeholder="如：myapp/user-service（留空自动生成）" />
+                      </Form.Item>
+                      <Form.Item
+                        name="docker_image_tag"
+                        label="镜像标签"
+                        tooltip="镜像的版本标签，如 latest / v1.0.0 / git-{sha}-{build_id}。支持变量替换"
+                      >
+                        <Input placeholder="latest" />
+                      </Form.Item>
+                      <Form.Item
+                        name="dockerfile"
+                        label="自定义 Dockerfile（可选）"
+                        tooltip="留空则自动生成基于 eclipse-temurin:17-jre-alpine 的 Dockerfile。如需自定义（如多阶段构建、特殊依赖），可在此填写完整 Dockerfile 内容"
+                      >
+                        <Input.TextArea rows={6} placeholder="留空自动生成" />
+                      </Form.Item>
+                      <Form.Item
+                        name="docker_build_args"
+                        label="docker build 参数（可选）"
+                        tooltip="传递给 docker build 的额外参数，如 --build-arg ENV=prod --no-cache"
+                      >
+                        <Input placeholder="如：--build-arg ENV=prod" />
+                      </Form.Item>
+                      <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 16 }}>
+                        💡 <strong>镜像流转路径</strong>：swift-devops 机器构建镜像 → 推送到镜像仓库 → 目标主机从仓库拉取 → 启动容器
+                      </Typography.Text>
+                    </>
+                  )}
+
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     💡 没有凭证？去左侧菜单「🔑 Git 凭证」先创建一个，再回来选。<br />
                     💡 multi-module 项目命中多个 jar 时，填上「构建模块」或「主 jar 路径模板」其中一个即可。
@@ -223,19 +382,10 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
               children: (
                 <>
                   <Form.Item
-                    name="deploy_mode"
-                    label="部署模式"
-                    tooltip="systemd：写 /etc/systemd/system/devops-<app>.service + systemctl 管控（需 root 或 sudo NOPASSWD，crash 自动重启）；nohup：写 <deploy_path>/start.sh + nohup java -jar + app.pid（免 root，crash 不会自愈，需手动拉起）"
+                    name="jvm_args"
+                    label="JVM 启动参数"
+                    hidden={form.getFieldValue('deploy_mode') === 'docker'}
                   >
-                    <Select
-                      placeholder="选择部署模式（默认 systemd）"
-                      options={[
-                        { value: 'systemd', label: 'systemd 服务（推荐，crash 自愈，需 root/sudo）' },
-                        { value: 'nohup', label: 'nohup java -jar（免 root，crash 不自愈）' },
-                      ]}
-                    />
-                  </Form.Item>
-                  <Form.Item name="jvm_args" label="JVM 启动参数">
                     <Input placeholder="-Xms512m -Xmx512m -XX:+UseG1GC" />
                   </Form.Item>
                   <Form.Item
@@ -248,6 +398,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                         message: '小写字母/下划线开头，1-32 位，仅含小写字母/数字/下划线/连字符',
                       },
                     ]}
+                    hidden={form.getFieldValue('deploy_mode') === 'docker'}
                   >
                     <Input placeholder="留空 = 用 SSH 账号；如：deployer / java" />
                   </Form.Item>
@@ -261,9 +412,28 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                         message: '必须以 / 开头（绝对路径），或留空走主机默认',
                       },
                     ]}
+                    hidden={form.getFieldValue('deploy_mode') === 'docker'}
                   >
                     <Input placeholder="留空沿用主机配置；或填 /opt/java-17/bin/java" />
                   </Form.Item>
+
+                  {/* Docker 部署配置 */}
+                  {form.getFieldValue('deploy_mode') === 'docker' && (
+                    <>
+                      <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>Docker 部署配置</Typography.Title>
+                      <Form.Item
+                        name="docker_run_args"
+                        label="docker run 参数"
+                        tooltip="如 -p 8080:8080 -e ENV=prod --restart=unless-stopped，留空则自动生成"
+                      >
+                        <Input.TextArea rows={3} placeholder="留空自动生成，如：-d --restart=unless-stopped -p 8080:8080" />
+                      </Form.Item>
+                      <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 16 }}>
+                        💡 Docker 模式下，环境变量会自动转换为 -e 参数传给容器
+                      </Typography.Text>
+                    </>
+                  )}
+
                   <Form.Item
                     name="env_vars"
                     label="环境变量 (JSON)"

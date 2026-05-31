@@ -45,9 +45,9 @@ func toBuilderEnvView(e *model.BuilderEnv) BuilderEnvView {
 	v := BuilderEnvView{
 		JavaHome: e.JavaHome, MavenHome: e.MavenHome, GitPath: e.GitPath,
 		MavenLocalRepo: e.MavenLocalRepo, DockerImage: e.DockerImage,
-		JavaVersion:    e.JavaVersion, MavenVersion: e.MavenVersion, GitVersion: e.GitVersion,
-		DockerVersion:  e.DockerVersion,
-		Valid: e.Valid, DetectMessage: e.DetectMessage,
+		JavaVersion: e.JavaVersion, MavenVersion: e.MavenVersion, GitVersion: e.GitVersion,
+		DockerVersion: e.DockerVersion,
+		Valid:         e.Valid, DetectMessage: e.DetectMessage,
 	}
 	if e.DetectedAt != nil {
 		v.DetectedAt = e.DetectedAt.Format(time.RFC3339)

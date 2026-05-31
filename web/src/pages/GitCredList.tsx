@@ -165,7 +165,7 @@ export default function GitCredList() {
                   >
                     {t === 'token'
                       ? <Input.Password placeholder="ghp_xxxxxx" />
-                      : <Input.TextArea rows={6} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..." />}
+                      : <Input.TextArea rows={6} placeholder="粘贴 SSH 私钥内容（PEM/OpenSSH 格式）" />}
                   </Form.Item>
                 </>
               )

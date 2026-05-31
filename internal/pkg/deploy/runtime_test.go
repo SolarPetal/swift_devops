@@ -99,9 +99,9 @@ func TestEnvVarsSortedOrder(t *testing.T) {
 		DeployPath: "/opt/demo",
 		Port:       8080,
 		EnvVars: map[string]string{
-			"ZULU":   "1",
-			"ALPHA":  "2",
-			"BRAVO":  "3",
+			"ZULU":    "1",
+			"ALPHA":   "2",
+			"BRAVO":   "3",
 			"CHARLIE": "4",
 		},
 	}
@@ -127,6 +127,8 @@ func TestNormalizeDeployMode(t *testing.T) {
 		{" systemd ", DeployModeSystemd},
 		{"nohup", DeployModeNohup},
 		{"NoHup", DeployModeNohup},
+		{"docker", DeployModeDocker},
+		{"Docker", DeployModeDocker},
 		{"unknown", DeployModeSystemd}, // 未知值兜底走 systemd
 	}
 	for _, c := range cases {
@@ -137,13 +139,13 @@ func TestNormalizeDeployMode(t *testing.T) {
 }
 
 func TestValidateDeployMode(t *testing.T) {
-	good := []string{"", "systemd", "nohup", "SYSTEMD", " nohup "}
+	good := []string{"", "systemd", "nohup", "docker", "SYSTEMD", " nohup ", " Docker "}
 	for _, g := range good {
 		if err := ValidateDeployMode(g); err != nil {
 			t.Errorf("ValidateDeployMode(%q) unexpected error: %v", g, err)
 		}
 	}
-	bad := []string{"docker", "k8s", "supervisor"}
+	bad := []string{"k8s", "supervisor"}
 	for _, b := range bad {
 		if err := ValidateDeployMode(b); err == nil {
 			t.Errorf("ValidateDeployMode(%q) should have failed", b)

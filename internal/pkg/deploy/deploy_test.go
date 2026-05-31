@@ -114,9 +114,9 @@ func TestUnitName_AndPaths(t *testing.T) {
 
 func TestBuildHealthURL(t *testing.T) {
 	cases := []struct {
-		ip, p   string
-		port    int
-		want    string
+		ip, p string
+		port  int
+		want  string
 	}{
 		{"10.0.0.1", "/actuator/health", 8080, "http://10.0.0.1:8080/actuator/health"},
 		{"127.0.0.1", "actuator/health", 9000, "http://127.0.0.1:9000/actuator/health"},

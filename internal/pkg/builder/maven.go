@@ -96,10 +96,10 @@ func MvnPackage(ctx context.Context, opts MavenOptions) (MavenResult, error) {
 
 // findArtifactJar 在 WorkDir/**/target/ 下找出"用户可部署"的 jar。
 // 三级策略（Sprint 5.4.7）：
-//   1. jarPattern 非空 → filepath.Glob(WorkDir + pattern)，唯一命中即用；多/0 报错
-//   2. 扫所有 target/*.jar（排除 sources/javadoc/tests/original-），唯一 → 用
-//   3. 多 jar → 探 Spring Boot fat jar（MANIFEST.MF 含 Spring-Boot-Lib），唯一 → 用
-//   4. 仍多 / 0 → 报错列候选 + 引导填 build_jar_pattern
+//  1. jarPattern 非空 → filepath.Glob(WorkDir + pattern)，唯一命中即用；多/0 报错
+//  2. 扫所有 target/*.jar（排除 sources/javadoc/tests/original-），唯一 → 用
+//  3. 多 jar → 探 Spring Boot fat jar（MANIFEST.MF 含 Spring-Boot-Lib），唯一 → 用
+//  4. 仍多 / 0 → 报错列候选 + 引导填 build_jar_pattern
 func findArtifactJar(workDir, jarPattern string) (string, error) {
 	// 策略 1：显式 glob
 	if p := strings.TrimSpace(jarPattern); p != "" {

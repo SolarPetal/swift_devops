@@ -127,6 +127,7 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/builds", buildH.List)
 		v1.GET("/builds/:id", buildH.Get)
 		v1.GET("/builds/:id/log", buildH.GetLog)
+		v1.GET("/apps/:id/branches", buildH.ListBranches) // Sprint X.11：获取远程分支列表
 
 		// 构建环境配置（Sprint 5.4）：单例配置 + 检测
 		beH := handler.NewBuilderEnvHandler(builderEnvSvc)

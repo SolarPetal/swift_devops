@@ -94,3 +94,30 @@ func (h *BuildHandler) GetLog(c *gin.Context) {
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.String(http.StatusOK, log)
 }
+
+// ListBranches GET /apps/:id/branches?cred_id=N
+// 获取远程仓库的分支列表（Sprint X.11）
+func (h *BuildHandler) ListBranches(c *gin.Context) {
+	appID, ok := parseID(c)
+	if !ok {
+		return
+	}
+
+	var credID uint
+	if s := c.Query("cred_id"); s != "" {
+		n, err := strconv.ParseUint(s, 10, 32)
+		if err != nil {
+			apperr.Respond(c, apperr.New("BAD_REQUEST", "cred_id 必须是整数", http.StatusBadRequest))
+			return
+		}
+		credID = uint(n)
+	}
+
+	branches, err := h.svc.ListRemoteBranches(c.Request.Context(), appID, credID)
+	if err != nil {
+		apperr.Respond(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"branches": branches})
+}

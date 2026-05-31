@@ -29,10 +29,10 @@ func (h *PipelineHandler) Deploy(c *gin.Context) {
 		return
 	}
 	var body struct {
-		ArtifactID uint   `json:"artifact_id,omitempty"`  // 旧链路；bundle_id==0 时必填
-		BundleID   uint   `json:"bundle_id,omitempty"`    // Sprint X.6 新链路
-		Strategy   string `json:"strategy,omitempty"`     // 默认 single
-		BatchSize  int    `json:"batch_size,omitempty"`   // rolling 必填，>=1
+		ArtifactID uint   `json:"artifact_id,omitempty"` // 旧链路；bundle_id==0 时必填
+		BundleID   uint   `json:"bundle_id,omitempty"`   // Sprint X.6 新链路
+		Strategy   string `json:"strategy,omitempty"`    // 默认 single
+		BatchSize  int    `json:"batch_size,omitempty"`  // rolling 必填，>=1
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		apperr.Respond(c, apperr.Wrap(err, "BAD_REQUEST", err.Error(), http.StatusBadRequest))

@@ -14,9 +14,9 @@ type fakeKey struct {
 	typ string
 }
 
-func (f fakeKey) Type() string                                    { return f.typ }
-func (f fakeKey) Marshal() []byte                                  { return f.raw }
-func (f fakeKey) Verify(_ []byte, _ *cssh.Signature) error         { return nil }
+func (f fakeKey) Type() string                             { return f.typ }
+func (f fakeKey) Marshal() []byte                          { return f.raw }
+func (f fakeKey) Verify(_ []byte, _ *cssh.Signature) error { return nil }
 
 func TestTOFU_FirstUseLearns(t *testing.T) {
 	var learned string

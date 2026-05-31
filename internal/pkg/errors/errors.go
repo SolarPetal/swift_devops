@@ -1,8 +1,9 @@
 // Package errors 提供统一的应用错误类型与 Gin 响应壳。
 //
 // 用法：
-//   return errors.Wrap(err, "INVALID_INPUT", "邮箱格式错误", 400)
-//   errors.Respond(c, err)  // 在 handler 里把任意 error 转成 JSON
+//
+//	return errors.Wrap(err, "INVALID_INPUT", "邮箱格式错误", 400)
+//	errors.Respond(c, err)  // 在 handler 里把任意 error 转成 JSON
 package errors
 
 import (

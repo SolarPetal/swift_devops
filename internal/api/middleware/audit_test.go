@@ -23,6 +23,13 @@ func setupAuditDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("raw db: %v", err)
+	}
+	// SQLite :memory: is per connection. Audit writes asynchronously, so keep
+	// tests on one connection to avoid a goroutine seeing an empty in-memory DB.
+	sqlDB.SetMaxOpenConns(1)
 	if err := db.AutoMigrate(&model.AuditLog{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

@@ -21,7 +21,7 @@ type ServiceBuildSpec struct {
 
 // Plan 一次构建的完整输入。service 层组装。
 type Plan struct {
-	AppCode       string      // 用于命名 workspace 子目录
+	AppCode       string // 用于命名 workspace 子目录
 	GitURL        string
 	GitRef        string      // 分支 / tag / commit
 	Cred          *Credential // nil = 公网匿名
@@ -35,7 +35,7 @@ type Plan struct {
 	ExecEnv       []string    // KEY=VALUE 列表，注入到 git/mvn 子进程；nil = 继承 os.Environ()。Sprint 5.4
 	CloneTimeout  time.Duration
 	BuildTimeout  time.Duration
-	BuildID       uint        // 用于命名子目录（同 app_code 多并发时去重）
+	BuildID       uint // 用于命名子目录（同 app_code 多并发时去重）
 
 	// Sprint X.2：多 service 模式。非空时按每个 spec 提取一个 jar 进 Result.JarPaths；
 	// 同时所有 service 的 BuildModule 合并成 mvn -pl <m1,m2,...> -am（缩窄编译范围）。
@@ -46,6 +46,21 @@ type Plan struct {
 	// （clone 仍在宿主机，不需要 MvnBin；容器自带 java/mvn）。
 	DockerImage string
 	DockerBin   string // docker 可执行；空 = "docker"
+
+	// Sprint X.11：Docker 镜像构建模式
+	BuildMode       string      // "local-jar" / "local-docker" / "remote-docker"
+	DockerRegistry  string      // 镜像仓库地址，如 docker.io / harbor.example.com
+	DockerImageName string      // 镜像名，如 myapp/user-service
+	DockerImageTag  string      // 镜像标签，如 git-abc123-45 / latest
+	Dockerfile      string      // 自定义 Dockerfile（可选，空则自动生成）
+	DockerBuildArgs string      // docker build 参数
+	DockerPushAuth  *DockerAuth // 镜像仓库认证（可选）
+}
+
+// DockerAuth Docker 镜像仓库认证信息（Sprint X.11）
+type DockerAuth struct {
+	Username string
+	Password string
 }
 
 // Result 一次构建的产物。
@@ -54,6 +69,9 @@ type Result struct {
 	JarPaths    map[string]string // Sprint X.2：多 service 模式，map[service_code]→jar 绝对路径
 	CommitSHA   string
 	BuildSubDir string // 本次构建的工作目录；调用方决定保留还是清理
+
+	// Sprint X.11：Docker 镜像构建产物
+	DockerImages map[string]string // map[service_code]→完整镜像名（registry/name:tag）
 }
 
 // Build 一次完整的构建：clone + mvn package + 找 jar。
@@ -135,6 +153,22 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 				}
 			}
 		}
+
+		// Sprint X.11：如果是 Docker 镜像构建模式，继续构建镜像
+		if plan.BuildMode == "local-docker" || plan.BuildMode == "remote-docker" {
+			res.DockerImages = map[string]string{}
+			for serviceCode, jarPath := range res.JarPaths {
+				imageName, err := BuildDockerImage(ctx, plan, jarPath, serviceCode)
+				if err != nil {
+					return res, fmt.Errorf("docker build for service %s: %w", serviceCode, err)
+				}
+				res.DockerImages[serviceCode] = imageName
+				if plan.LogWriter != nil {
+					fmt.Fprintf(plan.LogWriter, "[docker] service=%s -> %s\n", serviceCode, imageName)
+				}
+			}
+		}
+
 		return res, nil
 	}
 
@@ -151,6 +185,19 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 	}
 	res.JarPath = jar
 	res.JarPaths = map[string]string{"default": jar}
+
+	// Sprint X.11：如果是 Docker 镜像构建模式，继续构建镜像
+	if plan.BuildMode == "local-docker" || plan.BuildMode == "remote-docker" {
+		imageName, err := BuildDockerImage(ctx, plan, jar, "default")
+		if err != nil {
+			return res, fmt.Errorf("docker build: %w", err)
+		}
+		res.DockerImages = map[string]string{"default": imageName}
+		if plan.LogWriter != nil {
+			fmt.Fprintf(plan.LogWriter, "[docker] image -> %s\n", imageName)
+		}
+	}
+
 	return res, nil
 }
 

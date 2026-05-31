@@ -190,7 +190,7 @@ func TestPipeline_Publisher_EmitsStatusAndStep(t *testing.T) {
 	// 绑一台肯定连不上的 host，让 pipeline 走完整路径但 dial 失败
 	hv, err := hostSvc.Create(service.HostInput{
 		Name: "ghost", IP: "127.0.0.1",
-		Port: 1, // 端口 1 一般无人 listen
+		Port:     1, // 端口 1 一般无人 listen
 		AuthType: "password", Username: "x", Password: "x",
 	})
 	if err != nil {

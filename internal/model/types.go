@@ -4,20 +4,20 @@ import "time"
 
 // Host 目标主机
 type Host struct {
-	ID        uint   `gorm:"primaryKey" json:"id"`
-	Name      string `gorm:"size:100;not null" json:"name"`
-	IP        string `gorm:"size:50;not null;index" json:"ip"`
-	Port      int    `gorm:"default:22" json:"port"`
-	AuthType  string `gorm:"size:20" json:"auth_type"` // password / key
-	Username  string `gorm:"size:50" json:"username"`
-	Secret    string `gorm:"type:text" json:"-"`       // 加密后的密码或私钥
-	HostKey   string `gorm:"type:text" json:"-"`       // SSH host key (TOFU)
-	Status    string `gorm:"size:20;default:'unknown'" json:"status"`
-	Tags      string `gorm:"type:text" json:"tags"`    // JSON 数组
-	GroupTag  string `gorm:"size:20" json:"group_tag"` // blue / green
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	Name     string `gorm:"size:100;not null" json:"name"`
+	IP       string `gorm:"size:50;not null;index" json:"ip"`
+	Port     int    `gorm:"default:22" json:"port"`
+	AuthType string `gorm:"size:20" json:"auth_type"` // password / key
+	Username string `gorm:"size:50" json:"username"`
+	Secret   string `gorm:"type:text" json:"-"` // 加密后的密码或私钥
+	HostKey  string `gorm:"type:text" json:"-"` // SSH host key (TOFU)
+	Status   string `gorm:"size:20;default:'unknown'" json:"status"`
+	Tags     string `gorm:"type:text" json:"tags"`    // JSON 数组
+	GroupTag string `gorm:"size:20" json:"group_tag"` // blue / green
 	// JavaPath: 该主机上 java 可执行文件的绝对路径。空 = /usr/bin/java（默认）。
 	// Sprint 3.7 蓝绿/部署前 env_check 用，避免远端 java 不在 PATH 或路径不同导致 203/EXEC。
-	JavaPath  string `gorm:"size:255" json:"java_path"`
+	JavaPath  string    `gorm:"size:255" json:"java_path"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -31,31 +31,48 @@ type Host struct {
 //
 // 新增 GitRef 字段：默认分支放顶层，多 service 共享一次构建。
 type Application struct {
-	ID             uint   `gorm:"primaryKey" json:"id"`
-	AppCode        string `gorm:"size:50;uniqueIndex;not null" json:"app_code"`
-	Name           string `gorm:"size:100;not null" json:"name"`
-	AppType        string `gorm:"size:30" json:"app_type"` // jar / spring-cloud
-	GitURL         string `gorm:"size:255" json:"git_url"`
-	GitCredID      string `gorm:"size:100" json:"git_cred_id"`
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	AppCode   string `gorm:"size:50;uniqueIndex;not null" json:"app_code"`
+	Name      string `gorm:"size:100;not null" json:"name"`
+	AppType   string `gorm:"size:30" json:"app_type"` // jar / spring-cloud
+	GitURL    string `gorm:"size:255" json:"git_url"`
+	GitCredID string `gorm:"size:100" json:"git_cred_id"`
 	// GitRef Sprint X.1：默认分支/tag/commit，多 service 一次构建共用。
 	// 触发构建时若未显式传 git_ref，使用本字段；空则兜底 "main"。
-	GitRef         string `gorm:"size:100" json:"git_ref"`
-	DeployPath     string `gorm:"size:255;not null" json:"deploy_path"`
+	GitRef     string `gorm:"size:100" json:"git_ref"`
+	DeployPath string `gorm:"size:255;not null" json:"deploy_path"`
 
 	// ===== 以下字段 Sprint X.1 标记为"待下沉到 AppService"，X.4 删除 =====
 	Port           int    `gorm:"not null" json:"port"`
 	HealthCheckURL string `gorm:"size:255;default:'/actuator/health'" json:"health_check_url"`
 	JvmArgs        string `gorm:"type:text" json:"jvm_args"`
-	EnvVars        string `gorm:"type:text" json:"env_vars"` // JSON
+	EnvVars        string `gorm:"type:text" json:"env_vars"`   // JSON
 	SystemdUser    string `gorm:"size:32" json:"systemd_user"` // 空=root；非空写入 unit 的 User= 字段
 	// JavaPath: 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
 	// 适用场景：同一台主机跑多个 JDK 版本的应用（jdk8 / jdk17 等）。
-	JavaPath          string `gorm:"size:255" json:"java_path"`
-	// DeployMode 部署模式（Sprint X.10）：
+	JavaPath string `gorm:"size:255" json:"java_path"`
+	// BuildMode 构建模式（Sprint X.11 重构）：
+	//   "local-jar"      → 本机 Maven 打包 jar（默认，向后兼容）
+	//   "local-docker"   → 本机 Maven 打包 → Dockerfile → docker build → push 到镜像仓库
+	//   "remote-docker"  → 推送代码到远端构建机 → docker build → push 到镜像仓库
+	BuildMode string `gorm:"size:20;default:'local-jar'" json:"build_mode"`
+
+	// DeployMode 部署模式（Sprint X.10 + X.11 扩展）：
 	//   "" / "systemd" → 写 /etc/systemd/system/devops-<app>.service + systemctl 管控（默认，向后兼容）
 	//   "nohup"        → 写 <deploy_path>/start.sh + nohup java -jar + app.pid 守护（免 root，crash 不自愈）
+	//   "docker"       → docker pull + docker run（Sprint X.11 新增）
 	// 单 service 应用沿用本字段；多 service 链路下，AppService.DeployMode 覆盖本字段。
-	DeployMode        string `gorm:"size:20;default:'systemd'" json:"deploy_mode"`
+	DeployMode string `gorm:"size:20;default:'systemd'" json:"deploy_mode"`
+
+	// Docker 构建配置（Sprint X.11）
+	DockerRegistry  string `gorm:"size:255" json:"docker_registry"`    // 镜像仓库地址，如 docker.io / harbor.example.com
+	DockerImageName string `gorm:"size:255" json:"docker_image_name"`  // 镜像名，如 myapp/user-service
+	DockerImageTag  string `gorm:"size:100" json:"docker_image_tag"`   // 镜像标签模板，如 git-{sha}-{build_id} / latest
+	Dockerfile      string `gorm:"type:text" json:"dockerfile"`        // 自定义 Dockerfile（可选，空则自动生成）
+	DockerBuildArgs string `gorm:"type:text" json:"docker_build_args"` // docker build 参数，如 --build-arg ENV=prod
+
+	// Docker 部署配置（Sprint X.11）
+	DockerRunArgs string `gorm:"type:text" json:"docker_run_args"` // docker run 参数，如 -p 8080:8080 -e ENV=prod --restart=always
 	// Sprint 5.4.7 构建：multi-module 项目用
 	// BuildModule 非空 → mvn -pl <module> -am；只编译该模块及其依赖，加速 + 减少 jar 命中
 	// BuildJarPattern 非空 → glob 在 workspace 下匹配 jar；为空走 builder 默认扫描+Spring Boot 探测
@@ -69,8 +86,8 @@ type Application struct {
 	ActiveGroup       string `gorm:"size:20" json:"active_group"` // blue / green / 空
 	// ===== 待下沉字段结束 =====
 
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // AppService 微服务层 —— Sprint X.1 新增。
@@ -88,7 +105,7 @@ type AppService struct {
 	ID          uint   `gorm:"primaryKey" json:"id"`
 	AppID       uint   `gorm:"uniqueIndex:idx_app_service;not null;index" json:"app_id"`
 	ServiceCode string `gorm:"uniqueIndex:idx_app_service;size:50;not null" json:"service_code"` // ^[a-z][a-z0-9-]{1,49}$
-	Name        string `gorm:"size:100" json:"name"`                                              // 展示名；空走 service_code
+	Name        string `gorm:"size:100" json:"name"`                                             // 展示名；空走 service_code
 
 	// 构建参数（multi-module Spring Boot）
 	BuildModule     string `gorm:"size:100" json:"build_module"`      // mvn -pl 用；空 = 全量 mvn package（单 module 项目）
@@ -101,16 +118,25 @@ type AppService struct {
 	EnvVars        string `gorm:"type:text" json:"env_vars"` // JSON
 	SystemdUser    string `gorm:"size:32" json:"systemd_user"`
 	JavaPath       string `gorm:"size:255" json:"java_path"` // 空 = 沿用 Host.JavaPath
-	// DeployMode 部署模式（Sprint X.10）：
+	// DeployMode 部署模式（Sprint X.10 + X.11 扩展）：
 	//   "" / "systemd" → systemd unit + systemctl（默认，向后兼容）
 	//   "nohup"        → nohup java -jar + app.pid（免 root，crash 不自愈）
+	//   "docker"       → docker pull + docker run（Sprint X.11 新增）
 	// 空时回退 Application.DeployMode；都空 → "systemd"。
-	DeployMode     string `gorm:"size:20;default:'systemd'" json:"deploy_mode"`
+	DeployMode string `gorm:"size:20;default:'systemd'" json:"deploy_mode"`
+
+	// Docker 配置（Sprint X.11）—— 空时回退 Application 的对应字段
+	DockerRegistry  string `gorm:"size:255" json:"docker_registry"`
+	DockerImageName string `gorm:"size:255" json:"docker_image_name"`
+	DockerImageTag  string `gorm:"size:100" json:"docker_image_tag"`
+	Dockerfile      string `gorm:"type:text" json:"dockerfile"`
+	DockerBuildArgs string `gorm:"type:text" json:"docker_build_args"`
+	DockerRunArgs   string `gorm:"type:text" json:"docker_run_args"`
 
 	// 编排
 	StartupOrder int  `gorm:"default:100;index" json:"startup_order"` // 0=注册中心，10=网关，100=业务（默认）
-	Optional     bool `gorm:"default:false" json:"optional"`           // true = 失败不阻塞 run
-	Enabled      bool `gorm:"default:true" json:"enabled"`             // 软下线
+	Optional     bool `gorm:"default:false" json:"optional"`          // true = 失败不阻塞 run
+	Enabled      bool `gorm:"default:true" json:"enabled"`            // 软下线
 
 	// 蓝绿（per-service）—— gateway 才用
 	NginxHostID       uint   `gorm:"index" json:"nginx_host_id"`
@@ -126,15 +152,15 @@ type AppService struct {
 // Sprint X.1：保留兼容老 service/handler/strategy 代码；新代码请用 [ArtifactBundle] + [ArtifactItem]。
 // 等 Sprint X.4 完成切换后，本表退役（数据已在 X.1 cleanup 清空）。
 type Artifact struct {
-	ID           uint   `gorm:"primaryKey" json:"id"`
-	AppID        uint   `gorm:"index;not null" json:"app_id"`
-	VersionTag   string `gorm:"size:50;not null" json:"version_tag"`
-	FileName     string `gorm:"size:255;not null" json:"file_name"`
-	FilePath     string `gorm:"size:255;not null" json:"file_path"`
-	FileMD5      string `gorm:"size:32;not null" json:"file_md5"`
-	FileSize     int64  `json:"file_size"`
-	BuildStatus  string `gorm:"size:20;not null" json:"build_status"` // success / failed / building
-	BuildLogPath string `gorm:"size:255" json:"build_log_path"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	AppID        uint      `gorm:"index;not null" json:"app_id"`
+	VersionTag   string    `gorm:"size:50;not null" json:"version_tag"`
+	FileName     string    `gorm:"size:255;not null" json:"file_name"`
+	FilePath     string    `gorm:"size:255;not null" json:"file_path"`
+	FileMD5      string    `gorm:"size:32;not null" json:"file_md5"`
+	FileSize     int64     `json:"file_size"`
+	BuildStatus  string    `gorm:"size:20;not null" json:"build_status"` // success / failed / building
+	BuildLogPath string    `gorm:"size:255" json:"build_log_path"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
@@ -143,26 +169,26 @@ type Artifact struct {
 //
 // git_commit_sha 是"这 N 个 jar 是同一份代码出来的"的硬证据；回滚以 Bundle 为粒度（Q2 答案 A）。
 type ArtifactBundle struct {
-	ID            uint   `gorm:"primaryKey" json:"id"`
-	AppID         uint   `gorm:"uniqueIndex:idx_bundle_app_version;not null;index" json:"app_id"`
-	VersionTag    string `gorm:"uniqueIndex:idx_bundle_app_version;size:50;not null" json:"version_tag"`
-	GitCommitSHA  string `gorm:"size:40;index" json:"git_commit_sha"`
-	BuildStatus   string `gorm:"size:20;not null" json:"build_status"` // success / failed / building
-	BuildLogPath  string `gorm:"size:255" json:"build_log_path"`        // 整组共享一份构建日志
-	TriggeredBy   string `gorm:"size:50" json:"triggered_by"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	AppID        uint      `gorm:"uniqueIndex:idx_bundle_app_version;not null;index" json:"app_id"`
+	VersionTag   string    `gorm:"uniqueIndex:idx_bundle_app_version;size:50;not null" json:"version_tag"`
+	GitCommitSHA string    `gorm:"size:40;index" json:"git_commit_sha"`
+	BuildStatus  string    `gorm:"size:20;not null" json:"build_status"` // success / failed / building
+	BuildLogPath string    `gorm:"size:255" json:"build_log_path"`       // 整组共享一份构建日志
+	TriggeredBy  string    `gorm:"size:50" json:"triggered_by"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // ArtifactItem 产物明细 —— Sprint X.1 新增。
 // 每行 = Bundle 内一个 AppService 的 jar 文件。
 type ArtifactItem struct {
-	ID          uint   `gorm:"primaryKey" json:"id"`
-	BundleID    uint   `gorm:"uniqueIndex:idx_item_bundle_service;not null;index" json:"bundle_id"`
-	ServiceCode string `gorm:"uniqueIndex:idx_item_bundle_service;size:50;not null" json:"service_code"`
-	FileName    string `gorm:"size:255;not null" json:"file_name"`
-	FilePath    string `gorm:"size:255;not null" json:"file_path"`
-	FileMD5     string `gorm:"size:32;not null" json:"file_md5"`
-	FileSize    int64  `json:"file_size"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	BundleID    uint      `gorm:"uniqueIndex:idx_item_bundle_service;not null;index" json:"bundle_id"`
+	ServiceCode string    `gorm:"uniqueIndex:idx_item_bundle_service;size:50;not null" json:"service_code"`
+	FileName    string    `gorm:"size:255;not null" json:"file_name"`
+	FilePath    string    `gorm:"size:255;not null" json:"file_path"`
+	FileMD5     string    `gorm:"size:32;not null" json:"file_md5"`
+	FileSize    int64     `json:"file_size"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -175,21 +201,21 @@ type ArtifactItem struct {
 //   - 新增字段 CurrentArtifactItemID / PreviousArtifactItemID：替代旧的 CurrentArtifactID / PreviousArtifactID
 //     旧 Artifact*ID 字段 X.4 删除
 type Deployment struct {
-	ID                 uint   `gorm:"primaryKey" json:"id"`
-	AppID              uint   `gorm:"uniqueIndex:idx_app_host_service;not null" json:"app_id"`
-	HostID             uint   `gorm:"uniqueIndex:idx_app_host_service;not null" json:"host_id"`
-	ServiceCode        string `gorm:"uniqueIndex:idx_app_host_service;size:50;not null;default:''" json:"service_code"` // Sprint X.1
-	GroupTag           string `gorm:"size:20" json:"group_tag"` // blue / green
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	AppID       uint   `gorm:"uniqueIndex:idx_app_host_service;not null" json:"app_id"`
+	HostID      uint   `gorm:"uniqueIndex:idx_app_host_service;not null" json:"host_id"`
+	ServiceCode string `gorm:"uniqueIndex:idx_app_host_service;size:50;not null;default:''" json:"service_code"` // Sprint X.1
+	GroupTag    string `gorm:"size:20" json:"group_tag"`                                                         // blue / green
 	// 旧产物指针（X.4 删除）
 	CurrentArtifactID  uint `json:"current_artifact_id"`
 	PreviousArtifactID uint `json:"previous_artifact_id"`
 	// 新产物指针（X.1 新增，指向 ArtifactItem）
-	CurrentArtifactItemID  uint `json:"current_artifact_item_id"`
-	PreviousArtifactItemID uint `json:"previous_artifact_item_id"`
-	Port               int    `json:"port"`
-	Status             string `gorm:"size:20" json:"status"` // running / stopped / failed
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	CurrentArtifactItemID  uint      `json:"current_artifact_item_id"`
+	PreviousArtifactItemID uint      `json:"previous_artifact_item_id"`
+	Port                   int       `json:"port"`
+	Status                 string    `gorm:"size:20" json:"status"` // running / stopped / failed
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
 
 // PipelineRun 一次发布或构建任务。
@@ -197,18 +223,18 @@ type Deployment struct {
 // Sprint X.1：新增 BundleID / PreviousBundleID（指向 [ArtifactBundle]）；
 // 旧 ArtifactID 保留兼容，X.4 删除。回滚走整组 Bundle 粒度（Q2 答案 A）。
 type PipelineRun struct {
-	ID            uint       `gorm:"primaryKey" json:"id"`
-	AppID         uint       `gorm:"index;not null" json:"app_id"`
-	ArtifactID    uint       `json:"artifact_id"`           // 旧字段，X.4 删除
-	BundleID      uint       `gorm:"index" json:"bundle_id"` // Sprint X.1：当前发布的 Bundle
-	PreviousBundleID uint    `gorm:"index" json:"previous_bundle_id"` // Sprint X.1：整组回滚指针
-	Strategy      string     `gorm:"size:20" json:"strategy"` // build / single / rolling / blue_green / rollback
-	Status        string     `gorm:"size:20" json:"status"`   // pending / running / success / failed / cancelled
-	StateSnapshot string     `gorm:"type:text" json:"state_snapshot"`
-	TriggeredBy   string     `gorm:"size:50" json:"triggered_by"`
-	StartedAt     *time.Time `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at"`
-	CreatedAt     time.Time  `json:"created_at"`
+	ID               uint       `gorm:"primaryKey" json:"id"`
+	AppID            uint       `gorm:"index;not null" json:"app_id"`
+	ArtifactID       uint       `json:"artifact_id"`                     // 旧字段，X.4 删除
+	BundleID         uint       `gorm:"index" json:"bundle_id"`          // Sprint X.1：当前发布的 Bundle
+	PreviousBundleID uint       `gorm:"index" json:"previous_bundle_id"` // Sprint X.1：整组回滚指针
+	Strategy         string     `gorm:"size:20" json:"strategy"`         // build / single / rolling / blue_green / rollback
+	Status           string     `gorm:"size:20" json:"status"`           // pending / running / success / failed / cancelled
+	StateSnapshot    string     `gorm:"type:text" json:"state_snapshot"`
+	TriggeredBy      string     `gorm:"size:50" json:"triggered_by"`
+	StartedAt        *time.Time `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at"`
+	CreatedAt        time.Time  `json:"created_at"`
 }
 
 // PipelineRunHost 单次 run 在某台主机×服务上的执行状态。
@@ -222,8 +248,8 @@ type PipelineRunHost struct {
 	HostID       uint       `gorm:"uniqueIndex:idx_run_host_service;not null" json:"host_id"`
 	ServiceCode  string     `gorm:"uniqueIndex:idx_run_host_service;size:50;not null;default:''" json:"service_code"` // Sprint X.1
 	DeploymentID uint       `gorm:"index" json:"deployment_id"`
-	Status       string     `gorm:"size:20;not null" json:"status"`       // pending / running / success / failed / skipped
-	CurrentStage string     `gorm:"size:20" json:"current_stage"`         // dial / upload / write_unit / restart / health
+	Status       string     `gorm:"size:20;not null" json:"status"` // pending / running / success / failed / skipped
+	CurrentStage string     `gorm:"size:20" json:"current_stage"`   // dial / upload / write_unit / restart / health
 	StartedAt    *time.Time `json:"started_at"`
 	EndedAt      *time.Time `json:"ended_at"`
 	Error        string     `gorm:"type:text" json:"error"`
@@ -252,14 +278,14 @@ type GitCredential struct {
 type BuildRun struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
 	AppID       uint       `gorm:"index;not null" json:"app_id"`
-	GitRef      string     `gorm:"size:100" json:"git_ref"`     // 分支 / tag / commit
-	CommitSHA   string     `gorm:"size:40" json:"commit_sha"`   // clone 后从 git rev-parse 回填
-	MvnArgs     string     `gorm:"size:255" json:"mvn_args"`    // 用户指定的额外 mvn 参数；空 = 默认
-	CredID      uint       `gorm:"index" json:"cred_id"`        // 关联 GitCredential；0 = 无凭证（公网仓）
+	GitRef      string     `gorm:"size:100" json:"git_ref"`        // 分支 / tag / commit
+	CommitSHA   string     `gorm:"size:40" json:"commit_sha"`      // clone 后从 git rev-parse 回填
+	MvnArgs     string     `gorm:"size:255" json:"mvn_args"`       // 用户指定的额外 mvn 参数；空 = 默认
+	CredID      uint       `gorm:"index" json:"cred_id"`           // 关联 GitCredential；0 = 无凭证（公网仓）
 	Status      string     `gorm:"size:20;not null" json:"status"` // building / success / failed / cancelled
-	LogPath     string     `gorm:"size:255" json:"log_path"`    // build log 文件绝对路径
-	ArtifactID  uint       `gorm:"index" json:"artifact_id"`    // 旧：单 jar 链路，X.4 删除
-	BundleID    uint       `gorm:"index" json:"bundle_id"`      // Sprint X.2：成功时回填整组 Bundle
+	LogPath     string     `gorm:"size:255" json:"log_path"`       // build log 文件绝对路径
+	ArtifactID  uint       `gorm:"index" json:"artifact_id"`       // 旧：单 jar 链路，X.4 删除
+	BundleID    uint       `gorm:"index" json:"bundle_id"`         // Sprint X.2：成功时回填整组 Bundle
 	TriggeredBy string     `gorm:"size:50" json:"triggered_by"`
 	Error       string     `gorm:"type:text" json:"error"`
 	StartedAt   *time.Time `json:"started_at"`
@@ -271,14 +297,14 @@ type BuildRun struct {
 // 用于把 swift-devops 进程所在主机的 JAVA_HOME / MAVEN_HOME / GIT 路径
 // 透传给构建用的 mvn 子进程，避免依赖 systemd 启动时的环境变量。
 type BuilderEnv struct {
-	ID            uint       `gorm:"primaryKey" json:"id"` // 固定 1
-	JavaHome      string     `gorm:"size:255" json:"java_home"`
-	MavenHome     string     `gorm:"size:255" json:"maven_home"`
-	GitPath       string     `gorm:"size:255" json:"git_path"` // 一般 /usr/bin/git；空 = 走 PATH 找
+	ID        uint   `gorm:"primaryKey" json:"id"` // 固定 1
+	JavaHome  string `gorm:"size:255" json:"java_home"`
+	MavenHome string `gorm:"size:255" json:"maven_home"`
+	GitPath   string `gorm:"size:255" json:"git_path"` // 一般 /usr/bin/git；空 = 走 PATH 找
 	// Sprint X.9：maven 本地仓库（覆盖 settings.xml 里的 <localRepository>）。
 	// 空 = 不传 -Dmaven.repo.local，让 mvn 自己用 settings.xml 默认（推荐）。
 	// 非空必须绝对路径，触发构建时作为 -Dmaven.repo.local=<dir> 传给 mvn。
-	MavenLocalRepo string    `gorm:"size:255" json:"maven_local_repo"`
+	MavenLocalRepo string `gorm:"size:255" json:"maven_local_repo"`
 	// Sprint 5.6：Docker 构建镜像（如 maven:3.9-eclipse-temurin-17）。
 	// 仅 config.builder.docker_enabled=true 时生效；docker 模式下为空会拒绝触发构建。
 	DockerImage   string     `gorm:"size:255" json:"docker_image"`
@@ -287,7 +313,7 @@ type BuilderEnv struct {
 	GitVersion    string     `gorm:"size:100" json:"git_version"`
 	DockerVersion string     `gorm:"size:100" json:"docker_version"` // Sprint 5.6：detect 回填 docker --version
 	DetectedAt    *time.Time `json:"detected_at"`
-	Valid         bool       `json:"valid"`  // 上次检测是否全部命中
+	Valid         bool       `json:"valid"` // 上次检测是否全部命中
 	DetectMessage string     `gorm:"type:text" json:"detect_message"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }

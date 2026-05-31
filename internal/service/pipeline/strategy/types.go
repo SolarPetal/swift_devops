@@ -15,13 +15,13 @@ import (
 
 // 部署阶段名（前端按这些固定 string 渲染时序卡片）。
 const (
-	StageDial        = "dial"
-	StageEnvCheck    = "env_check" // Sprint 3.7：远端 java/路径预检
-	StageUpload      = "upload"
-	StageUnit        = "write_unit"
-	StageRestart     = "restart"
-	StageHealth      = "health"
-	StageNginxApply  = "nginx_apply" // 蓝绿专用：upstream 切流 + nginx -s reload
+	StageDial       = "dial"
+	StageEnvCheck   = "env_check" // Sprint 3.7：远端 java/路径预检
+	StageUpload     = "upload"
+	StageUnit       = "write_unit"
+	StageRestart    = "restart"
+	StageHealth     = "health"
+	StageNginxApply = "nginx_apply" // 蓝绿专用：upstream 切流 + nginx -s reload
 )
 
 // Host 级状态机：与 model.PipelineRunHost.Status 字段一一对应。
@@ -76,27 +76,27 @@ type HostOutcome struct {
 // wave 编排（按 startup_order 分波 + 同波多 service 并发）由 pipeline_service 在
 // strategy 外层完成。Plan 多挂当前 service / item 字段，让 deployHostService 拿到。
 type Plan struct {
-	RunID           uint
-	App             *model.Application
+	RunID uint
+	App   *model.Application
 
 	// 旧字段（X.8 删除）：单 jar 链路
-	Artifact        *model.Artifact            // forward 模式的统一新版本；rollback 不用
-	ArtifactByDepID map[uint]*model.Artifact   // rollback：每 dep 的 previous_artifact_id 对应的 art
+	Artifact        *model.Artifact          // forward 模式的统一新版本；rollback 不用
+	ArtifactByDepID map[uint]*model.Artifact // rollback：每 dep 的 previous_artifact_id 对应的 art
 
 	// Sprint X.3 新字段（多 service 链路，sub-plan 维度）
-	Service         *model.AppService          // 本次 Run 部署的 service；wave 编排时由 pipeline_service 注入
-	Item            *model.ArtifactItem        // 本 service 在 Bundle 中的 jar 产物；rollback 不用
-	ItemByDepID     map[uint]*model.ArtifactItem // rollback：每 dep 的 previous item
+	Service     *model.AppService            // 本次 Run 部署的 service；wave 编排时由 pipeline_service 注入
+	Item        *model.ArtifactItem          // 本 service 在 Bundle 中的 jar 产物；rollback 不用
+	ItemByDepID map[uint]*model.ArtifactItem // rollback：每 dep 的 previous item
 
 	// Sprint X.6 新字段（多 service 链路，顶层维度）—— Trigger 阶段填，buildSubPlanFunc 拆到 sub-plan
-	Bundle             *model.ArtifactBundle           // 整组制品；存在则走 Bundle 链路
-	ItemByServiceCode  map[string]*model.ArtifactItem // service_code → item，sub-plan 拆解时按 service 找 jar
+	Bundle            *model.ArtifactBundle          // 整组制品；存在则走 Bundle 链路
+	ItemByServiceCode map[string]*model.ArtifactItem // service_code → item，sub-plan 拆解时按 service 找 jar
 
-	Deps            []model.Deployment        // 已按 ID ASC 排好序；wave 编排后只含本 service 的 dep
-	EnvMap          map[string]string         // 已解析的 env vars（per-service）
-	BatchSize       int                       // rolling 专用；single/rollback 忽略；0/1 退化为单批
+	Deps      []model.Deployment // 已按 ID ASC 排好序；wave 编排后只含本 service 的 dep
+	EnvMap    map[string]string  // 已解析的 env vars（per-service）
+	BatchSize int                // rolling 专用；single/rollback 忽略；0/1 退化为单批
 	// 蓝绿专用（Sprint 4.3）：
-	TargetGroup string                                  // blue / green —— BlueGreen 部署到这个组
+	TargetGroup string                          // blue / green —— BlueGreen 部署到这个组
 	NginxApply  func(ctx context.Context) error // 切流闭包：service 层注入，BlueGreen 在全 success 后调用一次
 }
 

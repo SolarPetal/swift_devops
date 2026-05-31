@@ -28,8 +28,8 @@ type TicketStore struct {
 }
 
 type ticketEntry struct {
-	user      string    // 持票人
-	subject   string    // 业务主题，比如 "pipeline:5"，升级时必须严格匹配
+	user      string // 持票人
+	subject   string // 业务主题，比如 "pipeline:5"，升级时必须严格匹配
 	expiresAt time.Time
 }
 

@@ -156,7 +156,7 @@ func setupForIntegration(t *testing.T) (*service.PipelineService, uint, uint) {
 	// host
 	hv, err := hostSvc.Create(service.HostInput{
 		Name: "container", IP: "127.0.0.1",
-		Port: parsePortOr(itSSHPort, 12222),
+		Port:     parsePortOr(itSSHPort, 12222),
 		AuthType: "password", Username: "root", Password: itPassword,
 	})
 	if err != nil {
@@ -298,12 +298,12 @@ var _ = filepath.Base
 // ===== Sprint 3.5：rolling 双容器端到端 =====
 
 const (
-	itRollingC1     = "swift-devops-sshd-test-r1"
-	itRollingC2     = "swift-devops-sshd-test-r2"
-	itRollingSSH1   = "12223"
-	itRollingSSH2   = "12224"
-	itRollingHTTP1  = "18081"
-	itRollingHTTP2  = "18082"
+	itRollingC1    = "swift-devops-sshd-test-r1"
+	itRollingC2    = "swift-devops-sshd-test-r2"
+	itRollingSSH1  = "12223"
+	itRollingSSH2  = "12224"
+	itRollingHTTP1 = "18081"
+	itRollingHTTP2 = "18082"
 )
 
 // setupForRollingIntegration 装配 2 host（不同 SSH 端口）+ 1 app + 2 deployment
@@ -332,7 +332,7 @@ func setupForRollingIntegration(t *testing.T) (*service.PipelineService, uint, u
 	// 两台 host
 	h1, err := hostSvc.Create(service.HostInput{
 		Name: "rolling-1", IP: "127.0.0.1",
-		Port: parsePortOr(itRollingSSH1, 12223),
+		Port:     parsePortOr(itRollingSSH1, 12223),
 		AuthType: "password", Username: "root", Password: itPassword,
 	})
 	if err != nil {
@@ -340,7 +340,7 @@ func setupForRollingIntegration(t *testing.T) (*service.PipelineService, uint, u
 	}
 	h2, err := hostSvc.Create(service.HostInput{
 		Name: "rolling-2", IP: "127.0.0.1",
-		Port: parsePortOr(itRollingSSH2, 12224),
+		Port:     parsePortOr(itRollingSSH2, 12224),
 		AuthType: "password", Username: "root", Password: itPassword,
 	})
 	if err != nil {

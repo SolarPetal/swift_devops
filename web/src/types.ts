@@ -132,10 +132,24 @@ export type App = {
   nginx_host_id: number       // 0 = 未启用蓝绿
   nginx_upstream_name: string // upstream block 名，与 nginx_host_id 同填同空
   active_group: string        // 'blue' | 'green' | ''；蓝绿部署成功后由后端写入
-  // Sprint X.10：部署模式
-  //   'systemd' → 写 /etc/systemd/system/devops-<app>.service + systemctl 管控（默认，需 root/sudo）
-  //   'nohup'   → 写 <deploy_path>/start.sh + nohup java -jar + app.pid（免 root，crash 不自愈）
-  deploy_mode: 'systemd' | 'nohup' | ''
+  // Sprint X.10 + X.11：构建 & 部署模式
+  //   build_mode:
+  //     'local-jar'      → 本机 Maven 打包 jar（默认）
+  //     'local-docker'   → 本机 Maven → Dockerfile → docker build → push
+  //     'remote-docker'  → 推送代码到远端 → docker build → push
+  build_mode: 'local-jar' | 'local-docker' | 'remote-docker' | ''
+  //   deploy_mode:
+  //     'systemd' → systemd service + systemctl（默认，需 root/sudo）
+  //     'nohup'   → nohup java -jar + app.pid（免 root，crash 不自愈）
+  //     'docker'  → docker pull + docker run（Sprint X.11 新增）
+  deploy_mode: 'systemd' | 'nohup' | 'docker' | ''
+  // Sprint X.11：Docker 配置
+  docker_registry: string      // 镜像仓库地址，如 docker.io / harbor.example.com
+  docker_image_name: string    // 镜像名，如 myapp/user-service
+  docker_image_tag: string     // 镜像标签模板，如 git-{sha}-{build_id} / latest
+  dockerfile: string           // 自定义 Dockerfile（可选）
+  docker_build_args: string    // docker build 参数
+  docker_run_args: string      // docker run 参数，如 -p 8080:8080 -e ENV=prod
   created_at: string
   updated_at: string
 }
@@ -162,8 +176,15 @@ export type AppService = {
   nginx_host_id: number
   nginx_upstream_name: string
   active_group: string
-  // Sprint X.10：部署模式，覆盖 Application.DeployMode。空串 = 沿用 app 字段。
-  deploy_mode: 'systemd' | 'nohup' | ''
+  // Sprint X.10 + X.11：部署模式，覆盖 Application.DeployMode。空串 = 沿用 app 字段。
+  deploy_mode: 'systemd' | 'nohup' | 'docker' | ''
+  // Sprint X.11：Docker 配置（空时回退 Application 的对应字段）
+  docker_registry: string
+  docker_image_name: string
+  docker_image_tag: string
+  dockerfile: string
+  docker_build_args: string
+  docker_run_args: string
   created_at: string
   updated_at: string
 }
@@ -185,8 +206,15 @@ export type AppServiceInput = {
   nginx_host_id?: number
   nginx_upstream_name?: string
   active_group?: string
-  // Sprint X.10：部署模式（覆盖 app 字段；空 = 沿用）
-  deploy_mode?: 'systemd' | 'nohup' | ''
+  // Sprint X.10 + X.11：部署模式（覆盖 app 字段；空 = 沿用）
+  deploy_mode?: 'systemd' | 'nohup' | 'docker' | ''
+  // Sprint X.11：Docker 配置（可选，空时回退 app 字段）
+  docker_registry?: string
+  docker_image_name?: string
+  docker_image_tag?: string
+  dockerfile?: string
+  docker_build_args?: string
+  docker_run_args?: string
 }
 
 export type Deployment = {

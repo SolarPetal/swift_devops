@@ -83,12 +83,12 @@ func PipelineTopic(runID uint) string {
 
 // PipelineEvent WS 帧标准 schema（前端按 type 分发）。
 type PipelineEvent struct {
-	Type     string                `json:"type"` // "step" | "status" | "snapshot"
-	RunID    uint                  `json:"run_id"`
-	Status   string                `json:"status,omitempty"`
-	Step     *strategy.StepResult  `json:"step,omitempty"`
-	Snap     *strategy.RunSnapshot `json:"snapshot,omitempty"`
-	Ts       string                `json:"ts"`
+	Type   string                `json:"type"` // "step" | "status" | "snapshot"
+	RunID  uint                  `json:"run_id"`
+	Status string                `json:"status,omitempty"`
+	Step   *strategy.StepResult  `json:"step,omitempty"`
+	Snap   *strategy.RunSnapshot `json:"snapshot,omitempty"`
+	Ts     string                `json:"ts"`
 }
 
 func NewPipelineService(db *gorm.DB, hostSvc *HostService, artSvc *ArtifactService, sshTimeout time.Duration) *PipelineService {
@@ -383,7 +383,7 @@ func (s *PipelineService) Rollback(appID uint, actor string) (PipelineRunView, e
 	run := &model.PipelineRun{
 		AppID: appID, ArtifactID: 0,
 		PreviousBundleID: previousBundleID, // Sprint X.7：回滚目标 Bundle 留痕
-		Strategy: "rollback", Status: RunStatusRunning,
+		Strategy:         "rollback", Status: RunStatusRunning,
 		StateSnapshot: string(snapJSON),
 		TriggeredBy:   actor,
 		StartedAt:     &now,

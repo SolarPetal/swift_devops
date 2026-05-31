@@ -1,5 +1,6 @@
 # Go binaries (项目根目录的构建输出)
 /dist/
+/swift-devops
 *.exe
 
 # Web build & deps
@@ -20,6 +21,9 @@ logs/
 *.db-*
 *.log
 server.pid
+
+# Local debugging helpers
+/check_host_ip.go
 
 # OS
 .DS_Store

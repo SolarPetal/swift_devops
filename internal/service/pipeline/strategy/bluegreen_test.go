@@ -124,4 +124,3 @@ func TestBlueGreen_CtxDoneSkipsApply(t *testing.T) {
 
 // Success 路径（host 全成 → NginxApply 调用 → OnGroupSwitched 触发）
 // 由 Sprint 4.5 集成测覆盖（真 SSH + nginx 容器）。
-

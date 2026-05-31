@@ -28,11 +28,11 @@ func (f *fakeHostLoader) RecordHostKey(uint, string) {}
 
 // captureHooks 收集策略发出的所有事件，供断言。
 type captureHooks struct {
-	mu             sync.Mutex
-	steps          []strategy.StepResult
-	statuses       []hostStatus
-	deploys        []uint // deployment IDs that got OnDeploymentSuccess
-	groupSwitched  string // 最后一次 OnGroupSwitched 的 group
+	mu            sync.Mutex
+	steps         []strategy.StepResult
+	statuses      []hostStatus
+	deploys       []uint // deployment IDs that got OnDeploymentSuccess
+	groupSwitched string // 最后一次 OnGroupSwitched 的 group
 }
 
 type hostStatus struct {

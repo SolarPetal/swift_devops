@@ -14,9 +14,10 @@ import (
 	sshpkg "swift-devops/internal/pkg/ssh"
 )
 
-// AppSpec 渲染 systemd 单元所需的应用规格
+// AppSpec 渲染 systemd 单元所需的应用规格（Sprint X.10 + X.11 扩展支持 nohup / docker）
 type AppSpec struct {
 	AppCode        string            // → devops-<AppCode>.service
+	ServiceName    string            // Sprint X.11：微服务名（单体应用 = AppCode）
 	DeployPath     string            // jar 解析路径（绝对路径）
 	JarFileName    string            // 默认 "app.jar"
 	JvmArgs        string            // 透传到 java 命令行
@@ -25,6 +26,10 @@ type AppSpec struct {
 	EnvVars        map[string]string // 解析后的 env vars
 	User           string            // systemd User=，留空走默认（root）
 	JavaPath       string            // java 可执行路径，留空 → /usr/bin/java（Sprint 3.7）
+
+	// Sprint X.11：Docker 部署模式
+	DockerImage   string // 完整镜像名（registry/name:tag）
+	DockerRunArgs string // docker run 参数
 }
 
 // UnitName 单元名（不含路径）

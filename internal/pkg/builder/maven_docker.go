@@ -27,11 +27,11 @@ import (
 
 // DockerMavenOptions docker 容器内跑 mvn package 的输入。
 type DockerMavenOptions struct {
-	WorkDir       string        // 宿主机源码目录（含 pom.xml），bind mount 进容器 /src
-	Image         string        // 构建镜像（必填）
-	DockerBin     string        // docker 可执行；空 = "docker"
-	ExtraArgs     string        // mvn 额外参数；空 = "clean package -DskipTests"
-	MavenCacheDir string        // 宿主机 .m2 缓存目录，bind mount 到 /m2；空 = 不挂（每次重下依赖）
+	WorkDir       string // 宿主机源码目录（含 pom.xml），bind mount 进容器 /src
+	Image         string // 构建镜像（必填）
+	DockerBin     string // docker 可执行；空 = "docker"
+	ExtraArgs     string // mvn 额外参数；空 = "clean package -DskipTests"
+	MavenCacheDir string // 宿主机 .m2 缓存目录，bind mount 到 /m2；空 = 不挂（每次重下依赖）
 	LogWriter     io.Writer
 	Timeout       time.Duration // 0 = 30 分钟
 }

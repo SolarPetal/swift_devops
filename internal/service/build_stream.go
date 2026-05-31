@@ -24,11 +24,11 @@ func BuildTopic(buildID uint) string {
 
 // BuildEvent 构建 WS 帧标准 schema（前端按 type 分发）。
 type BuildEvent struct {
-	Type    string `json:"type"`              // "snapshot" | "log" | "status"
+	Type    string `json:"type"` // "snapshot" | "log" | "status"
 	BuildID uint   `json:"build_id"`
-	Chunk   string `json:"chunk,omitempty"`   // type=log：增量日志块，前端 append
-	Log     string `json:"log,omitempty"`     // type=snapshot：截至此刻的全量日志
-	Status  string `json:"status,omitempty"`  // type=snapshot / status：构建状态
+	Chunk   string `json:"chunk,omitempty"`  // type=log：增量日志块，前端 append
+	Log     string `json:"log,omitempty"`    // type=snapshot：截至此刻的全量日志
+	Status  string `json:"status,omitempty"` // type=snapshot / status：构建状态
 	Ts      string `json:"ts"`
 }
 

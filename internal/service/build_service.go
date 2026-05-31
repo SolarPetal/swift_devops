@@ -82,9 +82,9 @@ type BuildService struct {
 	workspace string // build_workspace 根目录
 	// Sprint X.9：maven_cache_dir 不再从 config 注入；改到 BuilderEnv.MavenLocalRepo（UI 配置）
 	// 触发构建时 envSvc.ResolveBuildInputs() 返回，允许留空走 settings.xml 默认。
-	maxHistory int       // Sprint 5.7：构建成功后保留的历史 Bundle 数（config.Storage.MaxHistory）；<=0 不清理
-	pub        Publisher // Sprint 5.5：构建日志实时推 WS；nil = 只写文件不推
-	dockerEnabled bool   // Sprint 5.6：config.builder.docker_enabled；true 走容器构建
+	maxHistory    int       // Sprint 5.7：构建成功后保留的历史 Bundle 数（config.Storage.MaxHistory）；<=0 不清理
+	pub           Publisher // Sprint 5.5：构建日志实时推 WS；nil = 只写文件不推
+	dockerEnabled bool      // Sprint 5.6：config.builder.docker_enabled；true 走容器构建
 
 	mu       sync.Mutex
 	busyApps map[uint]struct{} // 同 app 互斥（构建 + 部署可分开管，但构建本身互斥）
@@ -323,9 +323,9 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 	plan := builder.Plan{
 		AppCode: app.AppCode, GitURL: app.GitURL, GitRef: defaultRef(in.GitRef),
 		Cred: cred, MvnArgs: in.MvnArgs,
-		MvnBin:      mvnBin,
-		GitBin:      gitBin,
-		Workspace:   s.workspace, MavenCacheDir: mavenCache,
+		MvnBin:    mvnBin,
+		GitBin:    gitBin,
+		Workspace: s.workspace, MavenCacheDir: mavenCache,
 		LogWriter:   logWriter,
 		ExecEnv:     execEnv,
 		BuildID:     buildID,
@@ -486,4 +486,75 @@ func unwrapSecretBlob(s string) (string, error) {
 		return s, nil
 	}
 	return b.V, nil
+}
+
+// ListRemoteBranches 获取远程仓库的分支列表（Sprint X.11）
+func (s *BuildService) ListRemoteBranches(ctx context.Context, appID uint, credID uint) ([]string, error) {
+	// 1. 查询应用
+	var app model.Application
+	if err := s.db.First(&app, appID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.ErrNotFound
+		}
+		return nil, fmt.Errorf("query app: %w", err)
+	}
+
+	if strings.TrimSpace(app.GitURL) == "" {
+		return nil, fmt.Errorf("应用未配置 Git 仓库地址")
+	}
+
+	// 2. 查询凭证（如果指定）
+	var cred *builder.Credential
+	if credID > 0 {
+		var gitCred model.GitCredential
+		if err := s.db.First(&gitCred, credID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, fmt.Errorf("凭证不存在")
+			}
+			return nil, fmt.Errorf("query cred: %w", err)
+		}
+
+		secret, err := unwrapSecretBlob(gitCred.Secret)
+		if err != nil {
+			return nil, fmt.Errorf("unwrap secret: %w", err)
+		}
+
+		cred = &builder.Credential{
+			Type:     gitCred.Type,
+			Username: gitCred.Username,
+			Secret:   secret,
+		}
+	}
+
+	// 3. 解析 git 二进制路径 + 执行环境
+	//    git_path 默认留空（注释「空 = 走 PATH 找」），这里跟 ResolveBuildInputs 对齐：
+	//    空则兜底 /usr/bin/git。获取分支只需要 git，故不强制整个构建环境 valid（不查 mvn/java）。
+	env, err := s.envSvc.Load()
+	if err != nil {
+		return nil, fmt.Errorf("get builder env: %w", err)
+	}
+	gitBin := strings.TrimSpace(env.GitPath)
+	if gitBin == "" {
+		gitBin = "/usr/bin/git"
+	}
+	if !fileExecutable(gitBin) {
+		return nil, apperr.New("BAD_REQUEST",
+			fmt.Sprintf("git 不可执行：%s；请去「⚙ 构建环境」填 git 绝对路径", gitBin), 400)
+	}
+	// 执行环境：构建环境 valid 时注入 PATH/JAVA_HOME 等；否则为 nil，
+	// 由 builder.ListRemoteBranches fallback 到 os.Environ()（含 HOME/PATH/SSH_AUTH_SOCK）。
+	execEnv, _ := s.envSvc.BuildExecEnv()
+
+	branches, err := builder.ListRemoteBranches(ctx, builder.ListBranchesOptions{
+		GitURL:  app.GitURL,
+		GitBin:  gitBin,
+		Cred:    cred,
+		ExecEnv: execEnv,
+		Timeout: 30 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("获取分支列表失败: %w", err)
+	}
+
+	return branches, nil
 }

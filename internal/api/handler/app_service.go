@@ -13,11 +13,12 @@ import (
 // AppServiceHandler AppService（微服务层）CRUD —— Sprint X.4。
 //
 // 路由：
-//   POST   /apps/:id/services           Create
-//   GET    /apps/:id/services           List
-//   GET    /app-services/:id            Get
-//   PUT    /app-services/:id            Update
-//   DELETE /app-services/:id            Delete
+//
+//	POST   /apps/:id/services           Create
+//	GET    /apps/:id/services           List
+//	GET    /app-services/:id            Get
+//	PUT    /app-services/:id            Update
+//	DELETE /app-services/:id            Delete
 type AppServiceHandler struct {
 	svc *service.AppServiceService
 }

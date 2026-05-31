@@ -109,7 +109,7 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
                   label={isEdit ? '私钥 PEM（留空保留旧值）' : '私钥 PEM'}
                   rules={isEdit ? [] : [{ required: true }]}
                 >
-                  <Input.TextArea rows={5} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..." />
+                  <Input.TextArea rows={5} placeholder="粘贴 SSH 私钥内容（PEM/OpenSSH 格式）" />
                 </Form.Item>
                 <Form.Item name="passphrase" label="私钥口令（可选）">
                   <Input.Password />

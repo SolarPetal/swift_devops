@@ -73,9 +73,9 @@ func TestRenderUpstreamConf_ValidationErrors(t *testing.T) {
 // ShellQuote 把含特殊字符的路径包成 shell 单引号安全格式
 func TestShellQuote(t *testing.T) {
 	cases := map[string]string{
-		"/tmp/x":           `'/tmp/x'`,
-		"/tmp/a b":         `'/tmp/a b'`,
-		"/tmp/has'apos":    `'/tmp/has'"'"'apos'`,
+		"/tmp/x":        `'/tmp/x'`,
+		"/tmp/a b":      `'/tmp/a b'`,
+		"/tmp/has'apos": `'/tmp/has'"'"'apos'`,
 	}
 	for in, want := range cases {
 		if got := ShellQuote(in); got != want {

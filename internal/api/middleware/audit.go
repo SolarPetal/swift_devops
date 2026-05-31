@@ -107,7 +107,8 @@ func sanitizePayload(b []byte) string {
 
 // isMultipart 判定 Content-Type 是否为 multipart/form-data。
 // 用 HasPrefix 而不是 == 是为了兼容带 boundary 参数的标准写法：
-//   multipart/form-data; boundary=----WebKitFormBoundary...
+//
+//	multipart/form-data; boundary=----WebKitFormBoundary...
 func isMultipart(ct string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "multipart/form-data")
 }
