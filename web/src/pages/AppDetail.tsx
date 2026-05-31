@@ -14,13 +14,13 @@ import type {
 import { getApp } from '../api/app'
 import { listHosts } from '../api/host'
 import { bindHost, listDeployments, unbindDeployment, updateDeploymentGroup } from '../api/deployment'
-import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact, listBundles } from '../api/artifact'
+import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact, listBundles, cleanupBundleHistory } from '../api/artifact'
 import { cancelPipeline, deployApp, getPipeline, listPipelines, rollbackApp } from '../api/pipeline'
 import { getBuild, getBuildLog, listBuilds, triggerBuild } from '../api/build'
 import { listGitCreds } from '../api/gitcred'
 import { getBuilderEnv } from '../api/builderEnv'
 import { listAppServices, createAppService, updateAppService, deleteAppService } from '../api/appService'
-import { buildWSURL, issueWSTicket, type PipelineWSEvent } from '../api/ws'
+import { buildWSURL, issueWSTicket, type PipelineWSEvent, type BuildWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
 
 // 状态色
@@ -384,7 +384,23 @@ function ArtifactTab({ app }: { app: App }) {
     }
   }
 
-  // 查看构建日志
+  // 查看构建日志（Sprint 5.5：building 中优先 WS 实时推，连不上回退 2s 轮询）
+  const startLogPolling = (id: number) => {
+    const t = setInterval(async () => {
+      try {
+        const [fresh, freshLog] = await Promise.all([getBuild(id), getBuildLog(id)])
+        setLogText(freshLog)
+        setLogTarget(fresh)
+        if (fresh.status !== 'building') {
+          clearInterval(t)
+          ;(window as any).__buildLogTimer = null
+          refreshBuilds()
+          refresh()
+        }
+      } catch {}
+    }, 2000)
+    ;(window as any).__buildLogTimer = t
+  }
   const openLog = async (b: BuildRun) => {
     setLogTarget(b)
     setLogLoading(true)
@@ -392,21 +408,36 @@ function ArtifactTab({ app }: { app: App }) {
     try {
       const txt = await getBuildLog(b.id)
       setLogText(txt)
-      // building 中开个轻量轮询
-      if (b.status === 'building') {
-        const t = setInterval(async () => {
+      if (b.status !== 'building') return // 已结束，全文已拿到，无需订阅
+      // 实时通道：snapshot 覆盖全量 → log 增量 append → status 终态收尾
+      try {
+        const { ticket } = await issueWSTicket(`build:${b.id}`)
+        const ws = new WebSocket(buildWSURL(`/api/v1/ws/builds/${b.id}`, ticket))
+        ;(window as any).__buildLogWS = ws
+        ws.onmessage = (ev) => {
           try {
-            const [fresh, freshLog] = await Promise.all([getBuild(b.id), getBuildLog(b.id)])
-            setLogText(freshLog)
-            if (fresh.status !== 'building') {
-              clearInterval(t)
-              refreshBuilds()
-              refresh()
+            const e = JSON.parse(ev.data) as BuildWSEvent
+            if (e.type === 'snapshot') setLogText(e.log)
+            else if (e.type === 'log') setLogText((prev) => prev + e.chunk)
+            else if (e.type === 'status') {
+              ws.onerror = null // 先摘错误回调，避免主动 close 误触发回退轮询
+              // 补全 builder 之后的尾部日志 + 同步顶部状态标签
+              Promise.all([getBuild(b.id), getBuildLog(b.id)])
+                .then(([fresh, freshLog]) => { setLogTarget(fresh); setLogText(freshLog) })
+                .catch(() => {})
+              refreshBuilds(); refresh()
+              try { ws.close() } catch {}
+              ;(window as any).__buildLogWS = null
             }
           } catch {}
-        }, 2000)
-        // 关闭 Modal 时停止
-        ;(window as any).__buildLogTimer = t
+        }
+        ws.onerror = () => {
+          try { ws.close() } catch {}
+          ;(window as any).__buildLogWS = null
+          startLogPolling(b.id) // 连不上 → 回退轮询
+        }
+      } catch {
+        startLogPolling(b.id)
       }
     } catch (e) {
       message.error(formatError(e))
@@ -414,9 +445,31 @@ function ArtifactTab({ app }: { app: App }) {
   }
   const closeLog = () => {
     const t = (window as any).__buildLogTimer
-    if (t) clearInterval(t)
+    if (t) { clearInterval(t); (window as any).__buildLogTimer = null }
+    const ws = (window as any).__buildLogWS
+    if (ws) { try { ws.onerror = null; ws.onmessage = null; ws.close() } catch {}; (window as any).__buildLogWS = null }
     setLogTarget(null)
     setLogText('')
+  }
+
+  // Sprint 5.7：手动清理历史制品（删旧 jar）。被部署/回滚链引用的版本由后端自动跳过。
+  const handleCleanup = () => {
+    Modal.confirm({
+      title: '清理历史制品？',
+      content: '将保留最近若干个 Bundle（由服务端 max_history 配置，默认 30），删除更早版本及其 jar 文件。正在被部署 / 回滚链引用的版本会自动跳过。此操作不可恢复。',
+      okType: 'danger',
+      okText: '确认清理',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const r = await cleanupBundleHistory(appId)
+          const deleted = r.deleted_bundles?.length ?? 0
+          const skipped = r.skipped_in_use?.length ?? 0
+          message.success(`清理完成：删除 ${deleted} 组，跳过 ${skipped} 组（在用），释放 ${(r.freed_bytes / 1024 / 1024).toFixed(1)} MB`)
+          refresh()
+        } catch (e) { message.error(formatError(e)) }
+      },
+    })
   }
 
   const buildStatusTag = (s: string) => {
@@ -443,6 +496,9 @@ function ArtifactTab({ app }: { app: App }) {
         <Button onClick={openUpload}>↑ 上传文件</Button>
         <Button onClick={() => { form.resetFields(); setOpen(true) }}>+ 注册路径</Button>
         <Button onClick={() => { refresh(); refreshBuilds(); getBuilderEnv().then(setBuilderEnv).catch(() => {}) }}>刷新</Button>
+        {bundles.length > 0 && (
+          <Button danger onClick={handleCleanup}>🧹 清理历史</Button>
+        )}
         {!app.git_url && (
           <Typography.Text type="secondary">应用未配 git_url，构建按钮不可用；先去「应用管理」补上。</Typography.Text>
         )}

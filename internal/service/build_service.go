@@ -82,19 +82,25 @@ type BuildService struct {
 	workspace string // build_workspace 根目录
 	// Sprint X.9：maven_cache_dir 不再从 config 注入；改到 BuilderEnv.MavenLocalRepo（UI 配置）
 	// 触发构建时 envSvc.ResolveBuildInputs() 返回，允许留空走 settings.xml 默认。
+	maxHistory int       // Sprint 5.7：构建成功后保留的历史 Bundle 数（config.Storage.MaxHistory）；<=0 不清理
+	pub        Publisher // Sprint 5.5：构建日志实时推 WS；nil = 只写文件不推
+	dockerEnabled bool   // Sprint 5.6：config.builder.docker_enabled；true 走容器构建
 
 	mu       sync.Mutex
 	busyApps map[uint]struct{} // 同 app 互斥（构建 + 部署可分开管，但构建本身互斥）
 }
 
 func NewBuildService(db *gorm.DB, artSvc *ArtifactService, credSvc *GitCredentialService,
-	envSvc *BuilderEnvService, workspace string) *BuildService {
+	envSvc *BuilderEnvService, workspace string, maxHistory int, dockerEnabled bool) *BuildService {
 	return &BuildService{
 		db: db, artSvc: artSvc, credSvc: credSvc, envSvc: envSvc,
-		workspace: workspace,
-		busyApps:  map[uint]struct{}{},
+		workspace: workspace, maxHistory: maxHistory, dockerEnabled: dockerEnabled,
+		busyApps: map[uint]struct{}{},
 	}
 }
+
+// SetPublisher 注入 WS 推送器（Sprint 5.5）。router 装配时调一次。
+func (s *BuildService) SetPublisher(p Publisher) { s.pub = p }
 
 // Trigger 异步触发一次构建。落库 building 状态后立即返回。
 func (s *BuildService) Trigger(appID uint, actor string, in BuildTriggerInput) (BuildRunView, error) {
@@ -102,9 +108,15 @@ func (s *BuildService) Trigger(appID uint, actor string, in BuildTriggerInput) (
 		return BuildRunView{}, apperr.New("INTERNAL", "storage.build_workspace 未配置", 500)
 	}
 
-	// Sprint 5.4：构建环境必须先在「⚙ 构建环境」配好且检测通过
-	if err := s.envSvc.RequireValid(); err != nil {
-		return BuildRunView{}, err
+	// 构建环境校验：docker 模式查 docker/image/git；本机模式查 java/maven/git 检测通过（Sprint 5.6）
+	if s.dockerEnabled {
+		if _, err := s.envSvc.ResolveDockerInputs(); err != nil {
+			return BuildRunView{}, err
+		}
+	} else {
+		if err := s.envSvc.RequireValid(); err != nil {
+			return BuildRunView{}, err
+		}
 	}
 
 	// 1. 校验 app + git_url
@@ -243,6 +255,13 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 	}
 	defer logFile.Close()
 
+	// Sprint 5.5：构建日志双写——文件 + WS。元信息仍只写文件（瞬间完成，靠 snapshot 补全），
+	// 只有耗时的 git clone + mvn 阶段（builder.Build）走双写，前端实时滚动。
+	var logWriter io.Writer = logFile
+	if s.pub != nil {
+		logWriter = io.MultiWriter(logFile, &hubLogWriter{pub: s.pub, buildID: buildID})
+	}
+
 	fmt.Fprintf(logFile, "=== swift-devops build run #%d ===\n", buildID)
 	fmt.Fprintf(logFile, "app: %s (%d)  git_url: %s  ref: %s  cred_id: %d  mvn_args: %q\n",
 		app.AppCode, app.ID, app.GitURL, defaultRef(in.GitRef), in.CredID, in.MvnArgs)
@@ -251,25 +270,43 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 
-	// 注入构建机环境变量（JAVA_HOME / MAVEN_HOME / PATH 前置 java/mvn/git bin）
-	execEnv, envErr := s.envSvc.BuildExecEnv()
-	if envErr != nil {
-		fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
+	// Sprint 5.6：按 docker_enabled 决定容器构建还是本机构建，注入不同的 builder 输入
+	var (
+		mvnBin, gitBin, mavenCache, dockerImage string
+		execEnv                                 []string
+	)
+	if s.dockerEnabled {
+		di, derr := s.envSvc.ResolveDockerInputs()
+		if derr != nil {
+			fmt.Fprintf(logFile, "\n[BUILD FAILED] docker inputs: %v\n", derr)
+			s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, derr.Error())
+			return
+		}
+		gitBin, dockerImage, mavenCache = di.GitBin, di.DockerImage, di.MavenCacheDir
+		cacheDisplay := mavenCache
+		if cacheDisplay == "" {
+			cacheDisplay = "(空 → 容器内每次重下依赖)"
+		}
+		fmt.Fprintf(logFile, "[docker] image=%s git=%s maven_cache=%s\n", dockerImage, gitBin, cacheDisplay)
+	} else {
+		ee, envErr := s.envSvc.BuildExecEnv()
+		if envErr != nil {
+			fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
+		}
+		execEnv = ee
+		inputs, binsErr := s.envSvc.ResolveBuildInputs()
+		if binsErr != nil {
+			fmt.Fprintf(logFile, "\n[BUILD FAILED] load builder inputs: %v\n", binsErr)
+			s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, binsErr.Error())
+			return
+		}
+		mvnBin, gitBin, mavenCache = inputs.MvnBin, inputs.GitBin, inputs.MavenLocalRepo
+		cacheDisplay := mavenCache
+		if cacheDisplay == "" {
+			cacheDisplay = "(空 → 用 settings.xml 默认)"
+		}
+		fmt.Fprintf(logFile, "[bins] mvn=%s git=%s maven_local_repo=%s\n", mvnBin, gitBin, cacheDisplay)
 	}
-
-	// Sprint X.8 + X.9：拿 mvn/git 绝对路径 + maven_local_repo（覆盖 settings.xml 的 <localRepository>，空 = 用默认）
-	inputs, binsErr := s.envSvc.ResolveBuildInputs()
-	if binsErr != nil {
-		fmt.Fprintf(logFile, "\n[BUILD FAILED] load builder inputs: %v\n", binsErr)
-		s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, binsErr.Error())
-		return
-	}
-	localRepoDisplay := inputs.MavenLocalRepo
-	if localRepoDisplay == "" {
-		localRepoDisplay = "(空 → 用 settings.xml 默认)"
-	}
-	fmt.Fprintf(logFile, "[bins] mvn=%s git=%s maven_local_repo=%s\n",
-		inputs.MvnBin, inputs.GitBin, localRepoDisplay)
 
 	// Sprint X.2：决定走 multi-service 还是单 service 兼容
 	specs, err := s.loadServiceBuildSpecs(app, in)
@@ -286,13 +323,14 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 	plan := builder.Plan{
 		AppCode: app.AppCode, GitURL: app.GitURL, GitRef: defaultRef(in.GitRef),
 		Cred: cred, MvnArgs: in.MvnArgs,
-		MvnBin:    inputs.MvnBin,
-		GitBin:    inputs.GitBin,
-		Workspace: s.workspace, MavenCacheDir: inputs.MavenLocalRepo,
-		LogWriter: io.MultiWriter(logFile),
-		ExecEnv:   execEnv,
-		BuildID:   buildID,
-		Services:  specs,
+		MvnBin:      mvnBin,
+		GitBin:      gitBin,
+		Workspace:   s.workspace, MavenCacheDir: mavenCache,
+		LogWriter:   logWriter,
+		ExecEnv:     execEnv,
+		BuildID:     buildID,
+		Services:    specs,
+		DockerImage: dockerImage,
 	}
 	res, err := builder.Build(ctx, plan)
 	if err != nil {
@@ -340,6 +378,17 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 
 	fmt.Fprintf(logFile, "[BUILD SUCCESS] bundle=#%d items=%d\n", bundleView.ID, len(bundleView.Items))
 	s.finishBuild(buildID, BuildStatusSuccess, res.CommitSHA, legacyArtifactID, bundleView.ID, "")
+
+	// Sprint 5.7：构建成功后滚动清理历史 Bundle（保留最近 maxHistory 个）。
+	// 清理失败不影响构建结果，仅记日志 + 写进 build log 给用户看。
+	if s.maxHistory > 0 {
+		if cr, cerr := s.artSvc.CleanupBundleHistory(app.ID, s.maxHistory); cerr != nil {
+			slog.Warn("post-build cleanup history", "app", app.ID, "err", cerr)
+		} else if len(cr.DeletedBundles) > 0 {
+			fmt.Fprintf(logFile, "[CLEANUP] 保留最近 %d 个 Bundle，清理 %d 个历史版本，释放 %d KB\n",
+				cr.Keep, len(cr.DeletedBundles), cr.FreedBytes>>10)
+		}
+	}
 }
 
 // loadServiceBuildSpecs 决定构建模式：
@@ -400,6 +449,8 @@ func (s *BuildService) finishBuild(buildID uint, status, sha string, artifactID,
 	if err := s.db.Model(&model.BuildRun{}).Where("id = ?", buildID).Updates(updates).Error; err != nil {
 		slog.Error("finish build", "id", buildID, "err", err)
 	}
+	// Sprint 5.5：推一帧终态，前端 WS 据此停订阅 + 刷新（成功/失败/取消都覆盖）
+	s.publishBuildStatus(buildID, status)
 }
 
 func defaultRef(ref string) string {

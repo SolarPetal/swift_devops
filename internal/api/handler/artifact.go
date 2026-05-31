@@ -16,10 +16,11 @@ import (
 type ArtifactHandler struct {
 	svc            *service.ArtifactService
 	maxUploadBytes int64
+	maxHistory     int // Sprint 5.7：手动清理时 keep 的默认值（config.Storage.MaxHistory）
 }
 
-func NewArtifactHandler(svc *service.ArtifactService, maxUploadBytes int64) *ArtifactHandler {
-	return &ArtifactHandler{svc: svc, maxUploadBytes: maxUploadBytes}
+func NewArtifactHandler(svc *service.ArtifactService, maxUploadBytes int64, maxHistory int) *ArtifactHandler {
+	return &ArtifactHandler{svc: svc, maxUploadBytes: maxUploadBytes, maxHistory: maxHistory}
 }
 
 // Create POST /artifacts （按已存在本地路径注册）
@@ -176,4 +177,29 @@ func (h *ArtifactHandler) ListBundles(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+// Cleanup POST /apps/:id/artifacts/cleanup?keep=N
+// 手动滚动清理某 app 的历史 Bundle（Sprint 5.7）。keep 不传走 config.max_history。
+// 被部署/回滚链引用的版本会被自动跳过，结果在响应里返回。
+func (h *ArtifactHandler) Cleanup(c *gin.Context) {
+	appID, ok := parseID(c)
+	if !ok {
+		return
+	}
+	keep := h.maxHistory
+	if s := c.Query("keep"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 {
+			apperr.Respond(c, apperr.New("BAD_REQUEST", "keep 必须是 >=1 的整数", http.StatusBadRequest))
+			return
+		}
+		keep = n
+	}
+	res, err := h.svc.CleanupBundleHistory(appID, keep)
+	if err != nil {
+		apperr.Respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, res)
 }

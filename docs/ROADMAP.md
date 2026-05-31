@@ -1,6 +1,8 @@
 # swift-devops · 开发路线图
 
-> 当前位置：v0.1 骨架（鉴权 + 数据模型 + 编译链路完成）。本文档跟踪到 v1.0 之间的工作。
+> 当前位置：业务主线已贯通——主机 → 应用/微服务 → 构建 → 部署 / 蓝绿 / 回滚 全闭环。
+> 已完成 Sprint 1~5（5.6 Docker 构建除外）+ Sprint X 系列（单 jar → 多 service 架构重构）+ 部署模式可选。
+> 剩余：**Sprint 6 监控告警（整块未动）**、5.6 Docker 构建（已用 BuilderEnv 本机构建替代）、4.5 集成测（可选）。
 
 ## 1. 缺口全景
 
@@ -147,9 +149,20 @@ P0 WS   ─┘                              └─ Docker 构建        └─ �
 - [x] 5.2 pkg/builder：git Clone（token/SSH key/匿名三模式）+ mvn package + 编排
 - [x] 5.3 BuildService + handler：异步触发 + 同 app 互斥 + 自动 IngestLocalJar 落 Artifact；前端制品 Tab 加「⚙ 从仓库构建」+ 历史 + 日志 Modal（轮询）
 - [x] 5.4 构建环境管理：BuilderEnv 单例表（java_home / maven_home / git_path）+ 「检测」按钮跑 -version 拿版本 + builder pkg 注入 ExecEnv 到 mvn 子进程 + 未检测通过时构建按钮 disabled。子项 5.4.7：multi-module 项目（Spring Boot 多 jar）支持 —— App 加 build_module / build_jar_pattern 字段、触发时可临时覆盖、builder 三级 jar 选择（pattern → 唯一 → Spring Boot MANIFEST.MF 探测）
-- [ ] 5.5 WS 实时日志（复用 Sprint 2.4 WS 框架 + 前端 LogTerminal）
-- [ ] 5.6 Docker 容器构建（隔离环境，避免本机依赖 git/mvn/JDK）
-- [ ] 5.7 制品历史清理（`max_history` 滚动删旧版 + 对应文件）
+- [x] 5.5 构建日志 WS 实时推送：BuildService 注入 Publisher + hubLogWriter 文件/WS 双写；`GET /ws/builds/:id` 复用 pipeline 的 Hub/Ticket；前端 building 中走 WS append，连不上回退 2s 轮询
+- [ ] 5.6 Docker 容器构建（隔离环境）——已用 Sprint 5.4 BuilderEnv（本机 git/mvn/JDK + UI 配置 + 检测）替代；按需再做
+- [x] 5.7 制品历史清理：`CleanupBundleHistory` 按 `max_history` 滚动删旧 Bundle + jar 文件；构建成功后自动触发 + 手动「🧹 清理历史」按钮；三道安全闸（Deployment/PipelineRun 引用保护 + keep 兜底 + artifactDir 路径白名单）；5 个单测覆盖
+
+### Sprint X · 多 service 架构重构（单 jar → 业务系统 × 微服务）✅ 已完成
+> ROADMAP 早期未规划本系列；随 nacos 多 service 真实需求演进，补记于此（修复文档漂移）。
+- [x] X.1 数据模型分层：`Application` + `AppService`（per-runtime 字段下沉）+ `ArtifactBundle` 版本一致性；`cleanup-apps` 子命令 + DROP 旧唯一索引
+- [x] X.2 多 service 构建：`ArtifactBundle` + `ArtifactItem` 整组入库（一次构建 N 个 jar，`git_commit_sha` 锚定一致性）
+- [x] X.3 Strategy 重构：Wave 调度（`StartupOrder` 分波并发）+ service-aware AppSpec
+- [x] X.4 `AppService` CRUD + 自动 `default` 服务兜底 + 前端 AppDetail 微服务管理 tab
+- [x] X.6 Bundle 部署链：多 service 各自用对应 `ArtifactItem` 部署
+- [x] X.7 整组 Bundle 回滚：per-dep `ArtifactItem` 链路 + 兼容 fallback
+- [x] X.8 / X.9 builder 用 `BuilderEnv` 绝对路径（杜绝 WSL 翻 Windows 同名程序）+ maven 本地仓库改 UI 配置
+- [x] X.10 部署模式可选：`Runtime` 抽象（systemd / nohup）+ 前后端 `deploy_mode` 下拉
 
 ### Sprint 6 · 监控告警（约 1 周）
 - [ ] 系统采样

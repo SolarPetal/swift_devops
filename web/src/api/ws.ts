@@ -25,3 +25,12 @@ export type PipelineWSEvent =
   | { type: 'snapshot'; run_id: number; status: PipelineRun['status']; snapshot: RunSnapshot; ts: string }
   | { type: 'status'; run_id: number; status: PipelineRun['status']; ts: string }
   | { type: 'step'; run_id: number; step: StepResult; ts: string }
+
+// 构建日志 WS 事件（与 service.BuildEvent 对齐，Sprint 5.5）
+//   - snapshot：连上首帧，全量日志 + 当前状态
+//   - log：增量日志块，前端 append
+//   - status：构建终态（success/failed/cancelled）
+export type BuildWSEvent =
+  | { type: 'snapshot'; build_id: number; log: string; status: string; ts: string }
+  | { type: 'log'; build_id: number; chunk: string; ts: string }
+  | { type: 'status'; build_id: number; status: string; ts: string }

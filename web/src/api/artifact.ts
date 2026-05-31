@@ -54,3 +54,21 @@ export async function listBundles(appId?: number): Promise<ArtifactBundle[]> {
   })
   return r.data.items ?? []
 }
+
+// Sprint 5.7：滚动清理历史 Bundle（删旧 jar 文件）。
+// keep 不传则用服务端 storage.max_history；被部署/回滚链引用的版本会被自动跳过。
+export type CleanupResult = {
+  app_id: number
+  keep: number
+  examined: number
+  deleted_bundles: number[] | null
+  skipped_in_use: number[] | null
+  freed_bytes: number
+}
+
+export async function cleanupBundleHistory(appId: number, keep?: number): Promise<CleanupResult> {
+  const r = await api.post<CleanupResult>(`/apps/${appId}/artifacts/cleanup`, null, {
+    params: keep ? { keep } : undefined,
+  })
+  return r.data
+}

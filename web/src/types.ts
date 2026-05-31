@@ -93,9 +93,11 @@ export type BuilderEnv = {
   maven_home: string
   git_path: string
   maven_local_repo: string  // Sprint X.9：空 = 用 mvn settings.xml 默认 <localRepository>
+  docker_image: string      // Sprint X.11：Docker 构建镜像（仅 docker_enabled=true 时生效）
   java_version: string
   maven_version: string
   git_version: string
+  docker_version: string    // Sprint X.11：docker version 输出（docker_enabled=true 时检测）
   detected_at?: string
   valid: boolean
   detect_message: string
@@ -106,6 +108,7 @@ export type BuilderEnvInput = {
   maven_home: string
   git_path?: string
   maven_local_repo?: string  // Sprint X.9
+  docker_image?: string      // Sprint X.11
 }
 
 export type App = {

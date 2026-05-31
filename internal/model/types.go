@@ -279,9 +279,13 @@ type BuilderEnv struct {
 	// 空 = 不传 -Dmaven.repo.local，让 mvn 自己用 settings.xml 默认（推荐）。
 	// 非空必须绝对路径，触发构建时作为 -Dmaven.repo.local=<dir> 传给 mvn。
 	MavenLocalRepo string    `gorm:"size:255" json:"maven_local_repo"`
+	// Sprint 5.6：Docker 构建镜像（如 maven:3.9-eclipse-temurin-17）。
+	// 仅 config.builder.docker_enabled=true 时生效；docker 模式下为空会拒绝触发构建。
+	DockerImage   string     `gorm:"size:255" json:"docker_image"`
 	JavaVersion   string     `gorm:"size:100" json:"java_version"`
 	MavenVersion  string     `gorm:"size:100" json:"maven_version"`
 	GitVersion    string     `gorm:"size:100" json:"git_version"`
+	DockerVersion string     `gorm:"size:100" json:"docker_version"` // Sprint 5.6：detect 回填 docker --version
 	DetectedAt    *time.Time `json:"detected_at"`
 	Valid         bool       `json:"valid"`  // 上次检测是否全部命中
 	DetectMessage string     `gorm:"type:text" json:"detect_message"`

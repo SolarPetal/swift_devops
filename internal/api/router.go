@@ -44,9 +44,10 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	artSvc := service.NewArtifactService(db, cfg.Storage.ArtifactDir, int64(cfg.Storage.MaxUploadMB)<<20)
 	gitCredSvc := service.NewGitCredentialService(db, aes)
 	builderEnvSvc := service.NewBuilderEnvService(db)
-	buildSvc := service.NewBuildService(db, artSvc, gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace)
+	buildSvc := service.NewBuildService(db, artSvc, gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace, cfg.Storage.MaxHistory, cfg.Builder.DockerEnabled)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
-	pipeSvc.SetPublisher(wsHub) // 异步推送 step/status 到 hub
+	pipeSvc.SetPublisher(wsHub)  // 异步推送 step/status 到 hub
+	buildSvc.SetPublisher(wsHub) // Sprint 5.5：构建日志实时推 hub
 
 	// --- 受保护 API（JWT + 审计）---
 	v1 := r.Group("/api/v1")
@@ -93,7 +94,7 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 
 		// 制品（注册已有路径 + multipart 上传）
 		maxUp := int64(cfg.Storage.MaxUploadMB) << 20
-		artH := handler.NewArtifactHandler(artSvc, maxUp)
+		artH := handler.NewArtifactHandler(artSvc, maxUp, cfg.Storage.MaxHistory)
 		v1.POST("/artifacts", artH.Create)
 		v1.POST("/artifacts/upload", artH.Upload)
 		v1.GET("/artifacts", artH.List)
@@ -101,6 +102,8 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.DELETE("/artifacts/:id", artH.Delete)
 		// Sprint X.6：多 service 制品组（Bundle）
 		v1.GET("/bundles", artH.ListBundles)
+		// Sprint 5.7：手动滚动清理历史 Bundle（自动清理在构建成功后触发）
+		v1.POST("/apps/:id/artifacts/cleanup", artH.Cleanup)
 
 		// 流水线（Sprint 2.4 single / Sprint 3.1 Cancel / 3.2 rolling / 3.3 rollback）
 		pipeH := handler.NewPipelineHandler(pipeSvc)
@@ -139,6 +142,9 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	{
 		pipeWSH := handler.NewPipelineWSHandler(pipeSvc, wsTickets, wsHub, wsUpgrader)
 		wsGroup.GET("/pipelines/:id", pipeWSH.Stream)
+		// 构建日志流（Sprint 5.5）：复用同一 hub / ticket / upgrader
+		buildWSH := handler.NewBuildWSHandler(buildSvc, wsTickets, wsHub, wsUpgrader)
+		wsGroup.GET("/builds/:id", buildWSH.Stream)
 	}
 
 	// SPA 静态资源 + history fallback

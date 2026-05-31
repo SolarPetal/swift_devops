@@ -22,6 +22,7 @@ export default function BuilderEnvPage() {
         maven_home: e.maven_home,
         git_path: e.git_path,
         maven_local_repo: e.maven_local_repo,
+        docker_image: e.docker_image,
       })
     } catch (e) { message.error(formatError(e)) }
     finally { setLoading(false) }
@@ -115,6 +116,13 @@ export default function BuilderEnvPage() {
         >
           <Input placeholder="留空 = 用 settings.xml 默认；或填 /home/wwkj/maven/maven_rep 之类的绝对路径" />
         </Form.Item>
+        <Form.Item
+          name="docker_image"
+          label="Docker 构建镜像（可选）"
+          tooltip="仅 config.yaml 的 builder.docker_enabled=true 时生效。填 Docker Hub 镜像名如 maven:3.9-eclipse-temurin-17。检测时会验证 docker 可达 + 镜像存在。"
+        >
+          <Input placeholder="如：maven:3.9-eclipse-temurin-17（docker_enabled=false 时此项无效）" />
+        </Form.Item>
         <Form.Item>
           <Space>
             <Button type="primary" onClick={save} loading={saving}>保存</Button>
@@ -134,6 +142,8 @@ export default function BuilderEnvPage() {
             {env.java_version && <Descriptions.Item label="Java"><code>{env.java_version}</code></Descriptions.Item>}
             {env.maven_version && <Descriptions.Item label="Maven"><code>{env.maven_version}</code></Descriptions.Item>}
             {env.git_version && <Descriptions.Item label="Git"><code>{env.git_version}</code></Descriptions.Item>}
+            {env.docker_version && <Descriptions.Item label="Docker"><code>{env.docker_version}</code></Descriptions.Item>}
+            {env.docker_image && <Descriptions.Item label="构建镜像"><code>{env.docker_image}</code></Descriptions.Item>}
             <Descriptions.Item label="Maven 本地仓库">
               {env.maven_local_repo
                 ? <code>{env.maven_local_repo}</code>

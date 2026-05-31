@@ -22,6 +22,7 @@ type BuilderEnvInput struct {
 	MavenHome      string `json:"maven_home"`
 	GitPath        string `json:"git_path,omitempty"`
 	MavenLocalRepo string `json:"maven_local_repo,omitempty"` // Sprint X.9：空 = 用 settings.xml 默认
+	DockerImage    string `json:"docker_image,omitempty"`     // Sprint 5.6：docker 构建镜像
 }
 
 // BuilderEnvView 响应视图。
@@ -30,9 +31,11 @@ type BuilderEnvView struct {
 	MavenHome      string `json:"maven_home"`
 	GitPath        string `json:"git_path"`
 	MavenLocalRepo string `json:"maven_local_repo"`
+	DockerImage    string `json:"docker_image"`
 	JavaVersion    string `json:"java_version"`
 	MavenVersion   string `json:"maven_version"`
 	GitVersion     string `json:"git_version"`
+	DockerVersion  string `json:"docker_version"`
 	DetectedAt     string `json:"detected_at,omitempty"`
 	Valid          bool   `json:"valid"`
 	DetectMessage  string `json:"detect_message"`
@@ -41,8 +44,9 @@ type BuilderEnvView struct {
 func toBuilderEnvView(e *model.BuilderEnv) BuilderEnvView {
 	v := BuilderEnvView{
 		JavaHome: e.JavaHome, MavenHome: e.MavenHome, GitPath: e.GitPath,
-		MavenLocalRepo: e.MavenLocalRepo,
+		MavenLocalRepo: e.MavenLocalRepo, DockerImage: e.DockerImage,
 		JavaVersion:    e.JavaVersion, MavenVersion: e.MavenVersion, GitVersion: e.GitVersion,
+		DockerVersion:  e.DockerVersion,
 		Valid: e.Valid, DetectMessage: e.DetectMessage,
 	}
 	if e.DetectedAt != nil {
@@ -108,6 +112,7 @@ func (s *BuilderEnvService) Update(in BuilderEnvInput) (BuilderEnvView, error) {
 	e.MavenHome = normalizePath(in.MavenHome)
 	e.GitPath = normalizePath(in.GitPath)
 	e.MavenLocalRepo = normalizePath(in.MavenLocalRepo)
+	e.DockerImage = strings.TrimSpace(in.DockerImage) // 镜像名（如 maven:3.9-...），不做路径校验
 	// 改完路径要重新 detect，先把 valid 清掉
 	e.Valid = false
 	e.DetectMessage = "已更新配置，请点「检测」按钮验证"
@@ -207,6 +212,16 @@ func (s *BuilderEnvService) Detect() (BuilderEnvView, error) {
 		}
 	}
 
+	// 4. Sprint 5.6：附带探一下 docker（仅记录版本，不影响本机模式的 valid——
+	//    没装 docker 的本机构建用户照样 valid）。
+	if out, derr := exec.CommandContext(ctx, "docker", "--version").CombinedOutput(); derr == nil {
+		e.DockerVersion = firstLine(string(out))
+		msgs = append(msgs, "✓ docker: "+e.DockerVersion)
+	} else {
+		e.DockerVersion = ""
+		msgs = append(msgs, "○ docker 不可用（仅 docker 构建模式需要）")
+	}
+
 	now := time.Now()
 	e.DetectedAt = &now
 	e.Valid = allOK
@@ -299,6 +314,54 @@ func (s *BuilderEnvService) ResolveBuildInputs() (BuildPlanInputs, error) {
 		MvnBin:         mvnBin,
 		GitBin:         gitBin,
 		MavenLocalRepo: strings.TrimSpace(e.MavenLocalRepo), // 允许空
+	}, nil
+}
+
+// DockerBuildInputs docker 构建模式注入 builder.Plan 的输入（Sprint 5.6）。
+type DockerBuildInputs struct {
+	GitBin        string // 宿主机 git（clone 仍在宿主机）
+	DockerImage   string // 构建镜像
+	MavenCacheDir string // 宿主机 .m2，挂载进容器；空 = 容器内每次重下
+}
+
+// ResolveDockerInputs docker 构建模式所需输入（Sprint 5.6）。
+// 与 ResolveBuildInputs 不同：不要求本机 java/maven（容器自带），但要求：
+//   - docker_image 已配
+//   - git 可用（clone 仍在宿主机）
+//   - docker daemon 可达（实时探一下，避免触发后才在 build log 里失败）
+func (s *BuilderEnvService) ResolveDockerInputs() (DockerBuildInputs, error) {
+	e, err := s.Load()
+	if err != nil {
+		return DockerBuildInputs{}, err
+	}
+	image := strings.TrimSpace(e.DockerImage)
+	if image == "" {
+		return DockerBuildInputs{}, apperr.New("BAD_REQUEST",
+			"docker 构建已开启（docker_enabled），但「构建环境」未配 docker_image，请填镜像如 maven:3.9-eclipse-temurin-17", 400)
+	}
+	gitBin := strings.TrimSpace(e.GitPath)
+	if gitBin == "" {
+		if fileExecutable("/usr/bin/git") {
+			gitBin = "/usr/bin/git"
+		} else {
+			return DockerBuildInputs{}, apperr.New("BAD_REQUEST",
+				"git_path 未配且 /usr/bin/git 不存在；请在「构建环境」填 git 绝对路径", 400)
+		}
+	}
+	if !fileExecutable(gitBin) {
+		return DockerBuildInputs{}, apperr.New("BAD_REQUEST",
+			fmt.Sprintf("git_path 不可执行：%s", gitBin), 400)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Run(); err != nil {
+		return DockerBuildInputs{}, apperr.New("BAD_REQUEST",
+			"docker 不可用：请确认宿主机已装 docker 且 swift-devops 进程有权限（在 docker 组或 root）", 400)
+	}
+	return DockerBuildInputs{
+		GitBin:        gitBin,
+		DockerImage:   image,
+		MavenCacheDir: strings.TrimSpace(e.MavenLocalRepo),
 	}, nil
 }
 

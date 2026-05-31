@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -631,4 +632,154 @@ func (s *ArtifactService) ListBundles(appID uint) ([]ArtifactBundleView, error) 
 		out[i] = toBundleView(&bs[i], byBundle[bs[i].ID])
 	}
 	return out, nil
+}
+
+// =============================================================================
+// Sprint 5.7：制品历史清理（max_history 滚动删旧 Bundle + 落盘文件）
+// =============================================================================
+
+// CleanupResult 一次清理的结果汇总（手动接口返回前端展示）。
+type CleanupResult struct {
+	AppID          uint   `json:"app_id"`
+	Keep           int    `json:"keep"`            // 实际保留的最近 N 个
+	Examined       int    `json:"examined"`        // 该 app 的 Bundle 总数
+	DeletedBundles []uint `json:"deleted_bundles"` // 已删除的 Bundle id
+	SkippedInUse   []uint `json:"skipped_in_use"`  // 因被部署/回滚链引用（或删文件失败）而跳过的 Bundle id
+	FreedBytes     int64  `json:"freed_bytes"`     // 释放的磁盘字节数
+}
+
+// CleanupBundleHistory 按 keep 滚动清理某 app 的历史 ArtifactBundle（Sprint 5.7）。
+//
+// 三道安全闸：
+//  1. keep < 1 兜底成 1，绝不把一个 app 的制品清空；
+//  2. 候选中"仍被引用"的一律跳过，绝不破坏回滚链：
+//     · PipelineRun.bundle_id / previous_bundle_id 指向它
+//     · Deployment.current_artifact_item_id / previous_artifact_item_id 指向它名下任一 item
+//  3. 删文件严格限制在 artifactDir 之下；文件没删干净就不删 DB（不留"DB 无记录但文件还在"的孤儿）。
+//
+// 破坏性：会删除磁盘上的 jar 文件。调用方（构建成功后自动 / 手动接口）已确认语义。
+func (s *ArtifactService) CleanupBundleHistory(appID uint, keep int) (CleanupResult, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	res := CleanupResult{AppID: appID, Keep: keep}
+
+	var bundles []model.ArtifactBundle
+	if err := s.db.Where("app_id = ?", appID).Order("id DESC").Find(&bundles).Error; err != nil {
+		return res, apperr.Wrap(err, "INTERNAL", "list bundles for cleanup", 500)
+	}
+	res.Examined = len(bundles)
+	if len(bundles) <= keep {
+		return res, nil // 没超量，啥也不删
+	}
+
+	// 保留最近 keep 个（id DESC 的前 keep 个），其余为删除候选
+	for i := keep; i < len(bundles); i++ {
+		b := bundles[i]
+		inUse, err := s.bundleInUse(b.ID)
+		if err != nil {
+			return res, err
+		}
+		if inUse {
+			res.SkippedInUse = append(res.SkippedInUse, b.ID)
+			continue
+		}
+		freed, derr := s.deleteBundleFiles(b.ID)
+		if derr != nil {
+			// 文件没删干净就不删 DB——避免成"DB 无记录但磁盘还在"的孤儿；跳过，下次再清。
+			slog.Warn("cleanup: delete bundle files failed, skip", "bundle", b.ID, "err", derr)
+			res.SkippedInUse = append(res.SkippedInUse, b.ID)
+			continue
+		}
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Where("bundle_id = ?", b.ID).Delete(&model.ArtifactItem{}).Error; err != nil {
+				return err
+			}
+			return tx.Delete(&model.ArtifactBundle{}, b.ID).Error
+		}); err != nil {
+			slog.Error("cleanup: delete bundle row", "bundle", b.ID, "err", err)
+			return res, apperr.Wrap(err, "INTERNAL", "delete bundle row", 500)
+		}
+		res.DeletedBundles = append(res.DeletedBundles, b.ID)
+		res.FreedBytes += freed
+	}
+	if len(res.DeletedBundles) > 0 {
+		slog.Info("cleanup bundle history", "app", appID, "keep", keep,
+			"deleted", len(res.DeletedBundles), "skipped", len(res.SkippedInUse),
+			"freed_bytes", res.FreedBytes)
+	}
+	return res, nil
+}
+
+// bundleInUse 判断一个 Bundle 是否仍被部署 / 回滚链引用（被引用的不可删）。
+func (s *ArtifactService) bundleInUse(bundleID uint) (bool, error) {
+	var n int64
+	// 1. PipelineRun 直接引用（当前发布 / 整组回滚指针）
+	if err := s.db.Model(&model.PipelineRun{}).
+		Where("bundle_id = ? OR previous_bundle_id = ?", bundleID, bundleID).
+		Count(&n).Error; err != nil {
+		return false, apperr.Wrap(err, "INTERNAL", "count pipeline runs", 500)
+	}
+	if n > 0 {
+		return true, nil
+	}
+	// 2. Deployment 引用了该 Bundle 名下任一 item
+	var itemIDs []uint
+	if err := s.db.Model(&model.ArtifactItem{}).
+		Where("bundle_id = ?", bundleID).Pluck("id", &itemIDs).Error; err != nil {
+		return false, apperr.Wrap(err, "INTERNAL", "pluck item ids", 500)
+	}
+	if len(itemIDs) == 0 {
+		return false, nil
+	}
+	if err := s.db.Model(&model.Deployment{}).
+		Where("current_artifact_item_id IN ? OR previous_artifact_item_id IN ?", itemIDs, itemIDs).
+		Count(&n).Error; err != nil {
+		return false, apperr.Wrap(err, "INTERNAL", "count deployments", 500)
+	}
+	return n > 0, nil
+}
+
+// deleteBundleFiles 删除一个 Bundle 名下所有 item 的落盘文件，返回释放字节数。
+// 严格限制：只删 artifactDir 之下的文件；删完顺手清空（仅空目录）其所在版本目录。
+func (s *ArtifactService) deleteBundleFiles(bundleID uint) (int64, error) {
+	var items []model.ArtifactItem
+	if err := s.db.Where("bundle_id = ?", bundleID).Find(&items).Error; err != nil {
+		return 0, apperr.Wrap(err, "INTERNAL", "load items for delete", 500)
+	}
+	var freed int64
+	dirs := map[string]struct{}{}
+	for _, it := range items {
+		if !s.isUnderArtifactDir(it.FilePath) {
+			slog.Warn("cleanup: skip file outside artifactDir", "path", it.FilePath, "bundle", bundleID)
+			continue
+		}
+		if fi, err := os.Stat(it.FilePath); err == nil {
+			freed += fi.Size()
+		}
+		if err := os.Remove(it.FilePath); err != nil && !os.IsNotExist(err) {
+			return freed, fmt.Errorf("remove %s: %w", it.FilePath, err)
+		}
+		dirs[filepath.Dir(it.FilePath)] = struct{}{}
+	}
+	// 清空 Bundle 的版本目录（非空 / 非法会失败，忽略即可；绝不删 artifactDir 本身）
+	for d := range dirs {
+		if d != s.artifactDir && s.isUnderArtifactDir(d) {
+			_ = os.Remove(d)
+		}
+	}
+	return freed, nil
+}
+
+// isUnderArtifactDir 判断绝对路径是否落在 artifactDir 之下（删除前的安全闸）。
+func (s *ArtifactService) isUnderArtifactDir(p string) bool {
+	if s.artifactDir == "" || !filepath.IsAbs(p) {
+		return false
+	}
+	abs := filepath.Clean(p)
+	rel, err := filepath.Rel(s.artifactDir, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }

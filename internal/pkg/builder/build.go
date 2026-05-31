@@ -41,6 +41,11 @@ type Plan struct {
 	// 同时所有 service 的 BuildModule 合并成 mvn -pl <m1,m2,...> -am（缩窄编译范围）。
 	// 空时退化为旧的单 service 模式。
 	Services []ServiceBuildSpec
+
+	// Sprint 5.6：Docker 容器构建。DockerImage 非空 → mvn 在容器内跑
+	// （clone 仍在宿主机，不需要 MvnBin；容器自带 java/mvn）。
+	DockerImage string
+	DockerBin   string // docker 可执行；空 = "docker"
 }
 
 // Result 一次构建的产物。
@@ -67,8 +72,8 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 	if strings.TrimSpace(plan.GitURL) == "" {
 		return Result{}, errors.New("git url is empty")
 	}
-	if strings.TrimSpace(plan.MvnBin) == "" {
-		return Result{}, errors.New("mvn_bin is empty (Sprint X.8 要求注入绝对路径)")
+	if plan.DockerImage == "" && strings.TrimSpace(plan.MvnBin) == "" {
+		return Result{}, errors.New("mvn_bin is empty (Sprint X.8 要求注入绝对路径；docker 模式改配 docker_image)")
 	}
 	if strings.TrimSpace(plan.GitBin) == "" {
 		return Result{}, errors.New("git_bin is empty (Sprint X.8 要求注入绝对路径)")
@@ -105,21 +110,9 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 	// 3. 多 service 模式：聚合 -pl 列表，跑一次 mvn，分别按 pattern 提取 jar
 	if len(plan.Services) > 0 {
 		mvnArgs := mergeMultiModuleArgs(plan.MvnArgs, plan.Services)
-		mvn, err := MvnPackage(ctx, MavenOptions{
-			WorkDir:       subDir,
-			MvnBin:        plan.MvnBin,
-			ExtraArgs:     mvnArgs,
-			MavenCacheDir: plan.MavenCacheDir,
-			LogWriter:     plan.LogWriter,
-			Timeout:       plan.BuildTimeout,
-			ExecEnv:       plan.ExecEnv,
-			// MultiService 模式下不让 maven.go 做单 jar 收敛，所有 service 自己 pattern
-			SkipJarScan: true,
-		})
-		if err != nil {
-			return res, fmt.Errorf("maven: %w", err)
+		if err := runMvn(ctx, plan, subDir, mvnArgs); err != nil {
+			return res, err
 		}
-		_ = mvn // SkipJarScan 时 JarPath 为空，不用
 		res.JarPaths = map[string]string{}
 		for _, spec := range plan.Services {
 			jar, ferr := findArtifactJar(subDir, spec.JarPattern)
@@ -146,22 +139,49 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 	}
 
 	// 4. 单 service 模式（旧行为）
-	mvn, err := MvnPackage(ctx, MavenOptions{
-		WorkDir:       subDir,
+	if err := runMvn(ctx, plan, subDir, plan.MvnArgs); err != nil {
+		return res, err
+	}
+	jar, err := findArtifactJar(subDir, plan.JarPattern)
+	if err != nil {
+		return res, fmt.Errorf("maven: %w", err)
+	}
+	if plan.LogWriter != nil {
+		fmt.Fprintf(plan.LogWriter, "[mvn] artifact = %s\n", jar)
+	}
+	res.JarPath = jar
+	res.JarPaths = map[string]string{"default": jar}
+	return res, nil
+}
+
+// runMvn 按 plan.DockerImage 决定容器构建还是本机构建（jar 提取统一由调用方做）。
+//   - docker 模式：mvn 在容器内跑，不需要 MvnBin/ExecEnv（容器自带 java/mvn）
+//   - 本机模式：exec 宿主机 mvn，SkipJarScan（jar 由调用方按 pattern 提取）
+func runMvn(ctx context.Context, plan Plan, workDir, mvnArgs string) error {
+	if plan.DockerImage != "" {
+		return MvnPackageDocker(ctx, DockerMavenOptions{
+			WorkDir:       workDir,
+			Image:         plan.DockerImage,
+			DockerBin:     plan.DockerBin,
+			ExtraArgs:     mvnArgs,
+			MavenCacheDir: plan.MavenCacheDir,
+			LogWriter:     plan.LogWriter,
+			Timeout:       plan.BuildTimeout,
+		})
+	}
+	if _, err := MvnPackage(ctx, MavenOptions{
+		WorkDir:       workDir,
 		MvnBin:        plan.MvnBin,
-		ExtraArgs:     plan.MvnArgs,
+		ExtraArgs:     mvnArgs,
 		MavenCacheDir: plan.MavenCacheDir,
 		LogWriter:     plan.LogWriter,
 		Timeout:       plan.BuildTimeout,
 		ExecEnv:       plan.ExecEnv,
-		JarPattern:    plan.JarPattern,
-	})
-	if err != nil {
-		return res, fmt.Errorf("maven: %w", err)
+		SkipJarScan:   true,
+	}); err != nil {
+		return fmt.Errorf("maven: %w", err)
 	}
-	res.JarPath = mvn.JarPath
-	res.JarPaths = map[string]string{"default": mvn.JarPath}
-	return res, nil
+	return nil
 }
 
 // mergeMultiModuleArgs 把 Services 里所有非空的 BuildModule 合并为 mvn -pl <m1,m2,...> -am。
