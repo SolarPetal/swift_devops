@@ -18,17 +18,19 @@ import (
 
 // AppInput 应用创建/更新入参
 type AppInput struct {
-	AppCode        string `json:"app_code" binding:"required"`
-	Name           string `json:"name" binding:"required"`
-	AppType        string `json:"app_type,omitempty"`
-	GitURL         string `json:"git_url,omitempty"`
-	GitCredID      string `json:"git_cred_id,omitempty"`
-	DeployPath     string `json:"deploy_path" binding:"required"`
-	Port           int    `json:"port" binding:"required,min=1,max=65535"`
-	HealthCheckURL string `json:"health_check_url,omitempty"`
-	JvmArgs        string `json:"jvm_args,omitempty"`
-	EnvVars        string `json:"env_vars,omitempty"`     // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
-	SystemdUser    string `json:"systemd_user,omitempty"` // 留空 = 用启动 sshd 的账号（一般 root）
+	AppCode        string   `json:"app_code" binding:"required"`
+	Name           string   `json:"name" binding:"required"`
+	AppType        string   `json:"app_type,omitempty"`
+	GitURL         string   `json:"git_url,omitempty"`
+	GitCredID      string   `json:"git_cred_id,omitempty"`
+	GitRef         string   `json:"git_ref,omitempty"`
+	GitRefs        []string `json:"git_refs,omitempty"`
+	DeployPath     string   `json:"deploy_path" binding:"required"`
+	Port           int      `json:"port" binding:"required,min=1,max=65535"`
+	HealthCheckURL string   `json:"health_check_url,omitempty"`
+	JvmArgs        string   `json:"jvm_args,omitempty"`
+	EnvVars        string   `json:"env_vars,omitempty"`     // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
+	SystemdUser    string   `json:"systemd_user,omitempty"` // 留空 = 用启动 sshd 的账号（一般 root）
 	// JavaPath 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
 	// 适用：同主机跑多 JDK 版本（jdk8 / jdk17）。
 	JavaPath string `json:"java_path,omitempty"`
@@ -48,33 +50,38 @@ type AppInput struct {
 
 // AppView 应用响应
 type AppView struct {
-	ID                uint   `json:"id"`
-	AppCode           string `json:"app_code"`
-	Name              string `json:"name"`
-	AppType           string `json:"app_type"`
-	GitURL            string `json:"git_url"`
-	GitCredID         string `json:"git_cred_id"`
-	DeployPath        string `json:"deploy_path"`
-	Port              int    `json:"port"`
-	HealthCheckURL    string `json:"health_check_url"`
-	JvmArgs           string `json:"jvm_args"`
-	EnvVars           string `json:"env_vars"`
-	SystemdUser       string `json:"systemd_user"`
-	JavaPath          string `json:"java_path"`
-	BuildModule       string `json:"build_module"`
-	BuildJarPattern   string `json:"build_jar_pattern"`
-	NginxHostID       uint   `json:"nginx_host_id"`
-	NginxUpstreamName string `json:"nginx_upstream_name"`
-	ActiveGroup       string `json:"active_group"`
-	DeployMode        string `json:"deploy_mode"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	ID                uint     `json:"id"`
+	AppCode           string   `json:"app_code"`
+	Name              string   `json:"name"`
+	AppType           string   `json:"app_type"`
+	GitURL            string   `json:"git_url"`
+	GitCredID         string   `json:"git_cred_id"`
+	GitRef            string   `json:"git_ref"`
+	GitRefs           []string `json:"git_refs"`
+	DeployPath        string   `json:"deploy_path"`
+	Port              int      `json:"port"`
+	HealthCheckURL    string   `json:"health_check_url"`
+	JvmArgs           string   `json:"jvm_args"`
+	EnvVars           string   `json:"env_vars"`
+	SystemdUser       string   `json:"systemd_user"`
+	JavaPath          string   `json:"java_path"`
+	BuildModule       string   `json:"build_module"`
+	BuildJarPattern   string   `json:"build_jar_pattern"`
+	NginxHostID       uint     `json:"nginx_host_id"`
+	NginxUpstreamName string   `json:"nginx_upstream_name"`
+	ActiveGroup       string   `json:"active_group"`
+	DeployMode        string   `json:"deploy_mode"`
+	CreatedAt         string   `json:"created_at"`
+	UpdatedAt         string   `json:"updated_at"`
 }
 
 func toAppView(a *model.Application) AppView {
+	refs := normalizeGitRefs(a.GitRef, parseGitRefs(a.GitRefs))
 	return AppView{
 		ID: a.ID, AppCode: a.AppCode, Name: a.Name,
 		AppType: a.AppType, GitURL: a.GitURL, GitCredID: a.GitCredID,
+		GitRef:     refs[0],
+		GitRefs:    refs,
 		DeployPath: a.DeployPath, Port: a.Port,
 		HealthCheckURL: a.HealthCheckURL, JvmArgs: a.JvmArgs, EnvVars: a.EnvVars,
 		SystemdUser:       a.SystemdUser,
@@ -117,9 +124,10 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 	if err := validateAppInput(in); err != nil {
 		return AppView{}, err
 	}
+	refs := normalizeGitRefs(in.GitRef, in.GitRefs)
 	a := &model.Application{
 		AppCode: in.AppCode, Name: in.Name, AppType: defaultAppType(in.AppType),
-		GitURL: in.GitURL, GitCredID: in.GitCredID,
+		GitURL: in.GitURL, GitCredID: in.GitCredID, GitRef: refs[0], GitRefs: marshalGitRefs(refs),
 		DeployPath: in.DeployPath, Port: in.Port,
 		HealthCheckURL: defaultHealthURL(in.HealthCheckURL),
 		JvmArgs:        in.JvmArgs, EnvVars: in.EnvVars,
@@ -184,6 +192,9 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.AppType = defaultAppType(in.AppType)
 	a.GitURL = in.GitURL
 	a.GitCredID = in.GitCredID
+	refs := normalizeGitRefs(in.GitRef, in.GitRefs)
+	a.GitRef = refs[0]
+	a.GitRefs = marshalGitRefs(refs)
 	a.DeployPath = in.DeployPath
 	a.Port = in.Port
 	a.HealthCheckURL = defaultHealthURL(in.HealthCheckURL)
@@ -295,6 +306,54 @@ func defaultHealthURL(u string) string {
 		return "/actuator/health"
 	}
 	return u
+}
+
+func defaultGitRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "main"
+	}
+	return ref
+}
+
+func parseGitRefs(raw string) []string {
+	var refs []string
+	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
+		return nil
+	}
+	return refs
+}
+
+func marshalGitRefs(refs []string) string {
+	b, err := json.Marshal(refs)
+	if err != nil {
+		return `["main"]`
+	}
+	return string(b)
+}
+
+func normalizeGitRefs(primary string, refs []string) []string {
+	out := make([]string, 0, len(refs)+1)
+	seen := map[string]struct{}{}
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return
+		}
+		if _, ok := seen[ref]; ok {
+			return
+		}
+		seen[ref] = struct{}{}
+		out = append(out, ref)
+	}
+	add(primary)
+	for _, ref := range refs {
+		add(ref)
+	}
+	if len(out) == 0 {
+		out = append(out, "main")
+	}
+	return out
 }
 
 // isUniqueConstraint 识别 UNIQUE 违反。

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Modal, Form, Input, InputNumber, Radio, Select, Tabs, Typography, message, Button } from 'antd'
+import { Modal, Form, Input, InputNumber, Radio, Select, Tabs, Typography, message } from 'antd'
 
 import type { App, AppInput, Host, GitCredential } from '../types'
-import { createApp, updateApp, listBranches } from '../api/app'
+import { createApp, updateApp } from '../api/app'
 import { listHosts } from '../api/host'
 import { listGitCreds } from '../api/gitcred'
 import { formatError } from '../api/client'
@@ -14,12 +14,23 @@ type Props = {
   onSaved: () => void
 }
 
+function normalizeRefs(value?: string[], fallback?: string) {
+  const out: string[] = []
+  const add = (ref?: string) => {
+    const v = (ref || '').trim()
+    if (!v || out.includes(v)) return
+    out.push(v)
+  }
+  add(fallback)
+  ;(value || []).forEach(add)
+  if (out.length === 0) out.push('main')
+  return out
+}
+
 export default function AppForm({ open, editing, onClose, onSaved }: Props) {
   const [form] = Form.useForm<AppInput>()
   const [hosts, setHosts] = useState<Host[]>([])
   const [creds, setCreds] = useState<GitCredential[]>([])
-  const [branches, setBranches] = useState<string[]>([])
-  const [loadingBranches, setLoadingBranches] = useState(false)
   const [activeTab, setActiveTab] = useState('basic')
   const isEdit = !!editing
 
@@ -30,6 +41,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
     form.resetFields()
     setActiveTab('basic')
     if (editing) {
+      const refs = normalizeRefs(editing.git_refs, editing.git_ref || 'main')
       form.setFieldsValue({
         app_code: editing.app_code,
         name: editing.name,
@@ -37,6 +49,8 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         build_mode: editing.build_mode || 'local-jar',
         git_url: editing.git_url,
         git_cred_id: editing.git_cred_id,
+        git_ref: refs[0],
+        git_refs: refs,
         build_module: editing.build_module,
         build_jar_pattern: editing.build_jar_pattern,
         deploy_path: editing.deploy_path,
@@ -68,6 +82,8 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         deploy_mode: 'systemd',
         git_url: '',
         git_cred_id: '',
+        git_ref: 'main',
+        git_refs: ['main'],
         build_module: '',
         build_jar_pattern: '',
         nginx_host_id: 0,
@@ -83,39 +99,16 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
     }
   }, [open, editing, form])
 
-  const fetchBranches = async () => {
-    if (!editing?.id) {
-      message.warning('请先保存应用后再获取分支')
-      return
-    }
-    const gitUrl = form.getFieldValue('git_url')
-    if (!gitUrl || gitUrl.trim() === '') {
-      message.warning('请先填写 Git 仓库地址')
-      return
-    }
-
-    setLoadingBranches(true)
-    try {
-      const credId = form.getFieldValue('git_cred_id')
-      const credIdNum = credId ? parseInt(credId, 10) : undefined
-      const branchList = await listBranches(editing.id, credIdNum)
-      setBranches(branchList)
-      if (branchList.length === 0) {
-        message.info('未找到分支')
-      } else {
-        message.success(`获取到 ${branchList.length} 个分支`)
-      }
-    } catch (e: any) {
-      message.error(formatError(e))
-      setBranches([])
-    } finally {
-      setLoadingBranches(false)
-    }
-  }
-
   const submit = async () => {
     try {
       const v = await form.validateFields()
+      const refs = normalizeRefs(v.git_refs, v.git_ref || 'main')
+      const selectedRef = (v.git_ref || '').trim()
+      const payload = {
+        ...v,
+        git_ref: refs.includes(selectedRef) ? selectedRef : refs[0],
+        git_refs: refs,
+      }
       // 前端再卡一道：nginx_host_id 与 nginx_upstream_name 同填同空
       const hasHost = !!v.nginx_host_id && v.nginx_host_id > 0
       const hasName = !!v.nginx_upstream_name && v.nginx_upstream_name.trim() !== ''
@@ -125,10 +118,10 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         return
       }
       if (isEdit) {
-        await updateApp(editing!.id, v)
+        await updateApp(editing!.id, payload)
         message.success('已更新')
       } else {
-        await createApp(v)
+        await createApp(payload)
         message.success('已创建')
       }
       onSaved()
@@ -139,7 +132,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         const tabOf: Record<string, string> = {
           app_code: 'basic', name: 'basic', app_type: 'basic', build_mode: 'basic', deploy_mode: 'basic',
           deploy_path: 'basic', port: 'basic', health_check_url: 'basic',
-          git_url: 'build', git_cred_id: 'build',
+          git_url: 'build', git_cred_id: 'build', git_ref: 'build',
           build_module: 'build', build_jar_pattern: 'build',
           docker_registry: 'build', docker_image_name: 'build', docker_image_tag: 'build',
           dockerfile: 'build', docker_build_args: 'build',
@@ -281,32 +274,55 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                     />
                   </Form.Item>
 
-                  {/* 分支选择器（Sprint X.11） */}
-                  {isEdit && (
-                    <Form.Item label="默认分支">
-                      <Input.Group compact style={{ display: 'flex', gap: 8 }}>
-                        <Select
-                          placeholder="选择分支或手动输入"
-                          showSearch
-                          allowClear
-                          style={{ flex: 1 }}
-                          options={branches.map(b => ({ value: b, label: b }))}
-                          notFoundContent={branches.length === 0 ? '点击右侧按钮获取分支' : '未找到'}
-                          disabled={loadingBranches}
-                        />
-                        <Button
-                          type="primary"
-                          onClick={fetchBranches}
-                          loading={loadingBranches}
+                  <Form.Item
+                    name="git_refs"
+                    label="构建 Ref 列表"
+                    tooltip="用户自行维护可构建的分支 / Tag / Commit；后续构建从这里下拉选择"
+                    rules={[
+                      {
+                        validator: (_, value) =>
+                          normalizeRefs(value).length > 0
+                            ? Promise.resolve()
+                            : Promise.reject(new Error('请至少配置一个构建 Ref')),
+                      },
+                    ]}
+                  >
+                    <Select
+                      mode="tags"
+                      tokenSeparators={[',', ' ', '\n']}
+                      placeholder="输入后回车，例如 main、dev、release/v1、v1.0.0"
+                      onChange={(value) => {
+                        const refs = normalizeRefs(value)
+                        const current = form.getFieldValue('git_ref')
+                        if (!refs.includes(current)) {
+                          form.setFieldsValue({ git_ref: refs[0] || 'main' })
+                        }
+                      }}
+                    />
+                  </Form.Item>
+
+                  <Form.Item shouldUpdate={(prev, cur) => prev.git_refs !== cur.git_refs} noStyle>
+                    {() => {
+                      const refs = normalizeRefs(form.getFieldValue('git_refs'), form.getFieldValue('git_ref') || 'main')
+                      return (
+                        <Form.Item
+                          name="git_ref"
+                          label="默认构建 Ref"
+                          tooltip="打开构建弹窗时默认选中的 Ref"
+                          rules={[{ required: true, message: '请选择默认构建 Ref' }]}
                         >
-                          获取分支
-                        </Button>
-                      </Input.Group>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        💡 获取远程仓库的分支列表，方便选择。触发构建时可以临时指定其他分支。
-                      </Typography.Text>
-                    </Form.Item>
-                  )}
+                          <Select
+                            showSearch
+                            options={refs.map(ref => ({ value: ref, label: ref }))}
+                            placeholder="选择默认 Ref"
+                          />
+                        </Form.Item>
+                      )
+                    }}
+                  </Form.Item>
+                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: -18, marginBottom: 18 }}>
+                    💡 不再远程获取分支；这里保存多个 Ref，构建时从下拉框选择。
+                  </Typography.Text>
 
                   <Form.Item
                     name="build_module"

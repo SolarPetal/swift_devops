@@ -40,6 +40,7 @@ type Application struct {
 	// GitRef Sprint X.1：默认分支/tag/commit，多 service 一次构建共用。
 	// 触发构建时若未显式传 git_ref，使用本字段；空则兜底 "main"。
 	GitRef     string `gorm:"size:100" json:"git_ref"`
+	GitRefs    string `gorm:"type:text" json:"git_refs"` // JSON array：应用可选构建 Ref 列表
 	DeployPath string `gorm:"size:255;not null" json:"deploy_path"`
 
 	// ===== 以下字段 Sprint X.1 标记为"待下沉到 AppService"，X.4 删除 =====

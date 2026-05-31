@@ -36,6 +36,19 @@ const pipeStatusTag = (s: string) => {
   return <Tag>{s}</Tag>
 }
 
+const appBuildRefs = (app: App) => {
+  const out: string[] = []
+  const add = (ref?: string) => {
+    const v = (ref || '').trim()
+    if (!v || out.includes(v)) return
+    out.push(v)
+  }
+  add(app.git_ref || 'main')
+  ;(app.git_refs || []).forEach(add)
+  if (out.length === 0) out.push('main')
+  return out
+}
+
 // ---------- 主页 ----------
 
 export default function AppDetail() {
@@ -76,6 +89,11 @@ export default function AppDetail() {
         <Descriptions size="small" column={2}>
           <Descriptions.Item label="类型">{app.app_type}</Descriptions.Item>
           <Descriptions.Item label="端口">{app.port}</Descriptions.Item>
+          <Descriptions.Item label="默认构建 Ref"><code>{app.git_ref || 'main'}</code></Descriptions.Item>
+          <Descriptions.Item label="Git 仓库"><code>{app.git_url || '-'}</code></Descriptions.Item>
+          <Descriptions.Item label="可选构建 Ref" span={2}>
+            {appBuildRefs(app).map(ref => <Tag key={ref}>{ref}</Tag>)}
+          </Descriptions.Item>
           <Descriptions.Item label="部署路径" span={2}><code>{app.deploy_path}</code></Descriptions.Item>
           <Descriptions.Item label="健康检查">{app.health_check_url}</Descriptions.Item>
           <Descriptions.Item label="systemd 用户">
@@ -363,8 +381,9 @@ function ArtifactTab({ app }: { app: App }) {
   const openBuild = async () => {
     try { setCreds(await listGitCreds()) } catch (e) { message.error(formatError(e)) }
     bdForm.resetFields()
+    const refs = appBuildRefs(app)
     bdForm.setFieldsValue({
-      git_ref: 'main',
+      git_ref: refs[0],
       mvn_args: 'clean package -DskipTests',
       cred_id: 0,
       // 默认填 app 配置的值，可临时改
@@ -377,7 +396,7 @@ function ArtifactTab({ app }: { app: App }) {
     try {
       const v = await bdForm.validateFields()
       const payload: any = {
-        git_ref: v.git_ref || 'main',
+        git_ref: v.git_ref || app.git_ref || 'main',
         mvn_args: v.mvn_args || '',
       }
       if (v.cred_id && v.cred_id > 0) payload.cred_id = v.cred_id
@@ -614,7 +633,11 @@ function ArtifactTab({ app }: { app: App }) {
             git_url: <code>{app.git_url}</code>
           </Typography.Text>
           <Form.Item name="git_ref" label="分支 / Tag / Commit" rules={[{ required: true }]}>
-            <Input placeholder="main / v1.0.0 / 7-digit SHA" />
+            <Select
+              showSearch
+              options={appBuildRefs(app).map(ref => ({ value: ref, label: ref }))}
+              placeholder="选择构建 Ref"
+            />
           </Form.Item>
           <Form.Item name="cred_id" label="Git 凭证">
             <Select
@@ -1244,8 +1267,9 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
   const openBuild = async () => {
     try { setCreds(await listGitCreds()) } catch (e) { message.error(formatError(e)) }
     bdForm.resetFields()
+    const refs = appBuildRefs(app)
     bdForm.setFieldsValue({
-      git_ref: 'main',
+      git_ref: refs[0],
       mvn_args: 'clean package -DskipTests',
       cred_id: 0,
       build_module: app.build_module || '',
@@ -1257,7 +1281,7 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
     try {
       const v = await bdForm.validateFields()
       const payload: any = {
-        git_ref: v.git_ref || 'main',
+        git_ref: v.git_ref || app.git_ref || 'main',
         mvn_args: v.mvn_args || '',
       }
       if (v.cred_id && v.cred_id > 0) payload.cred_id = v.cred_id
@@ -1431,7 +1455,11 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
       >
         <Form form={bdForm} layout="vertical">
           <Form.Item name="git_ref" label="Git 分支/Tag/Commit" rules={[{ required: true }]}>
-            <Input placeholder="main" />
+            <Select
+              showSearch
+              options={appBuildRefs(app).map(ref => ({ value: ref, label: ref }))}
+              placeholder="选择构建 Ref"
+            />
           </Form.Item>
           <Form.Item name="cred_id" label="Git 凭证">
             <Select

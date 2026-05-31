@@ -118,6 +118,8 @@ export type App = {
   app_type: string
   git_url: string
   git_cred_id: string
+  git_ref: string
+  git_refs: string[]
   deploy_path: string
   port: number
   health_check_url: string

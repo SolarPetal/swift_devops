@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,9 +159,9 @@ func (s *BuildService) Trigger(appID uint, actor string, in BuildTriggerInput) (
 	s.mu.Unlock()
 
 	// 4. 落库 building
-	ref := in.GitRef
+	ref := strings.TrimSpace(in.GitRef)
 	if ref == "" {
-		ref = "main"
+		ref = defaultRef(app.GitRef)
 	}
 	now := time.Now()
 	br := &model.BuildRun{
@@ -454,6 +455,7 @@ func (s *BuildService) finishBuild(buildID uint, status, sha string, artifactID,
 }
 
 func defaultRef(ref string) string {
+	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "main"
 	}
@@ -553,8 +555,29 @@ func (s *BuildService) ListRemoteBranches(ctx context.Context, appID uint, credI
 		Timeout: 30 * time.Second,
 	})
 	if err != nil {
+		if msg := branchListUserMessage(err); msg != "" {
+			return nil, apperr.New("BAD_REQUEST", msg, http.StatusBadRequest)
+		}
 		return nil, fmt.Errorf("获取分支列表失败: %w", err)
 	}
 
 	return branches, nil
+}
+
+func branchListUserMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "authentication failed"),
+		strings.Contains(msg, "incorrect username or password"),
+		strings.Contains(msg, "could not read username"),
+		strings.Contains(msg, "permission denied"):
+		return "获取分支失败：Git 凭证认证失败，请检查用户名 / Token 是否正确，且 Token 有仓库读取权限"
+	case strings.Contains(msg, "repository not found"),
+		strings.Contains(msg, "not found"):
+		return "获取分支失败：仓库不存在或当前凭证无权访问"
+	}
+	return ""
 }
