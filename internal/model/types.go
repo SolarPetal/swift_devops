@@ -55,7 +55,7 @@ type Application struct {
 	// BuildMode 构建模式（Sprint X.11 重构）：
 	//   "local-jar"      → 本机 Maven 打包 jar（默认，向后兼容）
 	//   "local-docker"   → 本机 Maven 打包 → Dockerfile → docker build → push 到镜像仓库
-	//   "remote-docker"  → 推送代码到远端构建机 → docker build → push 到镜像仓库
+	//   "remote-docker"  → 本机 Maven 打包 jar；部署时上传 jar + Dockerfile 到目标机 docker build/run
 	BuildMode string `gorm:"size:20;default:'local-jar'" json:"build_mode"`
 
 	// DeployMode 部署模式（Sprint X.10 + X.11 扩展）：
@@ -130,9 +130,12 @@ type AppService struct {
 	DockerRegistry  string `gorm:"size:255" json:"docker_registry"`
 	DockerImageName string `gorm:"size:255" json:"docker_image_name"`
 	DockerImageTag  string `gorm:"size:100" json:"docker_image_tag"`
-	Dockerfile      string `gorm:"type:text" json:"dockerfile"`
-	DockerBuildArgs string `gorm:"type:text" json:"docker_build_args"`
-	DockerRunArgs   string `gorm:"type:text" json:"docker_run_args"`
+	// DockerfileTemplateID 绑定本 service 使用的 Dockerfile 模板。
+	// 0 = 使用 app 默认模板；仍兼容旧字段 Dockerfile。
+	DockerfileTemplateID uint   `gorm:"index" json:"dockerfile_template_id"`
+	Dockerfile           string `gorm:"type:text" json:"dockerfile"`
+	DockerBuildArgs      string `gorm:"type:text" json:"docker_build_args"`
+	DockerRunArgs        string `gorm:"type:text" json:"docker_run_args"`
 
 	// 编排
 	StartupOrder int  `gorm:"default:100;index" json:"startup_order"` // 0=注册中心，10=网关，100=业务（默认）
@@ -183,14 +186,35 @@ type ArtifactBundle struct {
 // ArtifactItem 产物明细 —— Sprint X.1 新增。
 // 每行 = Bundle 内一个 AppService 的 jar 文件。
 type ArtifactItem struct {
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	BundleID    uint   `gorm:"uniqueIndex:idx_item_bundle_service;not null;index" json:"bundle_id"`
+	ServiceCode string `gorm:"uniqueIndex:idx_item_bundle_service;size:50;not null" json:"service_code"`
+	FileName    string `gorm:"size:255;not null" json:"file_name"`
+	FilePath    string `gorm:"size:255;not null" json:"file_path"`
+	FileMD5     string `gorm:"size:32;not null" json:"file_md5"`
+	FileSize    int64  `json:"file_size"`
+	// DockerImage 保存 Docker 构建模式产出的完整镜像名（registry/name:tag）。
+	// jar 部署为空；docker 部署必须非空，回滚也按这个字段拉取历史镜像。
+	DockerImage string `gorm:"size:500" json:"docker_image"`
+	// Dockerfile 快照：构建当时绑定的模板内容，用于 remote-docker 部署/回滚时复现当时镜像。
+	DockerfileName    string    `gorm:"size:100" json:"dockerfile_name"`
+	DockerfileContent string    `gorm:"type:text" json:"dockerfile_content"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+// DockerfileTemplate 应用级 Dockerfile 模板。
+//
+// 一个 Application 可以维护多个模板；AppService 通过 DockerfileTemplateID 与 jar 绑定。
+// 构建落 ArtifactItem 时会保存模板快照，避免模板后续修改影响历史回滚。
+type DockerfileTemplate struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
-	BundleID    uint      `gorm:"uniqueIndex:idx_item_bundle_service;not null;index" json:"bundle_id"`
-	ServiceCode string    `gorm:"uniqueIndex:idx_item_bundle_service;size:50;not null" json:"service_code"`
-	FileName    string    `gorm:"size:255;not null" json:"file_name"`
-	FilePath    string    `gorm:"size:255;not null" json:"file_path"`
-	FileMD5     string    `gorm:"size:32;not null" json:"file_md5"`
-	FileSize    int64     `json:"file_size"`
+	AppID       uint      `gorm:"index;not null" json:"app_id"`
+	Name        string    `gorm:"size:100;not null" json:"name"`
+	Description string    `gorm:"type:text" json:"description"`
+	Content     string    `gorm:"type:text;not null" json:"content"`
+	IsDefault   bool      `gorm:"default:false;index" json:"is_default"`
 	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Deployment 应用×主机×服务 部署关系。

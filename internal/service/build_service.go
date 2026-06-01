@@ -263,10 +263,10 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		logWriter = io.MultiWriter(logFile, &hubLogWriter{pub: s.pub, buildID: buildID})
 	}
 
-	fmt.Fprintf(logFile, "=== swift-devops build run #%d ===\n", buildID)
-	fmt.Fprintf(logFile, "app: %s (%d)  git_url: %s  ref: %s  cred_id: %d  mvn_args: %q\n",
-		app.AppCode, app.ID, app.GitURL, defaultRef(in.GitRef), in.CredID, in.MvnArgs)
-	fmt.Fprintf(logFile, "started at: %s\n\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(logWriter, "=== swift-devops build run #%d ===\n", buildID)
+	fmt.Fprintf(logWriter, "app: %s (%d)  git_url: %s  ref: %s  cred_id: %d  mvn_args: %q  build_mode: %s\n",
+		app.AppCode, app.ID, app.GitURL, defaultRef(in.GitRef), in.CredID, in.MvnArgs, normalizeBuildMode(app.BuildMode))
+	fmt.Fprintf(logWriter, "started at: %s\n\n", time.Now().Format(time.RFC3339))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
@@ -288,7 +288,7 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		if cacheDisplay == "" {
 			cacheDisplay = "(空 → 容器内每次重下依赖)"
 		}
-		fmt.Fprintf(logFile, "[docker] image=%s git=%s maven_cache=%s\n", dockerImage, gitBin, cacheDisplay)
+		fmt.Fprintf(logWriter, "[docker] image=%s git=%s maven_cache=%s\n", dockerImage, gitBin, cacheDisplay)
 	} else {
 		ee, envErr := s.envSvc.BuildExecEnv()
 		if envErr != nil {
@@ -306,7 +306,7 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		if cacheDisplay == "" {
 			cacheDisplay = "(空 → 用 settings.xml 默认)"
 		}
-		fmt.Fprintf(logFile, "[bins] mvn=%s git=%s maven_local_repo=%s\n", mvnBin, gitBin, cacheDisplay)
+		fmt.Fprintf(logWriter, "[bins] mvn=%s git=%s maven_local_repo=%s\n", mvnBin, gitBin, cacheDisplay)
 	}
 
 	// Sprint X.2：决定走 multi-service 还是单 service 兼容
@@ -327,11 +327,17 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		MvnBin:    mvnBin,
 		GitBin:    gitBin,
 		Workspace: s.workspace, MavenCacheDir: mavenCache,
-		LogWriter:   logWriter,
-		ExecEnv:     execEnv,
-		BuildID:     buildID,
-		Services:    specs,
-		DockerImage: dockerImage,
+		LogWriter:       logWriter,
+		ExecEnv:         execEnv,
+		BuildID:         buildID,
+		Services:        specs,
+		DockerImage:     dockerImage,
+		BuildMode:       normalizeBuildMode(app.BuildMode),
+		DockerRegistry:  strings.TrimSpace(app.DockerRegistry),
+		DockerImageName: strings.TrimSpace(app.DockerImageName),
+		DockerImageTag:  strings.TrimSpace(app.DockerImageTag),
+		Dockerfile:      app.Dockerfile,
+		DockerBuildArgs: strings.TrimSpace(app.DockerBuildArgs),
 	}
 	res, err := builder.Build(ctx, plan)
 	if err != nil {
@@ -354,7 +360,13 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 			s.finishBuild(buildID, BuildStatusFailed, res.CommitSHA, 0, 0, err.Error())
 			return
 		}
-		bundleItems = append(bundleItems, BundleItemInput{ServiceCode: sp.ServiceCode, LocalPath: jar})
+		bundleItems = append(bundleItems, BundleItemInput{
+			ServiceCode:       sp.ServiceCode,
+			LocalPath:         jar,
+			DockerImage:       res.DockerImages[sp.ServiceCode],
+			DockerfileName:    res.DockerfileSnapshots[sp.ServiceCode].Name,
+			DockerfileContent: res.DockerfileSnapshots[sp.ServiceCode].Content,
+		})
 	}
 
 	bundleView, err := s.artSvc.IngestBundle(app.ID, versionTag, res.CommitSHA, "", logPath, bundleItems)
@@ -377,8 +389,7 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		}
 	}
 
-	fmt.Fprintf(logFile, "[BUILD SUCCESS] bundle=#%d items=%d\n", bundleView.ID, len(bundleView.Items))
-	s.finishBuild(buildID, BuildStatusSuccess, res.CommitSHA, legacyArtifactID, bundleView.ID, "")
+	fmt.Fprintf(logWriter, "[BUILD SUCCESS] bundle=#%d items=%d\n", bundleView.ID, len(bundleView.Items))
 
 	// Sprint 5.7：构建成功后滚动清理历史 Bundle（保留最近 maxHistory 个）。
 	// 清理失败不影响构建结果，仅记日志 + 写进 build log 给用户看。
@@ -386,10 +397,13 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		if cr, cerr := s.artSvc.CleanupBundleHistory(app.ID, s.maxHistory); cerr != nil {
 			slog.Warn("post-build cleanup history", "app", app.ID, "err", cerr)
 		} else if len(cr.DeletedBundles) > 0 {
-			fmt.Fprintf(logFile, "[CLEANUP] 保留最近 %d 个 Bundle，清理 %d 个历史版本，释放 %d KB\n",
+			fmt.Fprintf(logWriter, "[CLEANUP] 保留最近 %d 个 Bundle，清理 %d 个历史版本，释放 %d KB\n",
 				cr.Keep, len(cr.DeletedBundles), cr.FreedBytes>>10)
 		}
 	}
+
+	// 所有尾部日志写完后再推终态，避免前端收到 status 就 close 导致尾部日志丢失。
+	s.finishBuild(buildID, BuildStatusSuccess, res.CommitSHA, legacyArtifactID, bundleView.ID, "")
 }
 
 // loadServiceBuildSpecs 决定构建模式：
@@ -406,10 +420,18 @@ func (s *BuildService) loadServiceBuildSpecs(app *model.Application, in BuildTri
 	if len(services) > 0 {
 		specs := make([]builder.ServiceBuildSpec, 0, len(services))
 		for _, svc := range services {
+			dfName, dfContent := s.resolveDockerfileTemplate(app, &svc)
 			specs = append(specs, builder.ServiceBuildSpec{
-				ServiceCode: svc.ServiceCode,
-				BuildModule: svc.BuildModule,
-				JarPattern:  svc.BuildJarPattern,
+				ServiceCode:       svc.ServiceCode,
+				BuildModule:       svc.BuildModule,
+				JarPattern:        svc.BuildJarPattern,
+				Port:              svc.Port,
+				DockerRegistry:    pickDockerStr(svc.DockerRegistry, app.DockerRegistry),
+				DockerImageName:   pickDockerStr(svc.DockerImageName, app.DockerImageName),
+				DockerImageTag:    pickDockerStr(svc.DockerImageTag, app.DockerImageTag),
+				DockerfileName:    dfName,
+				DockerfileContent: dfContent,
+				DockerBuildArgs:   pickDockerStr(svc.DockerBuildArgs, app.DockerBuildArgs),
 			})
 		}
 		return specs, nil
@@ -418,11 +440,50 @@ func (s *BuildService) loadServiceBuildSpecs(app *model.Application, in BuildTri
 	// 单 service 兼容：service_code=default，从 app 顶层字段读
 	module := pickStr(in.BuildModule, app.BuildModule)
 	pattern := pickStr(in.BuildJarPattern, app.BuildJarPattern)
+	dfName, dfContent := s.resolveDockerfileTemplate(app, nil)
 	return []builder.ServiceBuildSpec{{
-		ServiceCode: "default",
-		BuildModule: module,
-		JarPattern:  pattern,
+		ServiceCode:       "default",
+		BuildModule:       module,
+		JarPattern:        pattern,
+		Port:              app.Port,
+		DockerRegistry:    strings.TrimSpace(app.DockerRegistry),
+		DockerImageName:   strings.TrimSpace(app.DockerImageName),
+		DockerImageTag:    strings.TrimSpace(app.DockerImageTag),
+		DockerfileName:    dfName,
+		DockerfileContent: dfContent,
+		DockerBuildArgs:   strings.TrimSpace(app.DockerBuildArgs),
 	}}, nil
+}
+
+func (s *BuildService) resolveDockerfileTemplate(app *model.Application, svc *model.AppService) (string, string) {
+	templateID := uint(0)
+	legacyDockerfile := strings.TrimSpace(app.Dockerfile)
+	if svc != nil {
+		templateID = svc.DockerfileTemplateID
+		if strings.TrimSpace(svc.Dockerfile) != "" {
+			legacyDockerfile = svc.Dockerfile
+		}
+	}
+	var tpl model.DockerfileTemplate
+	if templateID > 0 {
+		if err := s.db.Where("id = ? AND app_id = ?", templateID, app.ID).First(&tpl).Error; err == nil {
+			return tpl.Name, tpl.Content
+		}
+	}
+	if err := s.db.Where("app_id = ? AND is_default = ?", app.ID, true).Order("id ASC").First(&tpl).Error; err == nil {
+		return tpl.Name, tpl.Content
+	}
+	if legacyDockerfile != "" {
+		return "legacy-inline", legacyDockerfile
+	}
+	return "", ""
+}
+
+func pickDockerStr(primary, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return strings.TrimSpace(primary)
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func (s *BuildService) releaseLock(appID uint) {

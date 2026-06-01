@@ -69,3 +69,6 @@ GORM(SQLite) + filesystem + SSH/builder/deploy packages
 - Sprint X：从单 jar 应用扩展为多 AppService / ArtifactBundle 架构。
 - Sprint X.10：引入 runtime 抽象，支持 systemd 与 nohup。
 - Sprint X.11：扩展 Docker 构建与 Docker runtime 相关字段和执行路径。
+- Sprint X.12：应用新增表单轻量化；新增阶段只完成应用建档与代码源配置，构建模块、Jar 匹配、Dockerfile 模板和镜像参数统一在应用详情 / AppService 层维护。
+- Sprint X.13：AppService 编辑表单只保留 Dockerfile 模板绑定与必要运行参数，删除重复的构建/镜像覆盖入口；Dockerfile 参数以模板编辑为唯一入口。
+- Sprint X.14：应用管理新增/编辑表单只保留应用档案与代码源；运行时、部署方式和蓝绿发布配置统一迁移到应用详情的“运行与发布配置”入口。

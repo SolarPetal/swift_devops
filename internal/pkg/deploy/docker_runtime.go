@@ -22,9 +22,37 @@ func (r *dockerRuntime) Name() string {
 	return "docker"
 }
 
-// PrepareUnit Docker 模式无需准备文件（镜像已在构建阶段推送到仓库）
+// PrepareUnit Docker 模式：
+//   - local-docker：镜像已在构建阶段 push，目标机只需 pull/run
+//   - remote-docker：jar + Dockerfile 已上传到 DeployPath，这里在目标机 docker build -t
 func (r *dockerRuntime) PrepareUnit(ctx context.Context, spec AppSpec) error {
-	// Docker 模式无需准备文件
+	if !spec.RemoteDockerBuild {
+		return nil
+	}
+	if strings.TrimSpace(spec.DockerImage) == "" {
+		return fmt.Errorf("DockerImage 为空，无法远端构建")
+	}
+	buildArgs := shellJoinFields(spec.DockerBuildArgs)
+	if buildArgs != "" {
+		buildArgs += " "
+	}
+	cmd := fmt.Sprintf("cd %s && docker build %s-t %s -f %s .",
+		ShellQuote(spec.DeployPath),
+		buildArgs,
+		ShellQuote(spec.DockerImage),
+		ShellQuote(spec.DockerfilePath()),
+	)
+	res, err := r.client.Exec(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("远端 docker build 执行失败: %w", err)
+	}
+	if res.ExitCode != 0 {
+		out := strings.TrimSpace(res.Stderr)
+		if out == "" {
+			out = strings.TrimSpace(res.Stdout)
+		}
+		return fmt.Errorf("远端 docker build 失败（exit=%d）：%s", res.ExitCode, out)
+	}
 	return nil
 }
 
@@ -48,15 +76,17 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 		return 0, fmt.Errorf("删除旧容器失败: %w", err)
 	}
 
-	// 2. docker pull（从镜像仓库拉取）
+	// 2. docker pull（local-docker 从镜像仓库拉取；remote-docker 已在目标机 build，跳过 pull）
 	imageName := spec.DockerImage
 	if imageName == "" {
 		return 0, fmt.Errorf("DockerImage 为空，无法部署")
 	}
 
-	pullCmd := fmt.Sprintf("docker pull %s", imageName)
-	if _, err := r.client.Exec(ctx, pullCmd); err != nil {
-		return 0, fmt.Errorf("拉取镜像失败: %w", err)
+	if !spec.RemoteDockerBuild {
+		pullCmd := fmt.Sprintf("docker pull %s", ShellQuote(imageName))
+		if _, err := r.client.Exec(ctx, pullCmd); err != nil {
+			return 0, fmt.Errorf("拉取镜像失败: %w", err)
+		}
 	}
 
 	// 3. docker run
@@ -73,7 +103,7 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 		}
 	}
 
-	runCmd := fmt.Sprintf("docker run --name %s %s %s", containerName, runArgs, imageName)
+	runCmd := fmt.Sprintf("docker run --name %s %s %s", ShellQuote(containerName), runArgs, ShellQuote(imageName))
 	if _, err := r.client.Exec(ctx, runCmd); err != nil {
 		return 0, fmt.Errorf("启动容器失败: %w", err)
 	}
@@ -90,6 +120,18 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 	}
 
 	return time.Since(start), fmt.Errorf("容器启动超时（%v）", timeout)
+}
+
+func shellJoinFields(s string) string {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(fields))
+	for i, f := range fields {
+		quoted[i] = ShellQuote(f)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // StatusDump 返回容器状态 + 日志

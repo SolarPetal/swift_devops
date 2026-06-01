@@ -138,7 +138,7 @@ export type App = {
   //   build_mode:
   //     'local-jar'      → 本机 Maven 打包 jar（默认）
   //     'local-docker'   → 本机 Maven → Dockerfile → docker build → push
-  //     'remote-docker'  → 推送代码到远端 → docker build → push
+  //     'remote-docker'  → 本机 Maven 打 jar → 部署时推 jar+Dockerfile 到目标机 docker build/run
   build_mode: 'local-jar' | 'local-docker' | 'remote-docker' | ''
   //   deploy_mode:
   //     'systemd' → systemd service + systemctl（默认，需 root/sudo）
@@ -184,6 +184,7 @@ export type AppService = {
   docker_registry: string
   docker_image_name: string
   docker_image_tag: string
+  dockerfile_template_id: number
   dockerfile: string
   docker_build_args: string
   docker_run_args: string
@@ -214,6 +215,7 @@ export type AppServiceInput = {
   docker_registry?: string
   docker_image_name?: string
   docker_image_tag?: string
+  dockerfile_template_id?: number
   dockerfile?: string
   docker_build_args?: string
   docker_run_args?: string
@@ -271,7 +273,28 @@ export type ArtifactItemView = {
   file_path: string
   file_md5: string
   file_size: number
+  docker_image: string
+  dockerfile_name: string
+  dockerfile_content: string
   created_at: string
+}
+
+export type DockerfileTemplate = {
+  id: number
+  app_id: number
+  name: string
+  description: string
+  content: string
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type DockerfileTemplateInput = {
+  name: string
+  description?: string
+  content: string
+  is_default?: boolean
 }
 
 export type ArtifactBundle = {

@@ -17,6 +17,15 @@ type ServiceBuildSpec struct {
 	ServiceCode string // 用于 Result.JarPaths 的 key
 	BuildModule string // 可空；非空时 mvn 加 -pl <module>（多个用逗号拼）
 	JarPattern  string // 可空；空走 builder 默认扫描 + Spring Boot 探测
+
+	// Dockerfile / 镜像配置（local-docker / remote-docker）
+	Port              int
+	DockerRegistry    string
+	DockerImageName   string
+	DockerImageTag    string
+	DockerfileName    string
+	DockerfileContent string
+	DockerBuildArgs   string
 }
 
 // Plan 一次构建的完整输入。service 层组装。
@@ -47,7 +56,7 @@ type Plan struct {
 	DockerImage string
 	DockerBin   string // docker 可执行；空 = "docker"
 
-	// Sprint X.11：Docker 镜像构建模式
+	// Sprint X.11：Docker 镜像构建模式（app-level fallback；service-level 优先取 ServiceBuildSpec）
 	BuildMode       string      // "local-jar" / "local-docker" / "remote-docker"
 	DockerRegistry  string      // 镜像仓库地址，如 docker.io / harbor.example.com
 	DockerImageName string      // 镜像名，如 myapp/user-service
@@ -72,6 +81,14 @@ type Result struct {
 
 	// Sprint X.11：Docker 镜像构建产物
 	DockerImages map[string]string // map[service_code]→完整镜像名（registry/name:tag）
+	// DockerfileSnapshots 保存每个 service 构建/部署绑定的 Dockerfile 内容。
+	DockerfileSnapshots map[string]DockerfileSnapshot
+}
+
+// DockerfileSnapshot 是构建结果中可持久化到 ArtifactItem 的 Dockerfile 快照。
+type DockerfileSnapshot struct {
+	Name    string
+	Content string
 }
 
 // Build 一次完整的构建：clone + mvn package + 找 jar。
@@ -157,15 +174,26 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 		// Sprint X.11：如果是 Docker 镜像构建模式，继续构建镜像
 		if plan.BuildMode == "local-docker" || plan.BuildMode == "remote-docker" {
 			res.DockerImages = map[string]string{}
+			res.DockerfileSnapshots = map[string]DockerfileSnapshot{}
+			specByCode := serviceSpecMap(plan.Services)
 			for serviceCode, jarPath := range res.JarPaths {
-				imageName, err := BuildDockerImage(ctx, plan, jarPath, serviceCode)
-				if err != nil {
-					return res, fmt.Errorf("docker build for service %s: %w", serviceCode, err)
+				sp := specByCode[serviceCode]
+				snap := ResolveDockerfileSnapshot(plan, sp, jarPath)
+				res.DockerfileSnapshots[serviceCode] = snap
+				imageName := ResolveDockerImageName(plan, sp, serviceCode, res.CommitSHA)
+				if plan.BuildMode == "local-docker" {
+					builtImageName, err := BuildDockerImage(ctx, plan, sp, jarPath, serviceCode, res.CommitSHA)
+					if err != nil {
+						return res, fmt.Errorf("docker build for service %s: %w", serviceCode, err)
+					}
+					imageName = builtImageName
+					if plan.LogWriter != nil {
+						fmt.Fprintf(plan.LogWriter, "[docker] service=%s -> %s\n", serviceCode, imageName)
+					}
+				} else if plan.LogWriter != nil {
+					fmt.Fprintf(plan.LogWriter, "[docker] service=%s remote-build image planned -> %s\n", serviceCode, imageName)
 				}
 				res.DockerImages[serviceCode] = imageName
-				if plan.LogWriter != nil {
-					fmt.Fprintf(plan.LogWriter, "[docker] service=%s -> %s\n", serviceCode, imageName)
-				}
 			}
 		}
 
@@ -188,17 +216,34 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 
 	// Sprint X.11：如果是 Docker 镜像构建模式，继续构建镜像
 	if plan.BuildMode == "local-docker" || plan.BuildMode == "remote-docker" {
-		imageName, err := BuildDockerImage(ctx, plan, jar, "default")
-		if err != nil {
-			return res, fmt.Errorf("docker build: %w", err)
+		sp := ServiceBuildSpec{ServiceCode: "default"}
+		imageName := ResolveDockerImageName(plan, sp, "default", res.CommitSHA)
+		snap := ResolveDockerfileSnapshot(plan, sp, jar)
+		if plan.BuildMode == "local-docker" {
+			builtImageName, err := BuildDockerImage(ctx, plan, sp, jar, "default", res.CommitSHA)
+			if err != nil {
+				return res, fmt.Errorf("docker build: %w", err)
+			}
+			imageName = builtImageName
+			if plan.LogWriter != nil {
+				fmt.Fprintf(plan.LogWriter, "[docker] image -> %s\n", imageName)
+			}
+		} else if plan.LogWriter != nil {
+			fmt.Fprintf(plan.LogWriter, "[docker] remote-build image planned -> %s\n", imageName)
 		}
 		res.DockerImages = map[string]string{"default": imageName}
-		if plan.LogWriter != nil {
-			fmt.Fprintf(plan.LogWriter, "[docker] image -> %s\n", imageName)
-		}
+		res.DockerfileSnapshots = map[string]DockerfileSnapshot{"default": snap}
 	}
 
 	return res, nil
+}
+
+func serviceSpecMap(specs []ServiceBuildSpec) map[string]ServiceBuildSpec {
+	out := make(map[string]ServiceBuildSpec, len(specs))
+	for _, sp := range specs {
+		out[sp.ServiceCode] = sp
+	}
+	return out
 }
 
 // runMvn 按 plan.DockerImage 决定容器构建还是本机构建（jar 提取统一由调用方做）。

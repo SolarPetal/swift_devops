@@ -43,9 +43,17 @@ type AppInput struct {
 	NginxHostID       uint   `json:"nginx_host_id,omitempty"`
 	NginxUpstreamName string `json:"nginx_upstream_name,omitempty"`
 	ActiveGroup       string `json:"active_group,omitempty"`
-	// DeployMode 部署模式（Sprint X.10）：systemd（默认，写 unit + systemctl）/ nohup（写 start.sh + nohup java -jar）。
-	// 空 = systemd（向后兼容）。
+	// DeployMode 部署模式（Sprint X.10/X.11）：systemd / nohup / docker。空 = systemd。
 	DeployMode string `json:"deploy_mode,omitempty"`
+
+	// Sprint X.11：Docker 镜像构建 / 部署配置。
+	BuildMode       string `json:"build_mode,omitempty"` // local-jar / local-docker / remote-docker
+	DockerRegistry  string `json:"docker_registry,omitempty"`
+	DockerImageName string `json:"docker_image_name,omitempty"`
+	DockerImageTag  string `json:"docker_image_tag,omitempty"`
+	Dockerfile      string `json:"dockerfile,omitempty"`
+	DockerBuildArgs string `json:"docker_build_args,omitempty"`
+	DockerRunArgs   string `json:"docker_run_args,omitempty"`
 }
 
 // AppView 应用响应
@@ -71,6 +79,13 @@ type AppView struct {
 	NginxUpstreamName string   `json:"nginx_upstream_name"`
 	ActiveGroup       string   `json:"active_group"`
 	DeployMode        string   `json:"deploy_mode"`
+	BuildMode         string   `json:"build_mode"`
+	DockerRegistry    string   `json:"docker_registry"`
+	DockerImageName   string   `json:"docker_image_name"`
+	DockerImageTag    string   `json:"docker_image_tag"`
+	Dockerfile        string   `json:"dockerfile"`
+	DockerBuildArgs   string   `json:"docker_build_args"`
+	DockerRunArgs     string   `json:"docker_run_args"`
 	CreatedAt         string   `json:"created_at"`
 	UpdatedAt         string   `json:"updated_at"`
 }
@@ -92,6 +107,13 @@ func toAppView(a *model.Application) AppView {
 		NginxUpstreamName: a.NginxUpstreamName,
 		ActiveGroup:       a.ActiveGroup,
 		DeployMode:        a.DeployMode,
+		BuildMode:         normalizeBuildMode(a.BuildMode),
+		DockerRegistry:    a.DockerRegistry,
+		DockerImageName:   a.DockerImageName,
+		DockerImageTag:    a.DockerImageTag,
+		Dockerfile:        a.Dockerfile,
+		DockerBuildArgs:   a.DockerBuildArgs,
+		DockerRunArgs:     a.DockerRunArgs,
 		CreatedAt:         a.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:         a.UpdatedAt.Format(time.RFC3339),
 	}
@@ -139,6 +161,13 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
 		ActiveGroup:       strings.TrimSpace(in.ActiveGroup),
 		DeployMode:        deploy.NormalizeDeployMode(in.DeployMode),
+		BuildMode:         normalizeBuildMode(in.BuildMode),
+		DockerRegistry:    strings.TrimSpace(in.DockerRegistry),
+		DockerImageName:   strings.TrimSpace(in.DockerImageName),
+		DockerImageTag:    strings.TrimSpace(in.DockerImageTag),
+		Dockerfile:        in.Dockerfile,
+		DockerBuildArgs:   strings.TrimSpace(in.DockerBuildArgs),
+		DockerRunArgs:     strings.TrimSpace(in.DockerRunArgs),
 	}
 	if err := s.db.Create(a).Error; err != nil {
 		if isUniqueConstraint(err) {
@@ -152,6 +181,13 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 	if err := EnsureDefaultAppService(s.db, a); err != nil {
 		// 不阻塞 app 创建（已落库），但记日志
 		slog.Warn("ensure default service after app create", "app_id", a.ID, "err", err)
+	}
+	if tpl, err := EnsureDefaultDockerfileTemplate(s.db, a.ID); err != nil {
+		slog.Warn("ensure default dockerfile template after app create", "app_id", a.ID, "err", err)
+	} else {
+		_ = s.db.Model(&model.AppService{}).
+			Where("app_id = ? AND service_code = ? AND dockerfile_template_id = 0", a.ID, "default").
+			Update("dockerfile_template_id", tpl.ID).Error
 	}
 	return toAppView(a), nil
 }
@@ -208,12 +244,24 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.NginxUpstreamName = strings.TrimSpace(in.NginxUpstreamName)
 	a.ActiveGroup = strings.TrimSpace(in.ActiveGroup)
 	a.DeployMode = deploy.NormalizeDeployMode(in.DeployMode)
+	a.BuildMode = normalizeBuildMode(in.BuildMode)
+	a.DockerRegistry = strings.TrimSpace(in.DockerRegistry)
+	a.DockerImageName = strings.TrimSpace(in.DockerImageName)
+	a.DockerImageTag = strings.TrimSpace(in.DockerImageTag)
+	a.Dockerfile = in.Dockerfile
+	a.DockerBuildArgs = strings.TrimSpace(in.DockerBuildArgs)
+	a.DockerRunArgs = strings.TrimSpace(in.DockerRunArgs)
 	if err := s.db.Save(a).Error; err != nil {
 		if isUniqueConstraint(err) {
 			return AppView{}, apperr.New("CONFLICT",
 				fmt.Sprintf("app_code %q 已被占用", in.AppCode), 409)
 		}
 		return AppView{}, apperr.Wrap(err, "INTERNAL", "update app", 500)
+	}
+	if err := s.syncDefaultService(a); err != nil {
+		// default service 是单体 App 顶层配置的镜像；同步失败不吞掉，否则会出现
+		// app=docker 但 default service=systemd，部署阶段继续检查 Java 的漂移。
+		return AppView{}, err
 	}
 	return toAppView(a), nil
 }
@@ -250,6 +298,39 @@ func (s *AppService) findByID(id uint) (*model.Application, error) {
 		return nil, apperr.Wrap(err, "INTERNAL", "get app", 500)
 	}
 	return &a, nil
+}
+
+func (s *AppService) syncDefaultService(a *model.Application) error {
+	updates := map[string]any{
+		"build_module":        strings.TrimSpace(a.BuildModule),
+		"build_jar_pattern":   strings.TrimSpace(a.BuildJarPattern),
+		"port":                a.Port,
+		"health_check_url":    defaultHealthURL(a.HealthCheckURL),
+		"jvm_args":            a.JvmArgs,
+		"env_vars":            a.EnvVars,
+		"systemd_user":        strings.TrimSpace(a.SystemdUser),
+		"java_path":           strings.TrimSpace(a.JavaPath),
+		"nginx_host_id":       a.NginxHostID,
+		"nginx_upstream_name": strings.TrimSpace(a.NginxUpstreamName),
+		"active_group":        strings.TrimSpace(a.ActiveGroup),
+		"deploy_mode":         deploy.NormalizeDeployMode(a.DeployMode),
+		"docker_registry":     strings.TrimSpace(a.DockerRegistry),
+		"docker_image_name":   strings.TrimSpace(a.DockerImageName),
+		"docker_image_tag":    strings.TrimSpace(a.DockerImageTag),
+		"dockerfile":          a.Dockerfile,
+		"docker_build_args":   strings.TrimSpace(a.DockerBuildArgs),
+		"docker_run_args":     strings.TrimSpace(a.DockerRunArgs),
+	}
+	res := s.db.Model(&model.AppService{}).
+		Where("app_id = ? AND service_code = ?", a.ID, "default").Updates(updates)
+	if res.Error != nil {
+		// 兼容只迁移 Application 的旧单测 / 一次性脚本环境；正式运行 store.AutoMigrate 会建表。
+		if strings.Contains(res.Error.Error(), "no such table") {
+			return nil
+		}
+		return apperr.Wrap(res.Error, "INTERNAL", "sync default service", 500)
+	}
+	return nil
 }
 
 func validateAppInput(in AppInput) error {
@@ -291,7 +372,27 @@ func validateAppInput(in AppInput) error {
 	if err := deploy.ValidateDeployMode(in.DeployMode); err != nil {
 		return apperr.New("BAD_REQUEST", err.Error(), 400)
 	}
+	if err := validateBuildMode(in.BuildMode); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateBuildMode(mode string) error {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "local-jar", "local-docker", "remote-docker":
+		return nil
+	default:
+		return apperr.New("BAD_REQUEST", "build_mode 仅支持 local-jar / local-docker / remote-docker", 400)
+	}
+}
+
+func normalizeBuildMode(mode string) string {
+	m := strings.ToLower(strings.TrimSpace(mode))
+	if m == "" {
+		return "local-jar"
+	}
+	return m
 }
 
 func defaultAppType(t string) string {

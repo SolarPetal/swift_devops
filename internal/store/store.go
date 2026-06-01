@@ -21,6 +21,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.Host{},
 		&model.Application{},
 		&model.AppService{}, // Sprint X.1：微服务层
+		&model.DockerfileTemplate{},
 		&model.Artifact{},
 		&model.ArtifactBundle{}, // Sprint X.1：版本一致性层
 		&model.ArtifactItem{},   // Sprint X.1：产物明细

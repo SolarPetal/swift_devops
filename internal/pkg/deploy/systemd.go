@@ -28,8 +28,12 @@ type AppSpec struct {
 	JavaPath       string            // java 可执行路径，留空 → /usr/bin/java（Sprint 3.7）
 
 	// Sprint X.11：Docker 部署模式
-	DockerImage   string // 完整镜像名（registry/name:tag）
-	DockerRunArgs string // docker run 参数
+	DockerImage       string // 完整镜像名（registry/name:tag）
+	DockerRunArgs     string // docker run 参数
+	RemoteDockerBuild bool   // true = 目标机 docker build -t 后再 docker run
+	DockerfileName    string // 默认 Dockerfile
+	DockerfileContent string // 已上传/待上传的 Dockerfile 快照
+	DockerBuildArgs   string // docker build 参数
 }
 
 // UnitName 单元名（不含路径）
@@ -49,6 +53,14 @@ func (s AppSpec) JarPath() string {
 		name = "app.jar"
 	}
 	return path.Join(s.DeployPath, name)
+}
+
+// DockerfilePath Dockerfile 在远端部署目录下的路径。
+//
+// 注意：DockerfileName 是模板展示名/快照名，不应该成为远端文件名。
+// 远端 docker build 统一使用标准文件名 Dockerfile，避免模板名 test 变成 /opt/app/test 这种反直觉路径。
+func (s AppSpec) DockerfilePath() string {
+	return path.Join(s.DeployPath, "Dockerfile")
 }
 
 // ParseEnvVarsJSON 把 Application.EnvVars 的 JSON 字符串解析为 map。

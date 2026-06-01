@@ -37,33 +37,49 @@ type AppServiceInput struct {
 	NginxHostID       uint   `json:"nginx_host_id,omitempty"`
 	NginxUpstreamName string `json:"nginx_upstream_name,omitempty"`
 	ActiveGroup       string `json:"active_group,omitempty"`
-	// DeployMode 部署模式（Sprint X.10）：systemd / nohup；空 → 回退 Application.DeployMode → systemd
+	// DeployMode 部署模式（Sprint X.10/X.11）：systemd / nohup / docker；空 → 回退 Application.DeployMode → systemd
 	DeployMode string `json:"deploy_mode,omitempty"`
+
+	// Sprint X.11：Docker 配置（空时回退 Application 对应字段）。
+	DockerRegistry       string `json:"docker_registry,omitempty"`
+	DockerImageName      string `json:"docker_image_name,omitempty"`
+	DockerImageTag       string `json:"docker_image_tag,omitempty"`
+	DockerfileTemplateID uint   `json:"dockerfile_template_id,omitempty"`
+	Dockerfile           string `json:"dockerfile,omitempty"`
+	DockerBuildArgs      string `json:"docker_build_args,omitempty"`
+	DockerRunArgs        string `json:"docker_run_args,omitempty"`
 }
 
 // AppServiceView AppService 响应。
 type AppServiceView struct {
-	ID                uint   `json:"id"`
-	AppID             uint   `json:"app_id"`
-	ServiceCode       string `json:"service_code"`
-	Name              string `json:"name"`
-	BuildModule       string `json:"build_module"`
-	BuildJarPattern   string `json:"build_jar_pattern"`
-	Port              int    `json:"port"`
-	HealthCheckURL    string `json:"health_check_url"`
-	JvmArgs           string `json:"jvm_args"`
-	EnvVars           string `json:"env_vars"`
-	SystemdUser       string `json:"systemd_user"`
-	JavaPath          string `json:"java_path"`
-	StartupOrder      int    `json:"startup_order"`
-	Optional          bool   `json:"optional"`
-	Enabled           bool   `json:"enabled"`
-	NginxHostID       uint   `json:"nginx_host_id"`
-	NginxUpstreamName string `json:"nginx_upstream_name"`
-	ActiveGroup       string `json:"active_group"`
-	DeployMode        string `json:"deploy_mode"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	ID                   uint   `json:"id"`
+	AppID                uint   `json:"app_id"`
+	ServiceCode          string `json:"service_code"`
+	Name                 string `json:"name"`
+	BuildModule          string `json:"build_module"`
+	BuildJarPattern      string `json:"build_jar_pattern"`
+	Port                 int    `json:"port"`
+	HealthCheckURL       string `json:"health_check_url"`
+	JvmArgs              string `json:"jvm_args"`
+	EnvVars              string `json:"env_vars"`
+	SystemdUser          string `json:"systemd_user"`
+	JavaPath             string `json:"java_path"`
+	StartupOrder         int    `json:"startup_order"`
+	Optional             bool   `json:"optional"`
+	Enabled              bool   `json:"enabled"`
+	NginxHostID          uint   `json:"nginx_host_id"`
+	NginxUpstreamName    string `json:"nginx_upstream_name"`
+	ActiveGroup          string `json:"active_group"`
+	DeployMode           string `json:"deploy_mode"`
+	DockerRegistry       string `json:"docker_registry"`
+	DockerImageName      string `json:"docker_image_name"`
+	DockerImageTag       string `json:"docker_image_tag"`
+	DockerfileTemplateID uint   `json:"dockerfile_template_id"`
+	Dockerfile           string `json:"dockerfile"`
+	DockerBuildArgs      string `json:"docker_build_args"`
+	DockerRunArgs        string `json:"docker_run_args"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
 }
 
 // AppServiceService AppService 的 CRUD service。
@@ -87,9 +103,16 @@ func toAppServiceView(s *model.AppService) AppServiceView {
 		SystemdUser: s.SystemdUser, JavaPath: s.JavaPath,
 		StartupOrder: s.StartupOrder, Optional: s.Optional, Enabled: s.Enabled,
 		NginxHostID: s.NginxHostID, NginxUpstreamName: s.NginxUpstreamName, ActiveGroup: s.ActiveGroup,
-		DeployMode: s.DeployMode,
-		CreatedAt:  s.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:  s.UpdatedAt.Format(time.RFC3339),
+		DeployMode:           s.DeployMode,
+		DockerRegistry:       s.DockerRegistry,
+		DockerImageName:      s.DockerImageName,
+		DockerImageTag:       s.DockerImageTag,
+		DockerfileTemplateID: s.DockerfileTemplateID,
+		Dockerfile:           s.Dockerfile,
+		DockerBuildArgs:      s.DockerBuildArgs,
+		DockerRunArgs:        s.DockerRunArgs,
+		CreatedAt:            s.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:            s.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -110,6 +133,9 @@ func (s *AppServiceService) Create(appID uint, in AppServiceInput) (AppServiceVi
 		}
 		return AppServiceView{}, apperr.Wrap(err, "INTERNAL", "find app", 500)
 	}
+	if err := s.validateDockerfileTemplate(appID, in.DockerfileTemplateID); err != nil {
+		return AppServiceView{}, err
+	}
 	opt := boolDeref(in.Optional, false)
 	en := boolDeref(in.Enabled, true)
 	row := &model.AppService{
@@ -122,10 +148,17 @@ func (s *AppServiceService) Create(appID uint, in AppServiceInput) (AppServiceVi
 		JavaPath:     strings.TrimSpace(in.JavaPath),
 		StartupOrder: in.StartupOrder,
 		Optional:     opt, Enabled: en,
-		NginxHostID:       in.NginxHostID,
-		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
-		ActiveGroup:       strings.TrimSpace(in.ActiveGroup),
-		DeployMode:        strings.TrimSpace(in.DeployMode),
+		NginxHostID:          in.NginxHostID,
+		NginxUpstreamName:    strings.TrimSpace(in.NginxUpstreamName),
+		ActiveGroup:          strings.TrimSpace(in.ActiveGroup),
+		DeployMode:           strings.TrimSpace(in.DeployMode),
+		DockerRegistry:       strings.TrimSpace(in.DockerRegistry),
+		DockerImageName:      strings.TrimSpace(in.DockerImageName),
+		DockerImageTag:       strings.TrimSpace(in.DockerImageTag),
+		DockerfileTemplateID: in.DockerfileTemplateID,
+		Dockerfile:           in.Dockerfile,
+		DockerBuildArgs:      strings.TrimSpace(in.DockerBuildArgs),
+		DockerRunArgs:        strings.TrimSpace(in.DockerRunArgs),
 	}
 	if row.StartupOrder == 0 {
 		row.StartupOrder = 100
@@ -172,6 +205,9 @@ func (s *AppServiceService) Update(id uint, in AppServiceInput) (AppServiceView,
 	if err := deploy.ValidateDeployMode(in.DeployMode); err != nil {
 		return AppServiceView{}, apperr.New("BAD_REQUEST", err.Error(), 400)
 	}
+	if err := s.validateDockerfileTemplate(r.AppID, in.DockerfileTemplateID); err != nil {
+		return AppServiceView{}, err
+	}
 	// service_code 不可改（参考 app_code 也不可改的语义）
 	if strings.TrimSpace(in.ServiceCode) != "" && strings.TrimSpace(in.ServiceCode) != r.ServiceCode {
 		return AppServiceView{}, apperr.New("BAD_REQUEST",
@@ -199,10 +235,32 @@ func (s *AppServiceService) Update(id uint, in AppServiceInput) (AppServiceView,
 	r.NginxUpstreamName = strings.TrimSpace(in.NginxUpstreamName)
 	r.ActiveGroup = strings.TrimSpace(in.ActiveGroup)
 	r.DeployMode = strings.TrimSpace(in.DeployMode)
+	r.DockerRegistry = strings.TrimSpace(in.DockerRegistry)
+	r.DockerImageName = strings.TrimSpace(in.DockerImageName)
+	r.DockerImageTag = strings.TrimSpace(in.DockerImageTag)
+	r.DockerfileTemplateID = in.DockerfileTemplateID
+	r.Dockerfile = in.Dockerfile
+	r.DockerBuildArgs = strings.TrimSpace(in.DockerBuildArgs)
+	r.DockerRunArgs = strings.TrimSpace(in.DockerRunArgs)
 	if err := s.db.Save(r).Error; err != nil {
 		return AppServiceView{}, apperr.Wrap(err, "INTERNAL", "update app_service", 500)
 	}
 	return toAppServiceView(r), nil
+}
+
+func (s *AppServiceService) validateDockerfileTemplate(appID, templateID uint) error {
+	if templateID == 0 {
+		return nil
+	}
+	var n int64
+	if err := s.db.Model(&model.DockerfileTemplate{}).
+		Where("id = ? AND app_id = ?", templateID, appID).Count(&n).Error; err != nil {
+		return apperr.Wrap(err, "INTERNAL", "validate dockerfile template", 500)
+	}
+	if n == 0 {
+		return apperr.New("BAD_REQUEST", "dockerfile_template_id 不属于当前应用", 400)
+	}
+	return nil
 }
 
 // Delete 软停用而非物理删（避免破坏现有 deployment 引用）。
@@ -263,6 +321,12 @@ func EnsureDefaultAppService(db *gorm.DB, app *model.Application) error {
 		NginxUpstreamName: app.NginxUpstreamName,
 		ActiveGroup:       app.ActiveGroup,
 		DeployMode:        strings.TrimSpace(app.DeployMode), // Sprint X.10：从 app 继承
+		DockerRegistry:    app.DockerRegistry,
+		DockerImageName:   app.DockerImageName,
+		DockerImageTag:    app.DockerImageTag,
+		Dockerfile:        app.Dockerfile,
+		DockerBuildArgs:   app.DockerBuildArgs,
+		DockerRunArgs:     app.DockerRunArgs,
 	}
 	if err := db.Create(row).Error; err != nil {
 		if isUniqueConstraintErr(err) {

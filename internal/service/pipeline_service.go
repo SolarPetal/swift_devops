@@ -687,6 +687,50 @@ func (s *PipelineService) publishStep(runID uint, st strategy.StepResult) {
 	s.pub.Publish(PipelineTopic(runID), data)
 }
 
+// appendSnapshotStep 把实时 step 同步追加到 PipelineRun.StateSnapshot。
+//
+// 这不是为了最终结果（finishRun 会写完整 snapshot），而是为了「晚连上的」前端：
+// 部署触发后 dial/env_check/upload 可能很快完成，Drawer 的 WS 连接稍晚才建立；
+// 如果 DB snapshot 仍是空，首帧 snapshot 就会显示“还没有步骤记录”，直到下一个 step 才刷新。
+// 逐步落库后，任何时刻连上都能看到已完成阶段。
+func (s *PipelineService) appendSnapshotStep(runID uint, st strategy.StepResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var r model.PipelineRun
+	if err := s.db.Select("id", "strategy", "artifact_id", "state_snapshot", "started_at").First(&r, runID).Error; err != nil {
+		slog.Warn("append snapshot step: load run", "run_id", runID, "err", err)
+		return
+	}
+	var snap strategy.RunSnapshot
+	if strings.TrimSpace(r.StateSnapshot) != "" {
+		_ = json.Unmarshal([]byte(r.StateSnapshot), &snap)
+	}
+	if snap.Strategy == "" {
+		snap.Strategy = r.Strategy
+	}
+	if snap.ArtifactID == 0 {
+		snap.ArtifactID = r.ArtifactID
+	}
+	if snap.StartedAt == "" {
+		if r.StartedAt != nil {
+			snap.StartedAt = r.StartedAt.Format(time.RFC3339)
+		} else {
+			snap.StartedAt = time.Now().Format(time.RFC3339)
+		}
+	}
+	snap.Steps = append(snap.Steps, st)
+	data, err := json.Marshal(&snap)
+	if err != nil {
+		slog.Warn("append snapshot step: marshal", "run_id", runID, "err", err)
+		return
+	}
+	if err := s.db.Model(&model.PipelineRun{}).Where("id = ?", runID).
+		Update("state_snapshot", string(data)).Error; err != nil {
+		slog.Warn("append snapshot step: update", "run_id", runID, "err", err)
+	}
+}
+
 func (s *PipelineService) publishStatus(runID uint, status string) {
 	if s.pub == nil {
 		return
@@ -843,6 +887,7 @@ type runHooks struct {
 }
 
 func (h *runHooks) OnStep(st strategy.StepResult) {
+	h.svc.appendSnapshotStep(h.runID, st)
 	h.svc.publishStep(h.runID, st)
 }
 

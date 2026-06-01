@@ -40,6 +40,7 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	hostSvc := service.NewHostService(db, aes)
 	appSvc := service.NewAppService(db)
 	appServiceSvc := service.NewAppServiceService(db) // Sprint X.4：微服务层 CRUD
+	dockerfileTplSvc := service.NewDockerfileTemplateService(db)
 	depSvc := service.NewDeploymentService(db)
 	artSvc := service.NewArtifactService(db, cfg.Storage.ArtifactDir, int64(cfg.Storage.MaxUploadMB)<<20)
 	gitCredSvc := service.NewGitCredentialService(db, aes)
@@ -84,6 +85,15 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/app-services/:id", asH.Get)
 		v1.PUT("/app-services/:id", asH.Update)
 		v1.DELETE("/app-services/:id", asH.Delete)
+
+		// Dockerfile 模板（应用级，多模板 + service 绑定）
+		dfH := handler.NewDockerfileTemplateHandler(dockerfileTplSvc)
+		v1.GET("/apps/:id/dockerfiles", dfH.List)
+		v1.POST("/apps/:id/dockerfiles", dfH.Create)
+		v1.POST("/apps/:id/dockerfiles/default", dfH.CreateDefault)
+		v1.GET("/dockerfiles/:id", dfH.Get)
+		v1.PUT("/dockerfiles/:id", dfH.Update)
+		v1.DELETE("/dockerfiles/:id", dfH.Delete)
 
 		// 应用 × 主机绑定（Deployment）
 		depH := handler.NewDeploymentHandler(depSvc)

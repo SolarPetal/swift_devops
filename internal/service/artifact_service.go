@@ -402,8 +402,11 @@ func (s *ArtifactService) findByID(id uint) (*model.Artifact, error) {
 
 // BundleItemInput IngestBundle 入参的单条 service 产物。
 type BundleItemInput struct {
-	ServiceCode string // 对应 AppService.ServiceCode；多 service 时必填，单 service 兜底 "default"
-	LocalPath   string // 构建产物绝对路径（一般在 build_workspace 内）
+	ServiceCode       string // 对应 AppService.ServiceCode；多 service 时必填，单 service 兜底 "default"
+	LocalPath         string // 构建产物绝对路径（一般在 build_workspace 内）
+	DockerImage       string // Docker 构建模式产出的完整镜像名；jar 构建为空
+	DockerfileName    string // Dockerfile 模板名快照
+	DockerfileContent string // Dockerfile 内容快照（remote-docker 部署/回滚使用）
 }
 
 // ArtifactBundleView 整组制品视图。
@@ -421,14 +424,17 @@ type ArtifactBundleView struct {
 
 // ArtifactItemView 单 service 产物明细。
 type ArtifactItemView struct {
-	ID          uint   `json:"id"`
-	BundleID    uint   `json:"bundle_id"`
-	ServiceCode string `json:"service_code"`
-	FileName    string `json:"file_name"`
-	FilePath    string `json:"file_path"`
-	FileMD5     string `json:"file_md5"`
-	FileSize    int64  `json:"file_size"`
-	CreatedAt   string `json:"created_at"`
+	ID                uint   `json:"id"`
+	BundleID          uint   `json:"bundle_id"`
+	ServiceCode       string `json:"service_code"`
+	FileName          string `json:"file_name"`
+	FilePath          string `json:"file_path"`
+	FileMD5           string `json:"file_md5"`
+	FileSize          int64  `json:"file_size"`
+	DockerImage       string `json:"docker_image"`
+	DockerfileName    string `json:"dockerfile_name"`
+	DockerfileContent string `json:"dockerfile_content"`
+	CreatedAt         string `json:"created_at"`
 }
 
 func toBundleView(b *model.ArtifactBundle, items []model.ArtifactItem) ArtifactBundleView {
@@ -444,7 +450,10 @@ func toBundleView(b *model.ArtifactBundle, items []model.ArtifactItem) ArtifactB
 			ID: it.ID, BundleID: it.BundleID, ServiceCode: it.ServiceCode,
 			FileName: it.FileName, FilePath: it.FilePath,
 			FileMD5: it.FileMD5, FileSize: it.FileSize,
-			CreatedAt: it.CreatedAt.Format(time.RFC3339),
+			DockerImage:       it.DockerImage,
+			DockerfileName:    it.DockerfileName,
+			DockerfileContent: it.DockerfileContent,
+			CreatedAt:         it.CreatedAt.Format(time.RFC3339),
 		})
 	}
 	return v
@@ -482,11 +491,14 @@ func (s *ArtifactService) IngestBundle(appID uint, versionTag, commitSHA, trigge
 
 	// 2. 拷贝所有 jar + 计算 MD5；失败立刻清理已成功的文件
 	type stagedItem struct {
-		service string
-		dst     string
-		size    int64
-		md5     string
-		srcName string
+		service           string
+		dst               string
+		size              int64
+		md5               string
+		srcName           string
+		dockerImage       string
+		dockerfileName    string
+		dockerfileContent string
 	}
 	var staged []stagedItem
 	rollback := func() {
@@ -545,8 +557,11 @@ func (s *ArtifactService) IngestBundle(appID uint, versionTag, commitSHA, trigge
 		}
 		staged = append(staged, stagedItem{
 			service: svc, dst: dst, size: written,
-			md5:     hex.EncodeToString(h.Sum(nil)),
-			srcName: filepath.Base(it.LocalPath),
+			md5:               hex.EncodeToString(h.Sum(nil)),
+			srcName:           filepath.Base(it.LocalPath),
+			dockerImage:       strings.TrimSpace(it.DockerImage),
+			dockerfileName:    strings.TrimSpace(it.DockerfileName),
+			dockerfileContent: it.DockerfileContent,
 		})
 	}
 
@@ -566,6 +581,9 @@ func (s *ArtifactService) IngestBundle(appID uint, versionTag, commitSHA, trigge
 				BundleID: bundle.ID, ServiceCode: st.service,
 				FileName: st.srcName, FilePath: st.dst,
 				FileMD5: st.md5, FileSize: st.size,
+				DockerImage:       st.dockerImage,
+				DockerfileName:    st.dockerfileName,
+				DockerfileContent: st.dockerfileContent,
 			}
 			if err := tx.Create(&it).Error; err != nil {
 				return err
