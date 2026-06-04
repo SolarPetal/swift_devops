@@ -17,10 +17,16 @@ func Open(dsn string) (*gorm.DB, error) {
 }
 
 func AutoMigrate(db *gorm.DB) error {
+	// Sprint X.1 之前 deployments / pipeline_run_hosts 只有 host 维度唯一索引。
+	// 多 service 发布需要升级为 (app_id, host_id, service_code) /
+	// (run_id, host_id, service_code)。GORM AutoMigrate 不会删除旧索引，
+	// 这里显式清理，避免老库阻止同一主机绑定多个 service。
+	_ = db.Exec("DROP INDEX IF EXISTS idx_app_host").Error
+	_ = db.Exec("DROP INDEX IF EXISTS idx_run_host").Error
 	return db.AutoMigrate(
 		&model.Host{},
 		&model.Application{},
-		&model.AppService{}, // Sprint X.1：微服务层
+		&model.AppService{}, // Sprint X.1：可部署服务层
 		&model.DockerfileTemplate{},
 		&model.Artifact{},
 		&model.ArtifactBundle{}, // Sprint X.1：版本一致性层

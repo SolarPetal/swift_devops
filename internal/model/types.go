@@ -14,9 +14,9 @@ type Host struct {
 	HostKey  string `gorm:"type:text" json:"-"` // SSH host key (TOFU)
 	Status   string `gorm:"size:20;default:'unknown'" json:"status"`
 	Tags     string `gorm:"type:text" json:"tags"`    // JSON 数组
-	GroupTag string `gorm:"size:20" json:"group_tag"` // blue / green
+	GroupTag string `gorm:"size:20" json:"group_tag"` // legacy traffic group，功能已下线，写入时清空
 	// JavaPath: 该主机上 java 可执行文件的绝对路径。空 = /usr/bin/java（默认）。
-	// Sprint 3.7 蓝绿/部署前 env_check 用，避免远端 java 不在 PATH 或路径不同导致 203/EXEC。
+	// Sprint 3.7 部署前 env_check 用，避免远端 java 不在 PATH 或路径不同导致 203/EXEC。
 	JavaPath  string    `gorm:"size:255" json:"java_path"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -24,10 +24,10 @@ type Host struct {
 
 // Application 业务应用
 //
-// Sprint X.1 重构：从"单体 jar"演化为"业务系统层"。
-// per-runtime 字段（port/health/jvm/env/systemd_user/java_path/build_module/build_jar_pattern
-// /nginx_*/active_group）将逐步下沉到 [AppService]，X.1 阶段仍保留以兼容老 service/strategy/handler 代码；
-// 等 Sprint X.3/X.4 切流完成后再清掉。
+// Sprint X.1 重构：从"单体 jar"演化为"Git 仓库 + 可部署服务"模型。
+// per-runtime 字段（port/health/jvm/env/systemd_user/java_path/build_module/build_jar_pattern）
+// 已统一由 Application 管理；nginx_*/active_group 属于 legacy traffic-switch 字段，
+// 当前功能已下线，写入时会被 service 层清空，仅保留 DB/API 兼容。
 //
 // 新增 GitRef 字段：默认分支放顶层，多 service 共享一次构建。
 type Application struct {
@@ -62,7 +62,7 @@ type Application struct {
 	//   "" / "systemd" → 写 /etc/systemd/system/devops-<app>.service + systemctl 管控（默认，向后兼容）
 	//   "nohup"        → 写 <deploy_path>/start.sh + nohup java -jar + app.pid 守护（免 root，crash 不自愈）
 	//   "docker"       → docker pull + docker run（Sprint X.11 新增）
-	// 单 service 应用沿用本字段；多 service 链路下，AppService.DeployMode 覆盖本字段。
+	// 单 service 应用沿用本字段；多 service 链路下，AppService.DeployMode 非空时覆盖本字段。
 	DeployMode string `gorm:"size:20;default:'systemd'" json:"deploy_mode"`
 
 	// Docker 构建配置（Sprint X.11）
@@ -73,33 +73,34 @@ type Application struct {
 	DockerBuildArgs string `gorm:"type:text" json:"docker_build_args"` // docker build 参数，如 --build-arg ENV=prod
 
 	// Docker 部署配置（Sprint X.11）
-	DockerRunArgs string `gorm:"type:text" json:"docker_run_args"` // docker run 参数，如 -p 8080:8080 -e ENV=prod --restart=always
+	// DockerContainerName 容器名模板，如 {{APP_CODE}}-{{SERVICE_CODE}}；空则 devops-<service>。
+	DockerContainerName string `gorm:"size:128" json:"docker_container_name"`
+	// DockerRunArgs docker run 参数，如 -p 8080:8080 -e ENV=prod --restart=always。
+	DockerRunArgs string `gorm:"type:text" json:"docker_run_args"`
 	// Sprint 5.4.7 构建：multi-module 项目用
 	// BuildModule 非空 → mvn -pl <module> -am；只编译该模块及其依赖，加速 + 减少 jar 命中
 	// BuildJarPattern 非空 → glob 在 workspace 下匹配 jar；为空走 builder 默认扫描+Spring Boot 探测
 	BuildModule     string `gorm:"size:100" json:"build_module"`
 	BuildJarPattern string `gorm:"size:255" json:"build_jar_pattern"`
-	// Sprint 4 蓝绿：nginx 配置。空 = 未启用蓝绿。
-	// NginxHostID 指向 hosts 表中跑 nginx 的主机；NginxUpstreamName 是该 nginx 中的 upstream 名。
-	// ActiveGroup 记录当前对外提供服务的组（blue/green/空）；空 = 首次部署前。
+	// Legacy traffic-switch 字段：原 nginx 切流配置已下线。
+	// 新建/更新应用时 service 层会清空这些字段；保留字段仅为历史数据兼容。
 	NginxHostID       uint   `gorm:"index" json:"nginx_host_id"`
 	NginxUpstreamName string `gorm:"size:100" json:"nginx_upstream_name"`
-	ActiveGroup       string `gorm:"size:20" json:"active_group"` // blue / green / 空
+	ActiveGroup       string `gorm:"size:20" json:"active_group"`
 	// ===== 待下沉字段结束 =====
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// AppService 微服务层 —— Sprint X.1 新增。
-// 一个 Application 可挂 N 个 AppService（如 nacos 微服务里的 eureka / gateway / user-service / order-service）。
+// AppService 可部署服务层 —— Sprint X.1 新增。
+// 一个 Application 可挂 N 个 AppService（如 gateway / user-service / order-service）。
 //
 // 设计原则：
-//   - 单体 jar 应用 = 1 行 AppService（service_code 与 app_code 同名或 "default"）
+//   - 单服务应用 = 1 行启用 AppService（由用户创建、扫描或批量导入）
 //   - per-runtime 字段（port / health / jvm / env / systemd_user / java_path）全部下沉到这里
 //   - 构建参数（build_module / build_jar_pattern）per-service：multi-module 项目每个 service 选一个 module
 //   - 启动序：StartupOrder 整数排序，小先起，同值并发；nacos 一般不在 swift-devops 管控，所以业务服务可全部用同一 wave
-//   - 蓝绿：per-service 蓝绿（Q1 答案 A）—— gateway 才挂 nginx_*，业务服务用 rolling
 //   - Optional：true 时该 service 失败不阻塞整个 run，snapshot 标 warning
 //   - Enabled：软下线开关，false 时部署/构建跳过该 service
 type AppService struct {
@@ -114,17 +115,18 @@ type AppService struct {
 
 	// per-runtime
 	Port           int    `gorm:"not null" json:"port"`
-	HealthCheckURL string `gorm:"size:255;default:'/actuator/health'" json:"health_check_url"`
+	HealthCheckURL string `gorm:"size:255" json:"health_check_url"`
 	JvmArgs        string `gorm:"type:text" json:"jvm_args"`
 	EnvVars        string `gorm:"type:text" json:"env_vars"` // JSON
 	SystemdUser    string `gorm:"size:32" json:"systemd_user"`
 	JavaPath       string `gorm:"size:255" json:"java_path"` // 空 = 沿用 Host.JavaPath
 	// DeployMode 部署模式（Sprint X.10 + X.11 扩展）：
-	//   "" / "systemd" → systemd unit + systemctl（默认，向后兼容）
-	//   "nohup"        → nohup java -jar + app.pid（免 root，crash 不自愈）
-	//   "docker"       → docker pull + docker run（Sprint X.11 新增）
-	// 空时回退 Application.DeployMode；都空 → "systemd"。
-	DeployMode string `gorm:"size:20;default:'systemd'" json:"deploy_mode"`
+	//   ""       → 继承 Application.DeployMode；都空时最终兜底 "systemd"
+	//   "systemd" → 显式覆盖为 systemd unit + systemctl
+	//   "nohup"   → 显式覆盖为 nohup java -jar + app.pid（免 root，crash 不自愈）
+	//   "docker"  → 显式覆盖为 docker pull/build + docker run（Sprint X.11 新增）
+	// 注意：这里不能设置 DB default，否则 Maven 扫描导入的“空=继承”会被固化成 systemd。
+	DeployMode string `gorm:"size:20" json:"deploy_mode"`
 
 	// Docker 配置（Sprint X.11）—— 空时回退 Application 的对应字段
 	DockerRegistry  string `gorm:"size:255" json:"docker_registry"`
@@ -135,17 +137,19 @@ type AppService struct {
 	DockerfileTemplateID uint   `gorm:"index" json:"dockerfile_template_id"`
 	Dockerfile           string `gorm:"type:text" json:"dockerfile"`
 	DockerBuildArgs      string `gorm:"type:text" json:"docker_build_args"`
-	DockerRunArgs        string `gorm:"type:text" json:"docker_run_args"`
+	// DockerContainerName 空时回退 Application；支持 {{APP_CODE}} / {{SERVICE_CODE}}。
+	DockerContainerName string `gorm:"size:128" json:"docker_container_name"`
+	DockerRunArgs       string `gorm:"type:text" json:"docker_run_args"`
 
 	// 编排
 	StartupOrder int  `gorm:"default:100;index" json:"startup_order"` // 0=注册中心，10=网关，100=业务（默认）
 	Optional     bool `gorm:"default:false" json:"optional"`          // true = 失败不阻塞 run
 	Enabled      bool `gorm:"default:true" json:"enabled"`            // 软下线
 
-	// 蓝绿（per-service）—— gateway 才用
+	// Legacy traffic-switch 字段：当前功能已下线，写入时清空，仅保留兼容。
 	NginxHostID       uint   `gorm:"index" json:"nginx_host_id"`
 	NginxUpstreamName string `gorm:"size:100" json:"nginx_upstream_name"`
-	ActiveGroup       string `gorm:"size:20" json:"active_group"` // blue / green / 空
+	ActiveGroup       string `gorm:"size:20" json:"active_group"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -230,7 +234,7 @@ type Deployment struct {
 	AppID       uint   `gorm:"uniqueIndex:idx_app_host_service;not null" json:"app_id"`
 	HostID      uint   `gorm:"uniqueIndex:idx_app_host_service;not null" json:"host_id"`
 	ServiceCode string `gorm:"uniqueIndex:idx_app_host_service;size:50;not null;default:''" json:"service_code"` // Sprint X.1
-	GroupTag    string `gorm:"size:20" json:"group_tag"`                                                         // blue / green
+	GroupTag    string `gorm:"size:20" json:"group_tag"`                                                         // legacy traffic group，功能已下线
 	// 旧产物指针（X.4 删除）
 	CurrentArtifactID  uint `json:"current_artifact_id"`
 	PreviousArtifactID uint `json:"previous_artifact_id"`
@@ -253,7 +257,7 @@ type PipelineRun struct {
 	ArtifactID       uint       `json:"artifact_id"`                     // 旧字段，X.4 删除
 	BundleID         uint       `gorm:"index" json:"bundle_id"`          // Sprint X.1：当前发布的 Bundle
 	PreviousBundleID uint       `gorm:"index" json:"previous_bundle_id"` // Sprint X.1：整组回滚指针
-	Strategy         string     `gorm:"size:20" json:"strategy"`         // build / single / rolling / blue_green / rollback
+	Strategy         string     `gorm:"size:20" json:"strategy"`         // build / single / rolling / rollback（历史可能有 blue_green）
 	Status           string     `gorm:"size:20" json:"status"`           // pending / running / success / failed / cancelled
 	StateSnapshot    string     `gorm:"type:text" json:"state_snapshot"`
 	TriggeredBy      string     `gorm:"size:50" json:"triggered_by"`
@@ -330,13 +334,12 @@ type BuilderEnv struct {
 	// 空 = 不传 -Dmaven.repo.local，让 mvn 自己用 settings.xml 默认（推荐）。
 	// 非空必须绝对路径，触发构建时作为 -Dmaven.repo.local=<dir> 传给 mvn。
 	MavenLocalRepo string `gorm:"size:255" json:"maven_local_repo"`
-	// Sprint 5.6：Docker 构建镜像（如 maven:3.9-eclipse-temurin-17）。
-	// 仅 config.builder.docker_enabled=true 时生效；docker 模式下为空会拒绝触发构建。
+	// Legacy：原 Maven 容器构建镜像字段，功能已下线；保留 DB 字段避免破坏旧数据。
 	DockerImage   string     `gorm:"size:255" json:"docker_image"`
 	JavaVersion   string     `gorm:"size:100" json:"java_version"`
 	MavenVersion  string     `gorm:"size:100" json:"maven_version"`
 	GitVersion    string     `gorm:"size:100" json:"git_version"`
-	DockerVersion string     `gorm:"size:100" json:"docker_version"` // Sprint 5.6：detect 回填 docker --version
+	DockerVersion string     `gorm:"size:100" json:"docker_version"` // Legacy：原 Docker detect 结果
 	DetectedAt    *time.Time `json:"detected_at"`
 	Valid         bool       `json:"valid"` // 上次检测是否全部命中
 	DetectMessage string     `gorm:"type:text" json:"detect_message"`

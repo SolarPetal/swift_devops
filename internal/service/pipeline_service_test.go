@@ -32,6 +32,7 @@ func setupPipeSvc(t *testing.T) (*service.PipelineService, *service.HostService,
 	}
 	if err := db.AutoMigrate(
 		&model.Host{}, &model.Application{}, &model.Artifact{},
+		&model.ArtifactBundle{}, &model.ArtifactItem{}, &model.AppService{},
 		&model.Deployment{}, &model.PipelineRun{}, &model.PipelineRunHost{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -54,6 +55,17 @@ func seedAppForPipe(t *testing.T, db *gorm.DB) uint {
 	}
 	if err := db.Create(a).Error; err != nil {
 		t.Fatalf("seed app: %v", err)
+	}
+	if err := db.Create(&model.AppService{
+		AppID:          a.ID,
+		ServiceCode:    "default",
+		Name:           "default",
+		Port:           8080,
+		HealthCheckURL: "/actuator/health",
+		StartupOrder:   100,
+		Enabled:        true,
+	}).Error; err != nil {
+		t.Fatalf("seed default service: %v", err)
 	}
 	return a.ID
 }
@@ -404,16 +416,143 @@ func TestRollback_NoPreviousArtifact(t *testing.T) {
 	}
 }
 
-// TestTrigger_BlueGreen_RequiresNginxConfig App 没配 nginx → 400
-func TestTrigger_BlueGreen_RequiresNginxConfig(t *testing.T) {
+func TestRollbackToRun_RejectsNonSuccess(t *testing.T) {
 	svc, _, _, db, _ := setupPipeSvc(t)
-	appID := seedAppForPipe(t, db) // 默认 NginxHostID=0
-	dep := &model.Deployment{AppID: appID, HostID: 1, GroupTag: "blue", Status: "running"}
+	appID := seedAppForPipe(t, db)
+	now := time.Now()
+	r := &model.PipelineRun{
+		AppID: appID, Strategy: "single", Status: "failed",
+		StartedAt: &now, FinishedAt: &now,
+	}
+	if err := db.Create(r).Error; err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	_, err := svc.RollbackToRun(r.ID, "tester")
+	if err == nil {
+		t.Fatal("非 success 历史不应允许回滚")
+	}
+	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
+		t.Fatalf("应是 400：%v", err)
+	}
+}
+
+func TestRollbackToRun_BundleTargetCreatesRollbackRun(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	appID := seedAppForPipe(t, db)
+	dep := &model.Deployment{
+		AppID: appID, HostID: 1, ServiceCode: "default",
+		CurrentArtifactItemID: 100, Status: "running",
+	}
+	if err := db.Create(dep).Error; err != nil {
+		t.Fatalf("create dep: %v", err)
+	}
+	b := &model.ArtifactBundle{
+		AppID: appID, VersionTag: "v-history", BuildStatus: "success",
+		TriggeredBy: "tester",
+	}
+	if err := db.Create(b).Error; err != nil {
+		t.Fatalf("create bundle: %v", err)
+	}
+	item := &model.ArtifactItem{
+		BundleID: b.ID, ServiceCode: "default",
+		FileName: "demo.jar", FilePath: "/tmp/demo.jar", FileMD5: "abc", FileSize: 3,
+	}
+	if err := db.Create(item).Error; err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+	now := time.Now()
+	target := &model.PipelineRun{
+		AppID: appID, BundleID: b.ID, Strategy: "single", Status: "success",
+		TriggeredBy: "tester", StartedAt: &now, FinishedAt: &now,
+	}
+	if err := db.Create(target).Error; err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+
+	out, err := svc.RollbackToRun(target.ID, "operator")
+	if err != nil {
+		t.Fatalf("rollback to run: %v", err)
+	}
+	if out.Strategy != "rollback" || out.PreviousBundleID != b.ID || out.Status != "running" {
+		t.Fatalf("rollback run view 不正确：%+v", out)
+	}
+	var created model.PipelineRun
+	if err := db.First(&created, out.ID).Error; err != nil {
+		t.Fatalf("load created run: %v", err)
+	}
+	if created.PreviousBundleID != b.ID || created.Strategy != "rollback" || created.TriggeredBy != "operator" {
+		t.Fatalf("rollback run 落库不正确：%+v", created)
+	}
+}
+
+func TestPipelineList_MarksCurrentBundleVersion(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	appID := seedAppForPipe(t, db)
+	b := &model.ArtifactBundle{
+		AppID: appID, VersionTag: "v-current", BuildStatus: "success",
+		TriggeredBy: "tester",
+	}
+	if err := db.Create(b).Error; err != nil {
+		t.Fatalf("create bundle: %v", err)
+	}
+	item := &model.ArtifactItem{
+		BundleID: b.ID, ServiceCode: "default",
+		FileName: "demo.jar", FilePath: "/tmp/demo.jar", FileMD5: "abc", FileSize: 3,
+	}
+	if err := db.Create(item).Error; err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+	if err := db.Create(&model.Deployment{
+		AppID: appID, HostID: 1, ServiceCode: "default",
+		CurrentArtifactItemID: item.ID, Status: "running",
+	}).Error; err != nil {
+		t.Fatalf("create dep: %v", err)
+	}
+	now := time.Now()
+	currentRun := &model.PipelineRun{
+		AppID: appID, BundleID: b.ID, Strategy: "single", Status: "success",
+		StartedAt: &now, FinishedAt: &now,
+	}
+	if err := db.Create(currentRun).Error; err != nil {
+		t.Fatalf("create current run: %v", err)
+	}
+	otherRun := &model.PipelineRun{
+		AppID: appID, BundleID: b.ID + 100, Strategy: "single", Status: "success",
+		StartedAt: &now, FinishedAt: &now,
+	}
+	if err := db.Create(otherRun).Error; err != nil {
+		t.Fatalf("create other run: %v", err)
+	}
+
+	list, err := svc.List(appID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	byID := map[uint]service.PipelineRunView{}
+	for _, r := range list {
+		byID[r.ID] = r
+	}
+	if !byID[currentRun.ID].IsCurrent {
+		t.Fatalf("当前 Bundle 对应历史应标记 is_current：%+v", byID[currentRun.ID])
+	}
+	if byID[currentRun.ID].CurrentPartial {
+		t.Fatalf("完整部署不应标记 partial：%+v", byID[currentRun.ID])
+	}
+	if byID[otherRun.ID].IsCurrent {
+		t.Fatalf("其他 Bundle 不应标记当前：%+v", byID[otherRun.ID])
+	}
+}
+
+func TestTrigger_BlueGreenDisabled(t *testing.T) {
+	svc, _, _, db, _ := setupPipeSvc(t)
+	appID := seedAppForPipe(t, db)
+	dep := &model.Deployment{AppID: appID, HostID: 1, Status: "running"}
 	if err := db.Create(dep).Error; err != nil {
 		t.Fatalf("create dep: %v", err)
 	}
 	art := &model.Artifact{
-		AppID: appID, VersionTag: "vBG-1", FileName: "x.jar",
+		AppID: appID, VersionTag: "vBG-disabled", FileName: "x.jar",
 		FilePath: "/tmp/x.jar", FileMD5: "abc", FileSize: 1, BuildStatus: "success",
 	}
 	if err := db.Create(art).Error; err != nil {
@@ -422,45 +561,12 @@ func TestTrigger_BlueGreen_RequiresNginxConfig(t *testing.T) {
 
 	_, err := svc.Trigger(appID, art.ID, "tester", service.TriggerOptions{Strategy: "blue_green"})
 	if err == nil {
-		t.Fatal("App 未配 nginx 应拒")
+		t.Fatal("blue_green 已下线，应拒绝")
 	}
 	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
 		t.Fatalf("应是 400：%v", err)
 	}
-}
-
-// TestTrigger_BlueGreen_TargetGroupEmpty App 配了 nginx 但目标组没主机 → 400
-func TestTrigger_BlueGreen_TargetGroupEmpty(t *testing.T) {
-	svc, _, _, db, _ := setupPipeSvc(t)
-	app := &model.Application{
-		AppCode: "demo-bg", Name: "Demo BG", DeployPath: "/opt/bg", Port: 8080,
-		HealthCheckURL: "/actuator/health",
-		NginxHostID:    1, NginxUpstreamName: "demo-up", ActiveGroup: "blue",
-	}
-	if err := db.Create(app).Error; err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-	// 只有 blue 组主机（active=blue → target=green，green 组无主机）
-	dep := &model.Deployment{AppID: app.ID, HostID: 2, GroupTag: "blue", Status: "running"}
-	if err := db.Create(dep).Error; err != nil {
-		t.Fatalf("create dep: %v", err)
-	}
-	art := &model.Artifact{
-		AppID: app.ID, VersionTag: "vBG", FileName: "x.jar",
-		FilePath: "/tmp/x.jar", FileMD5: "abc", BuildStatus: "success",
-	}
-	if err := db.Create(art).Error; err != nil {
-		t.Fatalf("create art: %v", err)
-	}
-
-	_, err := svc.Trigger(app.ID, art.ID, "tester", service.TriggerOptions{Strategy: "blue_green"})
-	if err == nil {
-		t.Fatal("目标组无主机应拒")
-	}
-	if ae, ok := err.(*apperr.Error); !ok || ae.HTTPStatus != 400 {
-		t.Fatalf("应是 400：%v", err)
-	}
-	if !strings.Contains(err.Error(), "green") {
-		t.Errorf("错误信息应提到目标组 green：%v", err)
+	if !strings.Contains(err.Error(), "已下线") {
+		t.Fatalf("错误信息应说明已下线：%v", err)
 	}
 }

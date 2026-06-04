@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,16 +46,20 @@ const (
 
 // PipelineRunView 流水线响应视图
 type PipelineRunView struct {
-	ID            uint   `json:"id"`
-	AppID         uint   `json:"app_id"`
-	ArtifactID    uint   `json:"artifact_id"`
-	Strategy      string `json:"strategy"`
-	Status        string `json:"status"`
-	StateSnapshot string `json:"state_snapshot"`
-	TriggeredBy   string `json:"triggered_by"`
-	StartedAt     string `json:"started_at,omitempty"`
-	FinishedAt    string `json:"finished_at,omitempty"`
-	CreatedAt     string `json:"created_at"`
+	ID               uint   `json:"id"`
+	AppID            uint   `json:"app_id"`
+	ArtifactID       uint   `json:"artifact_id"`
+	BundleID         uint   `json:"bundle_id"`
+	PreviousBundleID uint   `json:"previous_bundle_id"`
+	IsCurrent        bool   `json:"is_current"`
+	CurrentPartial   bool   `json:"current_partial"`
+	Strategy         string `json:"strategy"`
+	Status           string `json:"status"`
+	StateSnapshot    string `json:"state_snapshot"`
+	TriggeredBy      string `json:"triggered_by"`
+	StartedAt        string `json:"started_at,omitempty"`
+	FinishedAt       string `json:"finished_at,omitempty"`
+	CreatedAt        string `json:"created_at"`
 }
 
 // PipelineService 流水线编排（策略派发 + 互斥 + Cancel + 实时事件）
@@ -106,7 +111,6 @@ func NewPipelineService(db *gorm.DB, hostSvc *HostService, artSvc *ArtifactServi
 func (s *PipelineService) SetPublisher(p Publisher) { s.pub = p }
 
 // TriggerOptions Trigger 的可选参数容器。
-// 未来 BlueGreen / Canary 的额外字段都加这里，避免 Trigger 签名继续膨胀。
 type TriggerOptions struct {
 	Strategy  string // "single" / "rolling" / "rollback"（"" 默认 single）
 	BatchSize int    // rolling 专用：批大小（>=1）
@@ -178,6 +182,9 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts Tri
 		return PipelineRunView{}, apperr.New("BAD_REQUEST",
 			"应用尚未绑定任何主机，无法部署", 400)
 	}
+	if err := s.validateMicroserviceDeploymentPlan(&app, deps, itemByService); err != nil {
+		return PipelineRunView{}, err
+	}
 	// 4. 同 app 互斥
 	s.mu.Lock()
 	if _, busy := s.runningAppIDs[appID]; busy {
@@ -226,19 +233,6 @@ func (s *PipelineService) Trigger(appID, artifactID uint, actor string, opts Tri
 	if bundle != nil {
 		plan.Bundle = bundle
 		plan.ItemByServiceCode = itemByService
-	}
-
-	// 蓝绿专属：自动选目标组 + 注入 NginxApply 闭包
-	if opts.Strategy == "blue_green" {
-		if err := s.injectBlueGreenPlan(&app, plan); err != nil {
-			s.releaseLock(appID)
-			// 标记 run 为 failed（已落库）；不写 snapshot 避免误导前端
-			now := time.Now()
-			_ = s.db.Model(&model.PipelineRun{}).Where("id = ?", run.ID).Updates(map[string]any{
-				"status": RunStatusFailed, "finished_at": &now,
-			}).Error
-			return PipelineRunView{}, err
-		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -290,6 +284,9 @@ func (s *PipelineService) List(appID uint) ([]PipelineRunView, error) {
 	vs := make([]PipelineRunView, len(rs))
 	for i := range rs {
 		vs[i] = toRunView(&rs[i])
+	}
+	if err := s.annotateCurrentRuns(vs); err != nil {
+		return nil, err
 	}
 	return vs, nil
 }
@@ -359,29 +356,154 @@ func (s *PipelineService) Rollback(appID uint, actor string) (PipelineRunView, e
 			"应用所有主机都没有可回滚的历史版本", 400)
 	}
 
-	// 4. env vars
+	return s.startRollbackRun(&app, deps, actor, artByDep, itemByDep, previousBundleID, 0)
+}
+
+// RollbackToRun 回滚到某一条成功的部署历史。
+//
+// 页面语义：用户在「部署历史」里选择一条 status=success 的记录，表示要把当前应用
+// 重新部署到那条记录对应的版本：
+//   - Bundle 链路：优先使用 target.BundleID；若目标本身是一次成功 rollback，则使用 PreviousBundleID。
+//   - Artifact 旧链路：使用 target.ArtifactID。
+//
+// 与 Rollback(appID) 的区别：
+//   - Rollback(appID) 是“一步回滚到当前 deployment.previous_*”；
+//   - RollbackToRun(runID) 是“回滚到用户选中的成功历史版本”。
+func (s *PipelineService) RollbackToRun(runID uint, actor string) (PipelineRunView, error) {
+	var target model.PipelineRun
+	if err := s.db.First(&target, runID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return PipelineRunView{}, apperr.ErrNotFound
+		}
+		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "get target run", 500)
+	}
+	if target.Status != RunStatusSuccess {
+		return PipelineRunView{}, apperr.New("BAD_REQUEST",
+			fmt.Sprintf("只能回滚到状态=success 的部署历史（当前 #%d 是 %s）", runID, target.Status), 400)
+	}
+
+	var app model.Application
+	if err := s.db.First(&app, target.AppID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return PipelineRunView{}, apperr.New("NOT_FOUND", fmt.Sprintf("应用 %d 不存在", target.AppID), 404)
+		}
+		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "find app", 500)
+	}
+
+	var deps []model.Deployment
+	if err := s.db.Where("app_id = ?", target.AppID).Order("id ASC").Find(&deps).Error; err != nil {
+		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "list deployments", 500)
+	}
+	if len(deps) == 0 {
+		return PipelineRunView{}, apperr.New("BAD_REQUEST", "应用尚未绑定任何主机，无法回滚", 400)
+	}
+
+	targetBundleID := target.BundleID
+	if targetBundleID == 0 {
+		// 成功 rollback 记录用 previous_bundle_id 表示“当时回滚到的 Bundle”。
+		targetBundleID = target.PreviousBundleID
+	}
+
+	if targetBundleID > 0 {
+		bundle, items, err := s.artSvc.GetBundle(targetBundleID)
+		if err != nil {
+			return PipelineRunView{}, err
+		}
+		if bundle.AppID != target.AppID {
+			return PipelineRunView{}, apperr.New("BAD_REQUEST",
+				fmt.Sprintf("目标 Bundle %d 属于应用 %d，不是 %d", targetBundleID, bundle.AppID, target.AppID), 400)
+		}
+		itemByService := make(map[string]*model.ArtifactItem, len(items))
+		for i := range items {
+			itemByService[items[i].ServiceCode] = &items[i]
+		}
+		if err := s.validateMicroserviceDeploymentPlan(&app, deps, itemByService); err != nil {
+			return PipelineRunView{}, err
+		}
+		itemByDep := map[uint]*model.ArtifactItem{}
+		missing := map[string]struct{}{}
+		for i := range deps {
+			dep := &deps[i]
+			item := itemForServiceCode(itemByService, dep.ServiceCode)
+			if item == nil {
+				label := strings.TrimSpace(dep.ServiceCode)
+				if label == "" {
+					label = "default"
+				}
+				missing[label] = struct{}{}
+				continue
+			}
+			itemByDep[dep.ID] = item
+		}
+		if len(missing) > 0 {
+			names := make([]string, 0, len(missing))
+			for name := range missing {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			return PipelineRunView{}, apperr.New("BAD_REQUEST",
+				"目标历史 Bundle 缺少当前绑定 service 的产物："+strings.Join(names, ", "), 400)
+		}
+		return s.startRollbackRun(&app, deps, actor, nil, itemByDep, targetBundleID, 0)
+	}
+
+	if target.ArtifactID > 0 {
+		art, err := s.artSvc.GetModel(target.ArtifactID)
+		if err != nil {
+			return PipelineRunView{}, err
+		}
+		if art.AppID != target.AppID {
+			return PipelineRunView{}, apperr.New("BAD_REQUEST",
+				fmt.Sprintf("目标 Artifact %d 属于应用 %d，不是 %d", target.ArtifactID, art.AppID, target.AppID), 400)
+		}
+		artByDep := map[uint]*model.Artifact{}
+		for i := range deps {
+			artByDep[deps[i].ID] = art
+		}
+		return s.startRollbackRun(&app, deps, actor, artByDep, nil, 0, art.ID)
+	}
+
+	return PipelineRunView{}, apperr.New("BAD_REQUEST",
+		fmt.Sprintf("部署历史 #%d 没有关联 Bundle 或 Artifact，无法作为回滚目标", runID), 400)
+}
+
+func (s *PipelineService) startRollbackRun(
+	app *model.Application,
+	deps []model.Deployment,
+	actor string,
+	artByDep map[uint]*model.Artifact,
+	itemByDep map[uint]*model.ArtifactItem,
+	previousBundleID uint,
+	targetArtifactID uint,
+) (PipelineRunView, error) {
+	if len(itemByDep) == 0 && len(artByDep) == 0 {
+		return PipelineRunView{}, apperr.New("BAD_REQUEST",
+			"没有可回滚的目标版本", 400)
+	}
+
+	// env vars
 	envMap, envErr := deploy.ParseEnvVarsJSON(app.EnvVars)
 	if envErr != nil {
 		return PipelineRunView{}, apperr.Wrap(envErr, "BAD_REQUEST",
 			"env_vars 解析失败: "+envErr.Error(), 400)
 	}
 
-	// 5. 同 app 互斥
+	// 同 app 互斥
 	s.mu.Lock()
-	if _, busy := s.runningAppIDs[appID]; busy {
+	if _, busy := s.runningAppIDs[app.ID]; busy {
 		s.mu.Unlock()
 		return PipelineRunView{}, apperr.New("CONFLICT",
-			fmt.Sprintf("应用 %d 已有流水线在跑，请等待结束", appID), 409)
+			fmt.Sprintf("应用 %d 已有流水线在跑，请等待结束", app.ID), 409)
 	}
-	s.runningAppIDs[appID] = struct{}{}
+	s.runningAppIDs[app.ID] = struct{}{}
 	s.mu.Unlock()
 
-	// 6. 落库 running（rollback artifact_id=0 标记，具体 art per-dep 在 plan 里）
+	// 落库 running：Bundle 目标放 previous_bundle_id；旧 Artifact 目标放 artifact_id。
 	now := time.Now()
-	snap := strategy.RunSnapshot{Strategy: "rollback", StartedAt: now.Format(time.RFC3339)}
+	snap := strategy.RunSnapshot{Strategy: "rollback", ArtifactID: targetArtifactID, StartedAt: now.Format(time.RFC3339)}
 	snapJSON, _ := json.Marshal(snap)
 	run := &model.PipelineRun{
-		AppID: appID, ArtifactID: 0,
+		AppID: app.ID, ArtifactID: targetArtifactID,
 		PreviousBundleID: previousBundleID, // Sprint X.7：回滚目标 Bundle 留痕
 		Strategy:         "rollback", Status: RunStatusRunning,
 		StateSnapshot: string(snapJSON),
@@ -389,23 +511,44 @@ func (s *PipelineService) Rollback(appID uint, actor string) (PipelineRunView, e
 		StartedAt:     &now,
 	}
 	if err := s.db.Create(run).Error; err != nil {
-		s.releaseLock(appID)
+		s.releaseLock(app.ID)
 		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "create run", 500)
 	}
 
-	// 7. seed host rows + 异步执行
+	// seed host rows + 异步执行
 	s.seedRunHosts(run.ID, deps)
 	plan := &strategy.Plan{
-		RunID: run.ID, App: &app, Deps: deps, EnvMap: envMap,
+		RunID: run.ID, App: app, Deps: deps, EnvMap: envMap,
 		ArtifactByDepID: artByDep,
 		ItemByDepID:     itemByDep,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerCancel(run.ID, cancel)
-	go s.execute(ctx, run.ID, &app, plan, strategy.Rollback{})
+	go s.execute(ctx, run.ID, app, plan, strategy.Rollback{})
 
 	s.publishStatus(run.ID, RunStatusRunning)
 	return toRunView(run), nil
+}
+
+func itemForServiceCode(items map[string]*model.ArtifactItem, svcCode string) *model.ArtifactItem {
+	code := strings.TrimSpace(svcCode)
+	if code == "" {
+		code = "default"
+	}
+	if it := items[code]; it != nil {
+		return it
+	}
+	if code == "default" {
+		if it := items[""]; it != nil {
+			return it
+		}
+		if len(items) == 1 {
+			for _, it := range items {
+				return it
+			}
+		}
+	}
+	return nil
 }
 
 func (s *PipelineService) Get(id uint) (PipelineRunView, error) {
@@ -416,7 +559,118 @@ func (s *PipelineService) Get(id uint) (PipelineRunView, error) {
 		}
 		return PipelineRunView{}, apperr.Wrap(err, "INTERNAL", "get run", 500)
 	}
-	return toRunView(&r), nil
+	vs := []PipelineRunView{toRunView(&r)}
+	if err := s.annotateCurrentRuns(vs); err != nil {
+		return PipelineRunView{}, err
+	}
+	return vs[0], nil
+}
+
+type currentDeploymentVersion struct {
+	BundleID   uint
+	ArtifactID uint
+	Partial    bool
+}
+
+func (s *PipelineService) annotateCurrentRuns(vs []PipelineRunView) error {
+	if len(vs) == 0 {
+		return nil
+	}
+	cache := map[uint]currentDeploymentVersion{}
+	for i := range vs {
+		if vs[i].Status != RunStatusSuccess {
+			continue
+		}
+		appID := vs[i].AppID
+		cur, ok := cache[appID]
+		if !ok {
+			var err error
+			cur, err = s.currentDeploymentVersion(appID)
+			if err != nil {
+				return err
+			}
+			cache[appID] = cur
+		}
+		if cur.BundleID > 0 {
+			if vs[i].BundleID == cur.BundleID || vs[i].PreviousBundleID == cur.BundleID {
+				vs[i].IsCurrent = true
+				vs[i].CurrentPartial = cur.Partial
+			}
+			continue
+		}
+		if cur.ArtifactID > 0 && vs[i].ArtifactID == cur.ArtifactID {
+			vs[i].IsCurrent = true
+			vs[i].CurrentPartial = cur.Partial
+		}
+	}
+	return nil
+}
+
+func (s *PipelineService) currentDeploymentVersion(appID uint) (currentDeploymentVersion, error) {
+	var deps []model.Deployment
+	if err := s.db.Select("id", "current_artifact_id", "current_artifact_item_id").
+		Where("app_id = ?", appID).
+		Find(&deps).Error; err != nil {
+		return currentDeploymentVersion{}, apperr.Wrap(err, "INTERNAL", "load current deployments", 500)
+	}
+	if len(deps) == 0 {
+		return currentDeploymentVersion{}, nil
+	}
+
+	itemIDs := map[uint]struct{}{}
+	artifactIDs := map[uint]struct{}{}
+	missing := 0
+	for i := range deps {
+		switch {
+		case deps[i].CurrentArtifactItemID > 0:
+			itemIDs[deps[i].CurrentArtifactItemID] = struct{}{}
+		case deps[i].CurrentArtifactID > 0:
+			artifactIDs[deps[i].CurrentArtifactID] = struct{}{}
+		default:
+			missing++
+		}
+	}
+
+	if len(itemIDs) > 0 {
+		ids := make([]uint, 0, len(itemIDs))
+		for id := range itemIDs {
+			ids = append(ids, id)
+		}
+		var items []model.ArtifactItem
+		if err := s.db.Select("id", "bundle_id").Where("id IN ?", ids).Find(&items).Error; err != nil {
+			return currentDeploymentVersion{}, apperr.Wrap(err, "INTERNAL", "load current artifact items", 500)
+		}
+		if len(items) != len(ids) {
+			return currentDeploymentVersion{}, nil
+		}
+		bundleIDs := map[uint]struct{}{}
+		for i := range items {
+			bundleIDs[items[i].BundleID] = struct{}{}
+		}
+		if len(bundleIDs) != 1 {
+			return currentDeploymentVersion{}, nil
+		}
+		var bundleID uint
+		for id := range bundleIDs {
+			bundleID = id
+		}
+		return currentDeploymentVersion{
+			BundleID: bundleID,
+			Partial:  missing > 0 || len(artifactIDs) > 0,
+		}, nil
+	}
+
+	if len(artifactIDs) == 1 {
+		var artifactID uint
+		for id := range artifactIDs {
+			artifactID = id
+		}
+		return currentDeploymentVersion{
+			ArtifactID: artifactID,
+			Partial:    missing > 0,
+		}, nil
+	}
+	return currentDeploymentVersion{}, nil
 }
 
 // --- 异步执行 ---
@@ -456,13 +710,27 @@ func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Ap
 	)
 
 	// Sprint X.3：查 app 是否已配置 AppService
-	services, svcErr := s.loadEnabledServices(app.ID)
+	services, svcErr := s.loadEnabledServicesForApp(app)
 	if svcErr != nil {
-		slog.Warn("load app services failed, fallback to legacy single-jar path", "app_id", app.ID, "err", svcErr)
+		snap.Error = svcErr.Error()
+		s.finishRun(runID, &snap, RunStatusFailed)
+		s.publishStatus(runID, RunStatusFailed)
+		return
 	}
 
 	if len(services) == 0 {
-		// 旧链路：单 jar 模式直接调 strat.Run，plan.Service == nil 触发 resolveServiceConfig 走 app 字段
+		// 旧链路：没有 AppService 行时直接调 strat.Run，plan.Service == nil 触发 resolveServiceConfig 走 app 字段。
+		//
+		// Sprint X.6 之后，前端触发部署优先传 BundleID。旧应用如果尚未创建 AppService 行，
+		// 不会进入 buildSubPlanFunc，因此这里必须把 Bundle 内的 default item 适配回旧的
+		// plan.Artifact / plan.Item。否则 Docker 部署读取不到 ArtifactItem.DockerImage，
+		// 会在 env_check 阶段误报"当前制品没有 Docker 镜像信息"。
+		if err := adaptLegacyBundlePlan(plan); err != nil {
+			snap.Error = err.Error()
+			s.finishRun(runID, &snap, RunStatusFailed)
+			s.publishStatus(runID, RunStatusFailed)
+			return
+		}
 		outcomes, steps = strat.Run(timeoutCtx, env, plan, hooks)
 	} else {
 		// 多 service：按 startup_order 分波并发
@@ -480,15 +748,144 @@ func (s *PipelineService) execute(ctx context.Context, runID uint, app *model.Ap
 	s.publishStatus(runID, finalStatus)
 }
 
-// loadEnabledServices 查 app 已启用的 AppService（按 startup_order ASC）。
-// 返回空切片 + nil err 表示 app 没配 service（走旧链路）。
-func (s *PipelineService) loadEnabledServices(appID uint) ([]model.AppService, error) {
-	var services []model.AppService
-	if err := s.db.Where("app_id = ? AND enabled = ?", appID, true).
-		Order("startup_order ASC, id ASC").Find(&services).Error; err != nil {
+// loadEnabledServicesForApp 查 app 已启用的 AppService（按 startup_order ASC）。
+// 新模型下单服务与多服务统一：差异只来自启用 service 数量。
+func (s *PipelineService) loadEnabledServicesForApp(app *model.Application) ([]model.AppService, error) {
+	if err := EnsureDefaultAppService(s.db, app); err != nil {
 		return nil, err
 	}
+	var services []model.AppService
+	if err := s.db.Where("app_id = ? AND enabled = ?", app.ID, true).
+		Order("startup_order ASC, id ASC").Find(&services).Error; err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(services) == 0 {
+		return nil, apperr.New("BAD_REQUEST",
+			"应用没有启用的 service，请在「服务配置」启用至少一个服务后再部署", 400)
+	}
 	return services, nil
+}
+
+func (s *PipelineService) validateMicroserviceDeploymentPlan(app *model.Application, deps []model.Deployment, itemByService map[string]*model.ArtifactItem) error {
+	services, err := s.loadEnabledServicesForApp(app)
+	if err != nil {
+		return err
+	}
+	if len(services) == 0 {
+		return nil
+	}
+	depCount := map[string]int{}
+	for _, dep := range deps {
+		depCount[normalizeServiceCode(dep.ServiceCode)]++
+	}
+	var missingDeploy []string
+	var missingArtifact []string
+	for _, svc := range services {
+		code := normalizeServiceCode(svc.ServiceCode)
+		if depCount[code] == 0 {
+			missingDeploy = append(missingDeploy, code)
+		}
+		if itemByService != nil {
+			if itemForServiceCode(itemByService, code) == nil {
+				missingArtifact = append(missingArtifact, code)
+			}
+		}
+	}
+	if len(missingDeploy) > 0 {
+		return apperr.New("BAD_REQUEST",
+			"以下 service 还没有绑定主机，无法部署："+strings.Join(missingDeploy, ", "), 400)
+	}
+	if len(missingArtifact) > 0 {
+		return apperr.New("BAD_REQUEST",
+			"当前 Bundle 缺少以下 service 的产物："+strings.Join(missingArtifact, ", ")+"；请重新构建 Bundle", 400)
+	}
+	return nil
+}
+
+func normalizeServiceCode(code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return "default"
+	}
+	return code
+}
+
+// adaptLegacyBundlePlan 把 Bundle/ArtifactItem 适配给没有 AppService 行的旧应用链路。
+//
+// 背景：
+//   - 多 service 路径由 buildSubPlanFunc 按 service_code 挂 plan.Item，并包装 plan.Artifact。
+//   - 旧应用未创建 AppService 时 execute 会直接 strat.Run；如果触发的是 BundleID，
+//     plan.Bundle / plan.ItemByServiceCode 虽然存在，但 plan.Item / plan.Artifact 为空。
+//   - Docker 部署依赖 plan.Item.DockerImage；remote-docker 还依赖 Dockerfile 快照。
+//
+// 规则：
+//   - forward：优先取 service_code=default 的 item；如果 Bundle 只有一个 item，也兜底取它。
+//   - rollback：把 ItemByDepID 包装到 ArtifactByDepID，保留 ItemByDepID 供 Docker 元数据读取。
+func adaptLegacyBundlePlan(plan *strategy.Plan) error {
+	if plan == nil || plan.App == nil {
+		return nil
+	}
+	if plan.Bundle != nil {
+		if plan.Item == nil {
+			item := pickLegacyDefaultItem(plan.ItemByServiceCode)
+			if item == nil {
+				return fmt.Errorf("bundle %d 没有可用于旧应用部署的 default ArtifactItem", plan.Bundle.ID)
+			}
+			plan.Item = item
+		}
+		if plan.Artifact == nil && plan.Item != nil {
+			plan.Artifact = artifactFromBundleItem(plan.App.ID, plan.Item)
+		}
+	}
+	if len(plan.ItemByDepID) > 0 {
+		if plan.ArtifactByDepID == nil {
+			plan.ArtifactByDepID = map[uint]*model.Artifact{}
+		}
+		for depID, item := range plan.ItemByDepID {
+			if item == nil {
+				continue
+			}
+			if _, exists := plan.ArtifactByDepID[depID]; !exists {
+				plan.ArtifactByDepID[depID] = artifactFromBundleItem(plan.App.ID, item)
+			}
+		}
+	}
+	return nil
+}
+
+func pickLegacyDefaultItem(items map[string]*model.ArtifactItem) *model.ArtifactItem {
+	if len(items) == 0 {
+		return nil
+	}
+	if it := items["default"]; it != nil {
+		return it
+	}
+	if it := items[""]; it != nil {
+		return it
+	}
+	if len(items) == 1 {
+		for _, it := range items {
+			return it
+		}
+	}
+	return nil
+}
+
+func artifactFromBundleItem(appID uint, item *model.ArtifactItem) *model.Artifact {
+	if item == nil {
+		return nil
+	}
+	return &model.Artifact{
+		ID:       0, // Bundle Item 适配，不指向 artifacts 表
+		AppID:    appID,
+		FileName: item.FileName,
+		FilePath: item.FilePath,
+		FileMD5:  item.FileMD5,
+		FileSize: item.FileSize,
+	}
 }
 
 // buildSubPlanFunc 构造 SubPlanBuilder，给 RunWaves 用。
@@ -508,10 +905,7 @@ func (s *PipelineService) buildSubPlanFunc(plan *strategy.Plan, strat strategy.S
 			// 没有任何 host 绑定该 service → 跳过
 			return nil, nil, nil
 		}
-		// 解析该 service 的 EnvVars（per-service 优先）
-		if envMap, err := deploy.ParseEnvVarsJSON(svc.EnvVars); err == nil && len(envMap) > 0 {
-			sub.EnvMap = envMap
-		}
+		// 运行时环境变量由 Application 统一管理，sub.EnvMap 沿用顶层 plan.EnvMap。
 		// Sprint X.7：rollback 优先 ItemByDepID（每 dep 包装临时 Artifact 透传给 strategy.Rollback）
 		if len(plan.ItemByDepID) > 0 {
 			subMap := map[uint]*model.Artifact{}
@@ -613,6 +1007,7 @@ func (s *PipelineService) seedRunHosts(runID uint, deps []model.Deployment) {
 		rows = append(rows, model.PipelineRunHost{
 			RunID:        runID,
 			HostID:       deps[i].HostID,
+			ServiceCode:  deps[i].ServiceCode,
 			DeploymentID: deps[i].ID,
 			Status:       strategy.HostStatusPending,
 		})
@@ -768,6 +1163,7 @@ func (s *PipelineService) SnapshotEventBytes(runID uint) []byte {
 func toRunView(r *model.PipelineRun) PipelineRunView {
 	v := PipelineRunView{
 		ID: r.ID, AppID: r.AppID, ArtifactID: r.ArtifactID,
+		BundleID: r.BundleID, PreviousBundleID: r.PreviousBundleID,
 		Strategy: r.Strategy, Status: r.Status,
 		StateSnapshot: r.StateSnapshot,
 		TriggeredBy:   r.TriggeredBy,
@@ -782,84 +1178,6 @@ func toRunView(r *model.PipelineRun) PipelineRunView {
 	return v
 }
 
-// injectBlueGreenPlan 在 Trigger 内部为 blue_green 策略组装 plan：
-//   - 校验 App 已配 NginxHostID + NginxUpstreamName
-//   - 自动选目标组：active="blue" → target="green"，反之亦然，空 → "blue"（首次部署）
-//   - 预查目标组每台主机的 IP:Port（effectivePort），组装成 NginxBackend 列表
-//   - 组装 NginxApply 闭包（dial nginx host → NewNginxApplier → Apply）
-//
-// 返回 *apperr.Error；调用方在错误时已 releaseLock + 收口 run。
-func (s *PipelineService) injectBlueGreenPlan(app *model.Application, plan *strategy.Plan) error {
-	if app.NginxHostID == 0 || strings.TrimSpace(app.NginxUpstreamName) == "" {
-		return apperr.New("BAD_REQUEST",
-			"应用未配置 nginx_host_id / nginx_upstream_name，无法蓝绿部署", 400)
-	}
-	target := pickTargetGroup(app.ActiveGroup)
-	plan.TargetGroup = target
-
-	// 预查目标组主机 IP / effective port，用于 NginxApply 闭包
-	type hostRow struct {
-		ID   uint
-		IP   string
-		Port int
-	}
-	var rows []hostRow
-	for i := range plan.Deps {
-		d := &plan.Deps[i]
-		if d.GroupTag != target {
-			continue
-		}
-		var h model.Host
-		if err := s.db.Select("id", "ip").First(&h, d.HostID).Error; err != nil {
-			return apperr.Wrap(err, "INTERNAL", "lookup host for blue_green", 500)
-		}
-		port := d.Port
-		if port == 0 {
-			port = app.Port
-		}
-		rows = append(rows, hostRow{ID: h.ID, IP: h.IP, Port: port})
-	}
-	if len(rows) == 0 {
-		return apperr.New("BAD_REQUEST",
-			fmt.Sprintf("目标组 %q 没有绑定主机；请先在主机绑定页给目标组添加主机", target), 400)
-	}
-
-	backends := make([]deploy.NginxBackend, 0, len(rows))
-	for _, r := range rows {
-		backends = append(backends, deploy.NginxBackend{IP: r.IP, Port: r.Port})
-	}
-	upstream := deploy.NginxUpstream{
-		AppCode: app.AppCode, UpstreamName: app.NginxUpstreamName, Servers: backends,
-	}
-	nginxHostID := app.NginxHostID
-	dialOpts := s.sshOpts
-
-	plan.NginxApply = func(ctx context.Context) error {
-		t, auth, _, err := s.hostSvc.LoadAuth(nginxHostID)
-		if err != nil {
-			return fmt.Errorf("load nginx host auth: %w", err)
-		}
-		c, err := sshpkg.Dial(t, auth, dialOpts)
-		if err != nil {
-			return fmt.Errorf("dial nginx host: %w", err)
-		}
-		defer c.Close()
-		return deploy.NewNginxApplier(c).Apply(ctx, upstream)
-	}
-	return nil
-}
-
-// pickTargetGroup 根据当前活跃组选目标组：active=blue → green，active=green → blue，空 → blue（首次部署）
-func pickTargetGroup(active string) string {
-	switch strings.TrimSpace(active) {
-	case "green":
-		return "blue"
-	case "blue":
-		return "green"
-	default:
-		return "blue"
-	}
-}
 func pickStrategy(opts TriggerOptions) (strategy.Strategy, error) {
 	switch opts.Strategy {
 	case "single":
@@ -871,10 +1189,10 @@ func pickStrategy(opts TriggerOptions) (strategy.Strategy, error) {
 		}
 		return strategy.Rolling{}, nil
 	case "blue_green":
-		return strategy.BlueGreen{}, nil
+		return nil, apperr.New("BAD_REQUEST", "blue_green 已下线，后续会重新设计；当前请使用 single / rolling", 400)
 	default:
 		return nil, apperr.New("BAD_REQUEST",
-			fmt.Sprintf("strategy=%s 未实现（当前支持 single / rolling / blue_green；rollback 见 /apps/:id/rollback）", opts.Strategy), 400)
+			fmt.Sprintf("strategy=%s 未实现（当前支持 single / rolling；rollback 见 /apps/:id/rollback）", opts.Strategy), 400)
 	}
 }
 
@@ -905,9 +1223,13 @@ func (h *runHooks) OnHostStatus(deploymentID, hostID uint, status, stage, errMsg
 	case strategy.HostStatusSuccess, strategy.HostStatusFailed, strategy.HostStatusSkipped:
 		updates["ended_at"] = &now
 	}
-	if err := h.svc.db.Model(&model.PipelineRunHost{}).
-		Where("run_id = ? AND host_id = ?", h.runID, hostID).
-		Updates(updates).Error; err != nil {
+	q := h.svc.db.Model(&model.PipelineRunHost{}).Where("run_id = ?", h.runID)
+	if deploymentID > 0 {
+		q = q.Where("deployment_id = ?", deploymentID)
+	} else {
+		q = q.Where("host_id = ?", hostID)
+	}
+	if err := q.Updates(updates).Error; err != nil {
 		slog.Warn("update run host", "run_id", h.runID, "host_id", hostID, "err", err)
 	}
 }
@@ -928,16 +1250,5 @@ func (h *runHooks) OnDeploymentSuccess(dep *model.Deployment, newArtifactID, new
 	}
 	if err := h.svc.db.Model(&model.Deployment{}).Where("id = ?", dep.ID).Updates(updates).Error; err != nil {
 		slog.Warn("update deployment artifact", "dep_id", dep.ID, "err", err)
-	}
-}
-
-// OnGroupSwitched 蓝绿切流成功后调用，把 App.active_group 更新为目标组。
-// 仅对 strategy=blue_green 有效；其他策略不调用此 hook。
-func (h *runHooks) OnGroupSwitched(group string) {
-	if err := h.svc.db.Model(&model.Application{}).
-		Where("id = (?)",
-			h.svc.db.Model(&model.PipelineRun{}).Select("app_id").Where("id = ?", h.runID)).
-		Update("active_group", group).Error; err != nil {
-		slog.Warn("update app active_group", "run_id", h.runID, "group", group, "err", err)
 	}
 }

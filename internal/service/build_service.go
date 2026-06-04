@@ -83,19 +83,18 @@ type BuildService struct {
 	workspace string // build_workspace 根目录
 	// Sprint X.9：maven_cache_dir 不再从 config 注入；改到 BuilderEnv.MavenLocalRepo（UI 配置）
 	// 触发构建时 envSvc.ResolveBuildInputs() 返回，允许留空走 settings.xml 默认。
-	maxHistory    int       // Sprint 5.7：构建成功后保留的历史 Bundle 数（config.Storage.MaxHistory）；<=0 不清理
-	pub           Publisher // Sprint 5.5：构建日志实时推 WS；nil = 只写文件不推
-	dockerEnabled bool      // Sprint 5.6：config.builder.docker_enabled；true 走容器构建
+	maxHistory int       // Sprint 5.7：构建成功后保留的历史 Bundle 数（config.Storage.MaxHistory）；<=0 不清理
+	pub        Publisher // Sprint 5.5：构建日志实时推 WS；nil = 只写文件不推
 
 	mu       sync.Mutex
 	busyApps map[uint]struct{} // 同 app 互斥（构建 + 部署可分开管，但构建本身互斥）
 }
 
 func NewBuildService(db *gorm.DB, artSvc *ArtifactService, credSvc *GitCredentialService,
-	envSvc *BuilderEnvService, workspace string, maxHistory int, dockerEnabled bool) *BuildService {
+	envSvc *BuilderEnvService, workspace string, maxHistory int, _ bool) *BuildService {
 	return &BuildService{
 		db: db, artSvc: artSvc, credSvc: credSvc, envSvc: envSvc,
-		workspace: workspace, maxHistory: maxHistory, dockerEnabled: dockerEnabled,
+		workspace: workspace, maxHistory: maxHistory,
 		busyApps: map[uint]struct{}{},
 	}
 }
@@ -109,15 +108,9 @@ func (s *BuildService) Trigger(appID uint, actor string, in BuildTriggerInput) (
 		return BuildRunView{}, apperr.New("INTERNAL", "storage.build_workspace 未配置", 500)
 	}
 
-	// 构建环境校验：docker 模式查 docker/image/git；本机模式查 java/maven/git 检测通过（Sprint 5.6）
-	if s.dockerEnabled {
-		if _, err := s.envSvc.ResolveDockerInputs(); err != nil {
-			return BuildRunView{}, err
-		}
-	} else {
-		if err := s.envSvc.RequireValid(); err != nil {
-			return BuildRunView{}, err
-		}
+	// 构建环境校验：Maven 容器构建镜像功能已下线，统一走本机 Java / Maven / Git。
+	if err := s.envSvc.RequireValid(); err != nil {
+		return BuildRunView{}, err
 	}
 
 	// 1. 校验 app + git_url
@@ -271,43 +264,28 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 
-	// Sprint 5.6：按 docker_enabled 决定容器构建还是本机构建，注入不同的 builder 输入
+	// Maven 构建统一走本机 Java / Maven / Git；业务 Docker 镜像构建仍由 app.build_mode 控制。
 	var (
-		mvnBin, gitBin, mavenCache, dockerImage string
-		execEnv                                 []string
+		mvnBin, gitBin, mavenCache string
+		execEnv                    []string
 	)
-	if s.dockerEnabled {
-		di, derr := s.envSvc.ResolveDockerInputs()
-		if derr != nil {
-			fmt.Fprintf(logFile, "\n[BUILD FAILED] docker inputs: %v\n", derr)
-			s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, derr.Error())
-			return
-		}
-		gitBin, dockerImage, mavenCache = di.GitBin, di.DockerImage, di.MavenCacheDir
-		cacheDisplay := mavenCache
-		if cacheDisplay == "" {
-			cacheDisplay = "(空 → 容器内每次重下依赖)"
-		}
-		fmt.Fprintf(logWriter, "[docker] image=%s git=%s maven_cache=%s\n", dockerImage, gitBin, cacheDisplay)
-	} else {
-		ee, envErr := s.envSvc.BuildExecEnv()
-		if envErr != nil {
-			fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
-		}
-		execEnv = ee
-		inputs, binsErr := s.envSvc.ResolveBuildInputs()
-		if binsErr != nil {
-			fmt.Fprintf(logFile, "\n[BUILD FAILED] load builder inputs: %v\n", binsErr)
-			s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, binsErr.Error())
-			return
-		}
-		mvnBin, gitBin, mavenCache = inputs.MvnBin, inputs.GitBin, inputs.MavenLocalRepo
-		cacheDisplay := mavenCache
-		if cacheDisplay == "" {
-			cacheDisplay = "(空 → 用 settings.xml 默认)"
-		}
-		fmt.Fprintf(logWriter, "[bins] mvn=%s git=%s maven_local_repo=%s\n", mvnBin, gitBin, cacheDisplay)
+	ee, envErr := s.envSvc.BuildExecEnv()
+	if envErr != nil {
+		fmt.Fprintf(logFile, "[WARN] 读取构建环境失败：%v；fallback 到 os.Environ()\n", envErr)
 	}
+	execEnv = ee
+	inputs, binsErr := s.envSvc.ResolveBuildInputs()
+	if binsErr != nil {
+		fmt.Fprintf(logFile, "\n[BUILD FAILED] load builder inputs: %v\n", binsErr)
+		s.finishBuild(buildID, BuildStatusFailed, "", 0, 0, binsErr.Error())
+		return
+	}
+	mvnBin, gitBin, mavenCache = inputs.MvnBin, inputs.GitBin, inputs.MavenLocalRepo
+	cacheDisplay := mavenCache
+	if cacheDisplay == "" {
+		cacheDisplay = "(空 → 用 settings.xml 默认)"
+	}
+	fmt.Fprintf(logWriter, "[bins] mvn=%s git=%s maven_local_repo=%s\n", mvnBin, gitBin, cacheDisplay)
 
 	// Sprint X.2：决定走 multi-service 还是单 service 兼容
 	specs, err := s.loadServiceBuildSpecs(app, in)
@@ -331,7 +309,6 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 		ExecEnv:         execEnv,
 		BuildID:         buildID,
 		Services:        specs,
-		DockerImage:     dockerImage,
 		BuildMode:       normalizeBuildMode(app.BuildMode),
 		DockerRegistry:  strings.TrimSpace(app.DockerRegistry),
 		DockerImageName: strings.TrimSpace(app.DockerImageName),
@@ -412,10 +389,19 @@ func (s *BuildService) execute(buildID uint, app *model.Application, in BuildTri
 //
 // X.2 阶段：app_services 表为空（X.4 才会有 CRUD）；Trigger 入参的临时覆盖仍尊重。
 func (s *BuildService) loadServiceBuildSpecs(app *model.Application, in BuildTriggerInput) ([]builder.ServiceBuildSpec, error) {
+	if err := EnsureDefaultAppService(s.db, app); err != nil {
+		return nil, err
+	}
 	var services []model.AppService
+	legacyNoServiceTable := false
 	if err := s.db.Where("app_id = ? AND enabled = ?", app.ID, true).
 		Order("startup_order ASC, id ASC").Find(&services).Error; err != nil {
-		return nil, fmt.Errorf("load app_services: %w", err)
+		if strings.Contains(err.Error(), "no such table") {
+			legacyNoServiceTable = true
+			services = nil
+		} else {
+			return nil, fmt.Errorf("load app_services: %w", err)
+		}
 	}
 	if len(services) > 0 {
 		specs := make([]builder.ServiceBuildSpec, 0, len(services))
@@ -426,15 +412,19 @@ func (s *BuildService) loadServiceBuildSpecs(app *model.Application, in BuildTri
 				BuildModule:       svc.BuildModule,
 				JarPattern:        svc.BuildJarPattern,
 				Port:              svc.Port,
-				DockerRegistry:    pickDockerStr(svc.DockerRegistry, app.DockerRegistry),
-				DockerImageName:   pickDockerStr(svc.DockerImageName, app.DockerImageName),
-				DockerImageTag:    pickDockerStr(svc.DockerImageTag, app.DockerImageTag),
+				DockerRegistry:    strings.TrimSpace(app.DockerRegistry),
+				DockerImageName:   strings.TrimSpace(app.DockerImageName),
+				DockerImageTag:    strings.TrimSpace(app.DockerImageTag),
 				DockerfileName:    dfName,
 				DockerfileContent: dfContent,
-				DockerBuildArgs:   pickDockerStr(svc.DockerBuildArgs, app.DockerBuildArgs),
+				DockerBuildArgs:   strings.TrimSpace(app.DockerBuildArgs),
 			})
 		}
 		return specs, nil
+	}
+	if !legacyNoServiceTable {
+		return nil, apperr.New("BAD_REQUEST",
+			"应用没有启用的 service，请在「服务配置」启用至少一个服务后再构建", 400)
 	}
 
 	// 单 service 兼容：service_code=default，从 app 顶层字段读
@@ -460,9 +450,6 @@ func (s *BuildService) resolveDockerfileTemplate(app *model.Application, svc *mo
 	legacyDockerfile := strings.TrimSpace(app.Dockerfile)
 	if svc != nil {
 		templateID = svc.DockerfileTemplateID
-		if strings.TrimSpace(svc.Dockerfile) != "" {
-			legacyDockerfile = svc.Dockerfile
-		}
 	}
 	var tpl model.DockerfileTemplate
 	if templateID > 0 {
@@ -477,13 +464,6 @@ func (s *BuildService) resolveDockerfileTemplate(app *model.Application, svc *mo
 		return "legacy-inline", legacyDockerfile
 	}
 	return "", ""
-}
-
-func pickDockerStr(primary, fallback string) string {
-	if strings.TrimSpace(primary) != "" {
-		return strings.TrimSpace(primary)
-	}
-	return strings.TrimSpace(fallback)
 }
 
 func (s *BuildService) releaseLock(appID uint) {

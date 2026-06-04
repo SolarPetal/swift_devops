@@ -57,21 +57,25 @@ func (r *dockerRuntime) PrepareUnit(ctx context.Context, spec AppSpec) error {
 }
 
 func (r *dockerRuntime) UnitArtifactPath(spec AppSpec) string {
-	return fmt.Sprintf("docker container: devops-%s", spec.ServiceName)
+	return fmt.Sprintf("docker container: %s", spec.ContainerName())
 }
 
 // RestartAndWait 停止旧容器 → docker pull → docker run → 健康检查
 func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeout time.Duration) (time.Duration, error) {
 	start := time.Now()
-	containerName := fmt.Sprintf("devops-%s", spec.ServiceName)
+	containerName := spec.ContainerName()
+	if err := ValidateDockerContainerName(containerName); err != nil {
+		return 0, err
+	}
+	quotedContainerName := ShellQuote(containerName)
 
 	// 1. 停止并删除旧容器（如果存在）
-	stopCmd := fmt.Sprintf("docker stop %s 2>/dev/null || true", containerName)
+	stopCmd := fmt.Sprintf("docker stop %s 2>/dev/null || true", quotedContainerName)
 	if _, err := r.client.Exec(ctx, stopCmd); err != nil {
 		return 0, fmt.Errorf("停止旧容器失败: %w", err)
 	}
 
-	rmCmd := fmt.Sprintf("docker rm %s 2>/dev/null || true", containerName)
+	rmCmd := fmt.Sprintf("docker rm %s 2>/dev/null || true", quotedContainerName)
 	if _, err := r.client.Exec(ctx, rmCmd); err != nil {
 		return 0, fmt.Errorf("删除旧容器失败: %w", err)
 	}
@@ -103,7 +107,7 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 		}
 	}
 
-	runCmd := fmt.Sprintf("docker run --name %s %s %s", ShellQuote(containerName), runArgs, ShellQuote(imageName))
+	runCmd := fmt.Sprintf("docker run --name %s %s %s", quotedContainerName, runArgs, ShellQuote(imageName))
 	if _, err := r.client.Exec(ctx, runCmd); err != nil {
 		return 0, fmt.Errorf("启动容器失败: %w", err)
 	}
@@ -111,7 +115,7 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 	// 4. 等待容器进入 running 状态
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		inspectCmd := fmt.Sprintf("docker inspect -f '{{.State.Running}}' %s 2>/dev/null || echo false", containerName)
+		inspectCmd := fmt.Sprintf("docker inspect -f '{{.State.Running}}' %s 2>/dev/null || echo false", quotedContainerName)
 		out, err := r.client.Exec(ctx, inspectCmd)
 		if err == nil && strings.TrimSpace(out.Stdout) == "true" {
 			return time.Since(start), nil
@@ -136,7 +140,7 @@ func shellJoinFields(s string) string {
 
 // StatusDump 返回容器状态 + 日志
 func (r *dockerRuntime) StatusDump(ctx context.Context, spec AppSpec, lines int) string {
-	containerName := fmt.Sprintf("devops-%s", spec.ServiceName)
+	containerName := ShellQuote(spec.ContainerName())
 	var sb strings.Builder
 
 	// 容器状态
@@ -165,6 +169,89 @@ func (r *dockerRuntime) StatusDump(ctx context.Context, spec AppSpec, lines int)
 	return sb.String()
 }
 
+// StartupLogs 返回容器启动后的日志片段，用于成功路径展示。
+func (r *dockerRuntime) StartupLogs(ctx context.Context, spec AppSpec, lines int) string {
+	if lines <= 0 {
+		lines = 80
+	}
+	start := time.Now()
+	containerName := spec.ContainerName()
+	quotedContainerName := ShellQuote(containerName)
+
+	var lastErr string
+	for {
+		logs, err := r.readContainerLogs(ctx, quotedContainerName, lines)
+		if err != nil {
+			lastErr = err.Error()
+		} else if strings.TrimSpace(logs) != "" {
+			return fmt.Sprintf("=== Docker 启动日志（最后 %d 行，等待 %s）===\n%s",
+				lines, time.Since(start).Round(time.Millisecond), logs)
+		}
+
+		if ctx.Err() != nil || time.Since(start) >= 8*time.Second {
+			break
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== Docker 启动日志（最后 %d 行，等待 %s）===\n",
+		lines, time.Since(start).Round(time.Millisecond)))
+	sb.WriteString("（容器 stdout/stderr 暂无输出；可能是应用尚未刷日志，或日志写入了容器内文件而不是控制台）\n")
+	if lastErr != "" {
+		sb.WriteString("\n读取 docker logs 时的最后错误：")
+		sb.WriteString(lastErr)
+		sb.WriteString("\n")
+	}
+	if summary := r.containerRuntimeSummary(ctx, containerName); strings.TrimSpace(summary) != "" {
+		sb.WriteString("\n")
+		sb.WriteString(summary)
+	}
+	return sb.String()
+}
+
+func (r *dockerRuntime) readContainerLogs(ctx context.Context, quotedContainerName string, lines int) (string, error) {
+	cmd := fmt.Sprintf("docker logs --tail %d %s 2>&1 || true", lines, quotedContainerName)
+	out, err := r.client.Exec(ctx, cmd)
+	if err != nil {
+		return "", fmt.Errorf("读取失败：%w", err)
+	}
+	logs := strings.TrimSpace(out.Stdout)
+	if logs == "" {
+		logs = strings.TrimSpace(out.Stderr)
+	}
+	return logs, nil
+}
+
+func (r *dockerRuntime) containerRuntimeSummary(ctx context.Context, containerName string) string {
+	var sb strings.Builder
+	quotedContainerName := ShellQuote(containerName)
+
+	psCmd := fmt.Sprintf(
+		"docker ps -a --filter %s --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}\\t{{.Ports}}' 2>&1 || true",
+		ShellQuote("name=^/"+containerName+"$"),
+	)
+	if out, err := r.client.Exec(ctx, psCmd); err == nil && strings.TrimSpace(out.Stdout) != "" {
+		sb.WriteString("=== Docker 容器摘要 ===\n")
+		sb.WriteString(strings.TrimSpace(out.Stdout))
+		sb.WriteString("\n")
+	}
+
+	topCmd := fmt.Sprintf("docker top %s 2>&1 || true", quotedContainerName)
+	if out, err := r.client.Exec(ctx, topCmd); err == nil && strings.TrimSpace(out.Stdout) != "" {
+		sb.WriteString("\n=== 容器进程 ===\n")
+		sb.WriteString(strings.TrimSpace(out.Stdout))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
 // HumanizeError 识别常见 Docker 错误
 func (r *dockerRuntime) HumanizeError(dump string) string {
 	lower := strings.ToLower(dump)
@@ -186,7 +273,7 @@ func (r *dockerRuntime) HumanizeError(dump string) string {
 
 // Stop 停止容器
 func (r *dockerRuntime) Stop(ctx context.Context, spec AppSpec) error {
-	containerName := fmt.Sprintf("devops-%s", spec.ServiceName)
+	containerName := ShellQuote(spec.ContainerName())
 	stopCmd := fmt.Sprintf("docker stop %s 2>/dev/null || true", containerName)
 	if _, err := r.client.Exec(ctx, stopCmd); err != nil {
 		return fmt.Errorf("停止容器失败: %w", err)

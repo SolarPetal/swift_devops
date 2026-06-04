@@ -15,7 +15,7 @@ import (
 // 任一阶段失败立即返回，hooks.OnStep 已经把当前失败步骤喷出去。
 // 成功完成则 hooks.OnDeploymentSuccess 更新 deployment 表。
 //
-// art 参数：策略层传入 —— forward 模式（single/rolling/blue_green）传 plan.Artifact；
+// art 参数：策略层传入 —— forward 模式（single/rolling）传 plan.Artifact；
 // rollback 模式按 dep 查 previous_artifact_id 对应的 art。
 //
 // 返回值：HostOutcome（含 status / stage / err）+ 该主机的所有 step 序列。
@@ -89,17 +89,23 @@ func deployHost(ctx context.Context, env Env, plan *Plan, dep *model.Deployment,
 		effectiveJava = "/usr/bin/java"
 	}
 
+	dockerContainerName, nameErr := effectiveDockerContainerName(plan, app)
+	if nameErr != nil {
+		return fail(StageEnvCheck, nameErr.Error(), time.Now(), host.Name, host.IP, "")
+	}
+
 	spec := deploy.AppSpec{
-		AppCode:        unitNameKey(app.AppCode, svcCode), // unit 名前缀
-		ServiceName:    unitNameKey(app.AppCode, svcCode),
-		DeployPath:     serviceDeployPath(app.DeployPath, svcCode),
-		JvmArgs:        svcJvm,
-		Port:           svcPort,
-		HealthCheckURL: svcHealth,
-		EnvVars:        svcEnvMap,
-		User:           svcSystemdUser,
-		JavaPath:       effectiveJava,
-		DockerRunArgs:  effectiveDockerRunArgs(plan, app),
+		AppCode:             unitNameKey(app.AppCode, svcCode), // unit 名前缀
+		ServiceName:         unitNameKey(app.AppCode, svcCode),
+		DeployPath:          serviceDeployPath(app.DeployPath, svcCode),
+		JvmArgs:             svcJvm,
+		Port:                svcPort,
+		HealthCheckURL:      svcHealth,
+		EnvVars:             svcEnvMap,
+		User:                svcSystemdUser,
+		JavaPath:            effectiveJava,
+		DockerContainerName: dockerContainerName,
+		DockerRunArgs:       effectiveDockerRunArgs(plan, app),
 	}
 	isDockerDeploy := deploy.NormalizeDeployMode(svcDeployMode) == deploy.DeployModeDocker
 	isRemoteDockerBuild := isDockerDeploy && strings.TrimSpace(app.BuildMode) == "remote-docker"
@@ -254,19 +260,40 @@ echo "RESOLVED=$RESOLVED"
 	rsStart := time.Now()
 	waited, waitErr := runtime.RestartAndWait(ctx, spec, 10*time.Second)
 	if waitErr != nil {
-		dump := runtime.StatusDump(ctx, spec, 200)
+		dump := statusDumpWithFreshContext(runtime, spec, 200)
 		hint := runtime.HumanizeError(dump)
 		errStr := fmt.Sprintf("%s[%s] %s\n\n--- diagnostics ---\n%s",
 			hint, runtime.Name(), waitErr.Error(), dump)
 		return fail(StageRestart, errStr, rsStart, host.Name, host.IP,
 			fmt.Sprintf("mode=%s waited=%s", runtime.Name(), waited.Round(time.Millisecond)))
 	}
-	emit(mkStepTimed(host.ID, host.Name, host.IP, StageRestart, true,
-		fmt.Sprintf("%s started in %s (mode=%s)",
-			spec.UnitName(), waited.Round(time.Millisecond), runtime.Name()), "", rsStart))
+	restartDetail := fmt.Sprintf("%s started in %s (mode=%s)",
+		runtime.UnitArtifactPath(spec), waited.Round(time.Millisecond), runtime.Name())
+	if logs := startupLogsWithFreshContext(runtime, spec, 80); strings.TrimSpace(logs) != "" {
+		restartDetail += "\n\n" + logs
+	}
+	emit(mkStepTimed(host.ID, host.Name, host.IP, StageRestart, true, restartDetail, "", rsStart))
 
 	// 阶段 5：health probe
 	hStart := time.Now()
+	if healthProbeDisabled(svcHealth) {
+		emit(mkStepTimed(host.ID, host.Name, host.IP, StageHealth, true,
+			fmt.Sprintf("application HTTP health probe skipped (health_check_url=%q); runtime=%s already active",
+				svcHealth, runtime.Name()), "", hStart))
+		ended := time.Now()
+		outcome.Status = HostStatusSuccess
+		outcome.CurrentStage = StageHealth
+		outcome.EndedAt = &ended
+		hooks.OnHostStatus(dep.ID, dep.HostID, HostStatusSuccess, StageHealth, "")
+		var itemID uint
+		if plan.Item != nil {
+			itemID = plan.Item.ID
+		} else if it, ok := plan.ItemByDepID[dep.ID]; ok && it != nil {
+			itemID = it.ID
+		}
+		hooks.OnDeploymentSuccess(dep, art.ID, itemID)
+		return outcome, steps
+	}
 	probeURL := deploy.BuildHealthURL(host.IP, spec.Port, svcHealth)
 	res := deploy.Probe(ctx, deploy.HealthOpts{
 		URL:           probeURL,
@@ -282,7 +309,7 @@ echo "RESOLVED=$RESOLVED"
 			errStr = "probe failed"
 		}
 		// Sprint 3.6 / X.10：health 失败时附 runtime 诊断，便于看到 Java 异常 / OOM / 端口冲突
-		dump := runtime.StatusDump(ctx, spec, 200)
+		dump := statusDumpWithFreshContext(runtime, spec, 200)
 		if dump != "" {
 			hint := runtime.HumanizeError(dump)
 			errStr = hint + errStr + "\n\n--- diagnostics ---\n" + dump
@@ -338,55 +365,46 @@ func effectivePort(dep *model.Deployment, app *model.Application) int {
 //   - plan.Service 非 nil → 从 AppService 取（多 service 链路）
 //   - plan.Service 为 nil → 从 Application 取（X.3 之前的单 jar 兼容）
 //
-// Sprint X.10：新增 deploy_mode 返回值。规则：
-//   - service.DeployMode 非空 → 用 service
-//   - 落空 → app.DeployMode
-//   - 都空 → "systemd"（向后兼容）
+// Sprint X.10：新增 deploy_mode 返回值。
+//
+// 运行时配置收敛规则：
+//   - port / service_code 来自 AppService，因为它们是天然 service 维度。
+//   - health_url / jvm_args / env_vars / deploy_mode 统一来自 Application，避免多 service 逐个修改。
+//   - systemd_user / java_path 仍允许 service 覆盖；它们主要用于少数主机/服务运行账户与 JDK 差异。
 //
 // 返回值：service_code, port, health_url, jvm_args, env_map, systemd_user, java_path, deploy_mode
 func resolveServiceConfig(plan *Plan, app *model.Application, dep *model.Deployment) (
 	svcCode string, port int, health, jvm string, envMap map[string]string, systemdUser, javaPath, deployMode string,
 ) {
+	health = strings.TrimSpace(app.HealthCheckURL)
+	jvm = app.JvmArgs
+	envMap = plan.EnvMap
+	systemdUser = app.SystemdUser
+	javaPath = app.JavaPath
+	deployMode = strings.TrimSpace(app.DeployMode)
+	if isDockerBuildMode(app.BuildMode) {
+		deployMode = deploy.DeployModeDocker
+	}
+
 	if plan.Service != nil {
 		s := plan.Service
 		svcCode = strings.TrimSpace(s.ServiceCode)
 		port = s.Port
 		if dep.Port > 0 {
-			port = dep.Port // dep 级覆盖仍生效（蓝绿/特殊 host 改端口场景）
+			port = dep.Port // dep 级覆盖仍生效（同一 service 在特殊 host 改端口场景）
 		}
-		health = s.HealthCheckURL
-		jvm = s.JvmArgs
-		systemdUser = s.SystemdUser
-		javaPath = s.JavaPath
-		// deploy_mode：非 default service 允许独立覆盖；default service 是单体 App 的镜像，
-		// 必须跟随 app 顶层 deploy_mode，避免历史 default=systemd 把 app=docker 覆盖掉。
-		deployMode = strings.TrimSpace(s.DeployMode)
-		if isDefaultServiceCode(svcCode) && strings.TrimSpace(app.DeployMode) != "" {
-			deployMode = strings.TrimSpace(app.DeployMode)
-		} else if deployMode == "" {
-			deployMode = strings.TrimSpace(app.DeployMode)
+		if strings.TrimSpace(s.SystemdUser) != "" {
+			systemdUser = s.SystemdUser
 		}
-		// Docker 镜像构建语义上对应 Docker 部署；default service 兜底跟随 build_mode。
-		if isDefaultServiceCode(svcCode) && isDockerBuildMode(app.BuildMode) {
-			deployMode = deploy.DeployModeDocker
-		}
-		// env_vars 优先 service-level，落空回 plan.EnvMap（兼容老调用方）
-		if parsed, err := deploy.ParseEnvVarsJSON(s.EnvVars); err == nil && len(parsed) > 0 {
-			envMap = parsed
-		} else {
-			envMap = plan.EnvMap
+		if strings.TrimSpace(s.JavaPath) != "" {
+			javaPath = s.JavaPath
 		}
 		return
 	}
-	// 旧链路：完全从 app 取
+
+	// 旧链路：无 service 维度时端口从 app / deployment 取。
 	svcCode = ""
 	port = effectivePort(dep, app)
-	health = app.HealthCheckURL
-	jvm = app.JvmArgs
-	systemdUser = app.SystemdUser
-	javaPath = app.JavaPath
-	deployMode = strings.TrimSpace(app.DeployMode)
-	envMap = plan.EnvMap
 	return
 }
 
@@ -425,17 +443,32 @@ func isDockerBuildMode(mode string) bool {
 }
 
 func effectiveDockerRunArgs(plan *Plan, app *model.Application) string {
-	if plan.Service != nil && !isDefaultServiceCode(plan.Service.ServiceCode) && strings.TrimSpace(plan.Service.DockerRunArgs) != "" {
-		return strings.TrimSpace(plan.Service.DockerRunArgs)
-	}
+	_ = plan
 	return strings.TrimSpace(app.DockerRunArgs)
 }
 
 func effectiveDockerBuildArgs(plan *Plan, app *model.Application) string {
-	if plan.Service != nil && !isDefaultServiceCode(plan.Service.ServiceCode) && strings.TrimSpace(plan.Service.DockerBuildArgs) != "" {
-		return strings.TrimSpace(plan.Service.DockerBuildArgs)
-	}
+	_ = plan
 	return strings.TrimSpace(app.DockerBuildArgs)
+}
+
+func effectiveDockerContainerName(plan *Plan, app *model.Application) (string, error) {
+	raw := strings.TrimSpace(app.DockerContainerName)
+	svcCode := "default"
+	if plan.Service != nil {
+		svcCode = strings.TrimSpace(plan.Service.ServiceCode)
+		if svcCode == "" {
+			svcCode = "default"
+		}
+	}
+	if raw == "" {
+		return "", nil
+	}
+	rendered := deploy.RenderDockerRuntimeNameTemplate(raw, app.AppCode, svcCode)
+	if err := deploy.ValidateDockerContainerName(rendered); err != nil {
+		return "", fmt.Errorf("docker_container_name %q 渲染为 %q 后非法：%w", raw, rendered, err)
+	}
+	return rendered, nil
 }
 
 func dockerImageForDeployment(plan *Plan, dep *model.Deployment) string {
@@ -460,6 +493,31 @@ func dockerfileForDeployment(plan *Plan, dep *model.Deployment) (string, string)
 		}
 	}
 	return "", ""
+}
+
+func healthProbeDisabled(health string) bool {
+	switch strings.ToLower(strings.TrimSpace(health)) {
+	case "-", "none", "off", "disabled", "skip":
+		return true
+	default:
+		return false
+	}
+}
+
+func statusDumpWithFreshContext(runtime deploy.Runtime, spec deploy.AppSpec, lines int) string {
+	dumpCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return runtime.StatusDump(dumpCtx, spec, lines)
+}
+
+func startupLogsWithFreshContext(runtime deploy.Runtime, spec deploy.AppSpec, lines int) string {
+	provider, ok := runtime.(deploy.StartupLogProvider)
+	if !ok {
+		return ""
+	}
+	logCtx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	return provider.StartupLogs(logCtx, spec, lines)
 }
 
 func nonEmptyLines(s string) []string {

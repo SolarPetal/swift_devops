@@ -1,19 +1,17 @@
 import { useEffect, useState } from 'react'
-import { Table, Button, Space, Tag, Modal, message, Typography, Card } from 'antd'
+import { Table, Button, Space, Tag, Modal, message, Card } from 'antd'
 
 import type { Host, TestResult } from '../types'
 import { deleteHost, listHosts, testHost } from '../api/host'
 import { formatError } from '../api/client'
 import HostForm from './HostForm'
+import { EmptyState, PageHeader, StatCard, StatGrid } from '../components/PageFrame'
+import { StatusTag } from '../components/StatusTag'
 
 const statusTag = (s: Host['status']) => {
-  const conf: Record<Host['status'], { color: string; text: string }> = {
-    online: { color: 'green', text: '● 在线' },
-    offline: { color: 'red', text: '● 离线' },
-    unknown: { color: 'default', text: '○ 未知' },
-  }
-  const c = conf[s] ?? conf.unknown
-  return <Tag color={c.color}>{c.text}</Tag>
+  if (s === 'online') return <StatusTag tone="success">在线</StatusTag>
+  if (s === 'offline') return <StatusTag tone="danger">离线</StatusTag>
+  return <StatusTag>未知</StatusTag>
 }
 
 export default function HostList() {
@@ -69,28 +67,64 @@ export default function HostList() {
     })
   }
 
+  const onlineCount = data.filter((h) => h.status === 'online').length
+  const offlineCount = data.filter((h) => h.status === 'offline').length
+  const runningInstances = data.reduce((sum, h) => sum + (h.running_instance_count || 0), 0)
+
   return (
-    <div>
-      <Typography.Title level={4} style={{ marginTop: 0 }}>主机管理</Typography.Title>
-      <Card>
-        <Space style={{ marginBottom: 16 }}>
-          <Button type="primary" onClick={() => { setEditing(null); setFormOpen(true) }}>+ 新增主机</Button>
-          <Button onClick={refresh}>刷新</Button>
-        </Space>
+    <section className="page-shell">
+      <PageHeader
+        eyebrow="Hosts"
+        title="主机资源"
+        description="管理用于部署 Java 服务的目标主机，连通性、SSH 凭证和运行实例数量会直接影响发布成功率。"
+        actions={(
+          <>
+            <Button type="primary" onClick={() => { setEditing(null); setFormOpen(true) }}>新增主机</Button>
+            <Button onClick={refresh} loading={loading}>刷新</Button>
+          </>
+        )}
+      />
+
+      <StatGrid>
+        <StatCard label="Total" value={data.length} description="已纳管主机" tone="info" />
+        <StatCard label="Online" value={onlineCount} description="最近一次测连在线" tone="success" />
+        <StatCard label="Offline" value={offlineCount} description="需要排查 SSH / 网络" tone={offlineCount > 0 ? 'danger' : 'default'} />
+        <StatCard label="Runtime" value={runningInstances} description="远端运行实例计数" tone="warning" />
+      </StatGrid>
+
+      <Card className="surface-card">
+        <div className="table-toolbar">
+          <div className="table-toolbar-main">
+            <Button type="primary" onClick={() => { setEditing(null); setFormOpen(true) }}>新增主机</Button>
+            <Button onClick={refresh} loading={loading}>刷新列表</Button>
+          </div>
+          <div className="toolbar-hint">建议新增后先测连；凭证变更会触发重新 TOFU。</div>
+        </div>
         <Table<Host>
           rowKey="id"
           loading={loading}
           dataSource={data}
           pagination={false}
+          locale={{
+            emptyText: <EmptyState title="还没有主机" description="先新增一台部署目标主机，再绑定到应用服务。" />,
+          }}
           columns={[
             { title: 'ID', dataIndex: 'id', width: 60 },
             { title: '名称', dataIndex: 'name' },
-            { title: 'IP', dataIndex: 'ip' },
+            { title: 'IP', dataIndex: 'ip', render: (v) => <code>{v}</code> },
             { title: '端口', dataIndex: 'port', width: 80 },
-            { title: '认证', dataIndex: 'auth_type', width: 80 },
+            { title: '认证', dataIndex: 'auth_type', width: 90, render: (v) => <Tag>{v}</Tag> },
             { title: '用户', dataIndex: 'username' },
-            { title: '分组', dataIndex: 'group_tag', width: 80 },
-            { title: '状态', dataIndex: 'status', width: 100, render: statusTag },
+            { title: '状态', dataIndex: 'status', width: 110, render: statusTag },
+            {
+              title: '运行实例',
+              dataIndex: 'running_instance_count',
+              width: 110,
+              align: 'center',
+              render: (n: number) => (
+                <StatusTag tone={n > 0 ? 'success' : 'neutral'}>{n || 0}</StatusTag>
+              ),
+            },
             {
               title: '操作', width: 240,
               render: (_, h) => (
@@ -110,6 +144,6 @@ export default function HostList() {
         onClose={() => setFormOpen(false)}
         onSaved={() => { setFormOpen(false); refresh() }}
       />
-    </div>
+    </section>
   )
 }

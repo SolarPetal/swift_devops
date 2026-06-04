@@ -49,6 +49,7 @@ type StorageCfg struct {
 }
 
 type BuilderCfg struct {
+	// Deprecated: Maven 容器构建镜像功能已下线；字段保留只为兼容旧配置，当前不生效。
 	DockerEnabled bool `yaml:"docker_enabled"`
 	// Sprint X.9：maven_cache_dir 字段已废弃，maven 本地仓库改到 BuilderEnv.MavenLocalRepo（UI 配置）。
 	// yaml 解析器对未知字段会忽略，因此移除字段不破坏老 config.yaml。

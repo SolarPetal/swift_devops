@@ -28,6 +28,25 @@ func setupAppSvc(t *testing.T) (*service.AppService, *gorm.DB) {
 	return service.NewAppService(db), db
 }
 
+func setupAppSvcWithServices(t *testing.T) (*service.AppService, *gorm.DB) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&model.Application{},
+		&model.AppService{},
+		&model.DockerfileTemplate{},
+		&model.Deployment{},
+	); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return service.NewAppService(db), db
+}
+
 func validInput() service.AppInput {
 	return service.AppInput{
 		AppCode:    "user-service",
@@ -59,6 +78,34 @@ func TestAppService_CreateAndGet(t *testing.T) {
 	}
 	if got.Name != "用户服务" {
 		t.Fatalf("name: %s", got.Name)
+	}
+}
+
+func TestAppService_CreateDoesNotCreateDefaultService(t *testing.T) {
+	svc, db := setupAppSvcWithServices(t)
+	out, err := svc.Create(validInput())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var n int64
+	if err := db.Model(&model.AppService{}).Where("app_id = ?", out.ID).Count(&n).Error; err != nil {
+		t.Fatalf("count app_services: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("新增应用后不应自动生成 default service，got %d", n)
+	}
+}
+
+func TestAppService_CreateDefaultsPortWhenOmitted(t *testing.T) {
+	svc, _ := setupAppSvc(t)
+	in := validInput()
+	in.Port = 0
+	out, err := svc.Create(in)
+	if err != nil {
+		t.Fatalf("create without port: %v", err)
+	}
+	if out.Port != 8080 {
+		t.Fatalf("omitted app port should default to 8080 for service initialization, got %d", out.Port)
 	}
 }
 
@@ -253,87 +300,28 @@ func TestAppService_SystemdUserRoundtrip(t *testing.T) {
 	}
 }
 
-// Sprint 4.1：蓝绿三字段校验
-func TestAppService_NginxConfigValidation(t *testing.T) {
+// 分组切流配置已下线：兼容接收旧字段，但写入时清空，避免继续产生隐式配置。
+func TestAppService_LegacyTrafficSwitchFieldsAreCleared(t *testing.T) {
 	svc, _ := setupAppSvc(t)
 
-	t.Run("两字段必须同填同空：只填 upstream", func(t *testing.T) {
-		in := validInput()
-		in.NginxUpstreamName = "user-svc-backend"
-		// NginxHostID 留 0
-		_, err := svc.Create(in)
-		if err == nil {
-			t.Fatal("应拒绝")
-		}
-		ae, _ := apperr.As(err)
-		if ae == nil || ae.HTTPStatus != 400 {
-			t.Fatalf("应 400：%v", err)
-		}
-	})
+	in := validInput()
+	in.NginxHostID = 7
+	in.NginxUpstreamName = "user-svc-backend"
+	in.ActiveGroup = "blue"
+	created, err := svc.Create(in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.NginxHostID != 0 || created.NginxUpstreamName != "" || created.ActiveGroup != "" {
+		t.Fatalf("legacy traffic-switch fields should be cleared on create: %+v", created)
+	}
 
-	t.Run("两字段必须同填同空：只填 host_id", func(t *testing.T) {
-		in := validInput()
-		in.AppCode = "diff-1"
-		in.NginxHostID = 7
-		_, err := svc.Create(in)
-		if err == nil {
-			t.Fatal("应拒绝")
-		}
-	})
-
-	t.Run("upstream 名风格非法", func(t *testing.T) {
-		in := validInput()
-		in.AppCode = "diff-2"
-		in.NginxHostID = 7
-		in.NginxUpstreamName = "1bad" // 数字开头
-		_, err := svc.Create(in)
-		if err == nil {
-			t.Fatal("应拒绝")
-		}
-	})
-
-	t.Run("active_group 非法值", func(t *testing.T) {
-		in := validInput()
-		in.AppCode = "diff-3"
-		in.ActiveGroup = "red"
-		_, err := svc.Create(in)
-		if err == nil {
-			t.Fatal("应拒绝")
-		}
-	})
-
-	t.Run("合法配置成功", func(t *testing.T) {
-		in := validInput()
-		in.AppCode = "ok-1"
-		in.NginxHostID = 7
-		in.NginxUpstreamName = "user-svc-backend"
-		in.ActiveGroup = "blue"
-		out, err := svc.Create(in)
-		if err != nil {
-			t.Fatalf("create: %v", err)
-		}
-		if out.NginxHostID != 7 || out.NginxUpstreamName != "user-svc-backend" || out.ActiveGroup != "blue" {
-			t.Fatalf("字段未透传：%+v", out)
-		}
-	})
-
-	t.Run("Update 切换 active_group", func(t *testing.T) {
-		in := validInput()
-		in.AppCode = "ok-2"
-		in.NginxHostID = 8
-		in.NginxUpstreamName = "svc-up"
-		in.ActiveGroup = "blue"
-		created, err := svc.Create(in)
-		if err != nil {
-			t.Fatalf("create: %v", err)
-		}
-		in.ActiveGroup = "green"
-		updated, err := svc.Update(created.ID, in)
-		if err != nil {
-			t.Fatalf("update: %v", err)
-		}
-		if updated.ActiveGroup != "green" {
-			t.Fatalf("active_group 应为 green，得 %s", updated.ActiveGroup)
-		}
-	})
+	in.ActiveGroup = "green"
+	updated, err := svc.Update(created.ID, in)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.NginxHostID != 0 || updated.NginxUpstreamName != "" || updated.ActiveGroup != "" {
+		t.Fatalf("legacy traffic-switch fields should be cleared on update: %+v", updated)
+	}
 }

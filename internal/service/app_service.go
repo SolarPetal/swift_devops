@@ -18,28 +18,28 @@ import (
 
 // AppInput 应用创建/更新入参
 type AppInput struct {
-	AppCode        string   `json:"app_code" binding:"required"`
-	Name           string   `json:"name" binding:"required"`
-	AppType        string   `json:"app_type,omitempty"`
-	GitURL         string   `json:"git_url,omitempty"`
-	GitCredID      string   `json:"git_cred_id,omitempty"`
-	GitRef         string   `json:"git_ref,omitempty"`
-	GitRefs        []string `json:"git_refs,omitempty"`
-	DeployPath     string   `json:"deploy_path" binding:"required"`
-	Port           int      `json:"port" binding:"required,min=1,max=65535"`
-	HealthCheckURL string   `json:"health_check_url,omitempty"`
-	JvmArgs        string   `json:"jvm_args,omitempty"`
-	EnvVars        string   `json:"env_vars,omitempty"`     // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
-	SystemdUser    string   `json:"systemd_user,omitempty"` // 留空 = 用启动 sshd 的账号（一般 root）
+	AppCode    string   `json:"app_code" binding:"required"`
+	Name       string   `json:"name" binding:"required"`
+	AppType    string   `json:"app_type,omitempty"`
+	GitURL     string   `json:"git_url,omitempty"`
+	GitCredID  string   `json:"git_cred_id,omitempty"`
+	GitRef     string   `json:"git_ref,omitempty"`
+	GitRefs    []string `json:"git_refs,omitempty"`
+	DeployPath string   `json:"deploy_path" binding:"required"`
+	// Port 是应用级默认字段；UI 不再维护，service 端口由 AppService 承接。
+	// 创建不传时用 defaultAppPort 兜底，仅作为应用级兼容字段保留。
+	Port           int    `json:"port" binding:"omitempty,min=1,max=65535"`
+	HealthCheckURL string `json:"health_check_url,omitempty"`
+	JvmArgs        string `json:"jvm_args,omitempty"`
+	EnvVars        string `json:"env_vars,omitempty"`     // JSON 字符串，如 {"SPRING_PROFILES_ACTIVE":"prod"}
+	SystemdUser    string `json:"systemd_user,omitempty"` // 留空 = 用启动 sshd 的账号（一般 root）
 	// JavaPath 应用级 java 可执行路径覆盖（可选）。空 = 沿用主机 Host.JavaPath。
 	// 适用：同主机跑多 JDK 版本（jdk8 / jdk17）。
 	JavaPath string `json:"java_path,omitempty"`
 	// 构建参数（Sprint 5.4.7）：multi-module 项目专用
 	BuildModule     string `json:"build_module,omitempty"`      // mvn -pl 用，如 "car-dealer-admin"
 	BuildJarPattern string `json:"build_jar_pattern,omitempty"` // glob 选 jar，如 "car-dealer-admin/target/*.jar"
-	// 蓝绿配置（Sprint 4）。三者要么全填、要么 NginxHostID=0 表示不启用蓝绿。
-	// ActiveGroup 是受运行时事实约束的字段，由蓝绿策略部署成功后写入；
-	// 但允许在创建/更新时初始化一次（如导入旧应用时声明现状）。
+	// 分组切流配置已下线：字段保留为 API 兼容，写入时后端会清空。
 	NginxHostID       uint   `json:"nginx_host_id,omitempty"`
 	NginxUpstreamName string `json:"nginx_upstream_name,omitempty"`
 	ActiveGroup       string `json:"active_group,omitempty"`
@@ -47,47 +47,49 @@ type AppInput struct {
 	DeployMode string `json:"deploy_mode,omitempty"`
 
 	// Sprint X.11：Docker 镜像构建 / 部署配置。
-	BuildMode       string `json:"build_mode,omitempty"` // local-jar / local-docker / remote-docker
-	DockerRegistry  string `json:"docker_registry,omitempty"`
-	DockerImageName string `json:"docker_image_name,omitempty"`
-	DockerImageTag  string `json:"docker_image_tag,omitempty"`
-	Dockerfile      string `json:"dockerfile,omitempty"`
-	DockerBuildArgs string `json:"docker_build_args,omitempty"`
-	DockerRunArgs   string `json:"docker_run_args,omitempty"`
+	BuildMode           string `json:"build_mode,omitempty"` // local-jar / local-docker / remote-docker
+	DockerRegistry      string `json:"docker_registry,omitempty"`
+	DockerImageName     string `json:"docker_image_name,omitempty"`
+	DockerImageTag      string `json:"docker_image_tag,omitempty"`
+	Dockerfile          string `json:"dockerfile,omitempty"`
+	DockerBuildArgs     string `json:"docker_build_args,omitempty"`
+	DockerContainerName string `json:"docker_container_name,omitempty"`
+	DockerRunArgs       string `json:"docker_run_args,omitempty"`
 }
 
 // AppView 应用响应
 type AppView struct {
-	ID                uint     `json:"id"`
-	AppCode           string   `json:"app_code"`
-	Name              string   `json:"name"`
-	AppType           string   `json:"app_type"`
-	GitURL            string   `json:"git_url"`
-	GitCredID         string   `json:"git_cred_id"`
-	GitRef            string   `json:"git_ref"`
-	GitRefs           []string `json:"git_refs"`
-	DeployPath        string   `json:"deploy_path"`
-	Port              int      `json:"port"`
-	HealthCheckURL    string   `json:"health_check_url"`
-	JvmArgs           string   `json:"jvm_args"`
-	EnvVars           string   `json:"env_vars"`
-	SystemdUser       string   `json:"systemd_user"`
-	JavaPath          string   `json:"java_path"`
-	BuildModule       string   `json:"build_module"`
-	BuildJarPattern   string   `json:"build_jar_pattern"`
-	NginxHostID       uint     `json:"nginx_host_id"`
-	NginxUpstreamName string   `json:"nginx_upstream_name"`
-	ActiveGroup       string   `json:"active_group"`
-	DeployMode        string   `json:"deploy_mode"`
-	BuildMode         string   `json:"build_mode"`
-	DockerRegistry    string   `json:"docker_registry"`
-	DockerImageName   string   `json:"docker_image_name"`
-	DockerImageTag    string   `json:"docker_image_tag"`
-	Dockerfile        string   `json:"dockerfile"`
-	DockerBuildArgs   string   `json:"docker_build_args"`
-	DockerRunArgs     string   `json:"docker_run_args"`
-	CreatedAt         string   `json:"created_at"`
-	UpdatedAt         string   `json:"updated_at"`
+	ID                  uint     `json:"id"`
+	AppCode             string   `json:"app_code"`
+	Name                string   `json:"name"`
+	AppType             string   `json:"app_type"`
+	GitURL              string   `json:"git_url"`
+	GitCredID           string   `json:"git_cred_id"`
+	GitRef              string   `json:"git_ref"`
+	GitRefs             []string `json:"git_refs"`
+	DeployPath          string   `json:"deploy_path"`
+	Port                int      `json:"port"`
+	HealthCheckURL      string   `json:"health_check_url"`
+	JvmArgs             string   `json:"jvm_args"`
+	EnvVars             string   `json:"env_vars"`
+	SystemdUser         string   `json:"systemd_user"`
+	JavaPath            string   `json:"java_path"`
+	BuildModule         string   `json:"build_module"`
+	BuildJarPattern     string   `json:"build_jar_pattern"`
+	NginxHostID         uint     `json:"nginx_host_id"`
+	NginxUpstreamName   string   `json:"nginx_upstream_name"`
+	ActiveGroup         string   `json:"active_group"`
+	DeployMode          string   `json:"deploy_mode"`
+	BuildMode           string   `json:"build_mode"`
+	DockerRegistry      string   `json:"docker_registry"`
+	DockerImageName     string   `json:"docker_image_name"`
+	DockerImageTag      string   `json:"docker_image_tag"`
+	Dockerfile          string   `json:"dockerfile"`
+	DockerBuildArgs     string   `json:"docker_build_args"`
+	DockerContainerName string   `json:"docker_container_name"`
+	DockerRunArgs       string   `json:"docker_run_args"`
+	CreatedAt           string   `json:"created_at"`
+	UpdatedAt           string   `json:"updated_at"`
 }
 
 func toAppView(a *model.Application) AppView {
@@ -99,23 +101,24 @@ func toAppView(a *model.Application) AppView {
 		GitRefs:    refs,
 		DeployPath: a.DeployPath, Port: a.Port,
 		HealthCheckURL: a.HealthCheckURL, JvmArgs: a.JvmArgs, EnvVars: a.EnvVars,
-		SystemdUser:       a.SystemdUser,
-		JavaPath:          a.JavaPath,
-		BuildModule:       a.BuildModule,
-		BuildJarPattern:   a.BuildJarPattern,
-		NginxHostID:       a.NginxHostID,
-		NginxUpstreamName: a.NginxUpstreamName,
-		ActiveGroup:       a.ActiveGroup,
-		DeployMode:        a.DeployMode,
-		BuildMode:         normalizeBuildMode(a.BuildMode),
-		DockerRegistry:    a.DockerRegistry,
-		DockerImageName:   a.DockerImageName,
-		DockerImageTag:    a.DockerImageTag,
-		Dockerfile:        a.Dockerfile,
-		DockerBuildArgs:   a.DockerBuildArgs,
-		DockerRunArgs:     a.DockerRunArgs,
-		CreatedAt:         a.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:         a.UpdatedAt.Format(time.RFC3339),
+		SystemdUser:         a.SystemdUser,
+		JavaPath:            a.JavaPath,
+		BuildModule:         a.BuildModule,
+		BuildJarPattern:     a.BuildJarPattern,
+		NginxHostID:         a.NginxHostID,
+		NginxUpstreamName:   a.NginxUpstreamName,
+		ActiveGroup:         a.ActiveGroup,
+		DeployMode:          a.DeployMode,
+		BuildMode:           normalizeBuildMode(a.BuildMode),
+		DockerRegistry:      a.DockerRegistry,
+		DockerImageName:     a.DockerImageName,
+		DockerImageTag:      a.DockerImageTag,
+		Dockerfile:          a.Dockerfile,
+		DockerBuildArgs:     a.DockerBuildArgs,
+		DockerContainerName: a.DockerContainerName,
+		DockerRunArgs:       a.DockerRunArgs,
+		CreatedAt:           a.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:           a.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -128,9 +131,18 @@ var appCodeRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,49}$`)
 // 不接 UID 数字，强制走可读名，省得 unit 里出现魔法数字。
 var systemdUserRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
-// nginxUpstreamRE 限制 nginx upstream 名：字母开头，长度 2-100，含字母/数字/下划线/连字符。
-// 跟 nginx upstream <name> { ... } 块的语法保持安全。
-var nginxUpstreamRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,99}$`)
+func validateDockerContainerNameTemplate(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	rendered := deploy.RenderDockerRuntimeNameTemplate(raw, "app", "service")
+	if err := deploy.ValidateDockerContainerName(rendered); err != nil {
+		return apperr.New("BAD_REQUEST",
+			"docker_container_name 支持字母/数字/点/下划线/连字符，可用 {{APP_CODE}} / {{SERVICE_CODE}} / {app} / {service} 模板；渲染后 "+err.Error(), 400)
+	}
+	return nil
+}
 
 // AppService 应用业务编排
 type AppService struct {
@@ -150,24 +162,25 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 	a := &model.Application{
 		AppCode: in.AppCode, Name: in.Name, AppType: defaultAppType(in.AppType),
 		GitURL: in.GitURL, GitCredID: in.GitCredID, GitRef: refs[0], GitRefs: marshalGitRefs(refs),
-		DeployPath: in.DeployPath, Port: in.Port,
+		DeployPath: in.DeployPath, Port: defaultAppPort(in.Port),
 		HealthCheckURL: defaultHealthURL(in.HealthCheckURL),
 		JvmArgs:        in.JvmArgs, EnvVars: in.EnvVars,
-		SystemdUser:       strings.TrimSpace(in.SystemdUser),
-		JavaPath:          strings.TrimSpace(in.JavaPath),
-		BuildModule:       strings.TrimSpace(in.BuildModule),
-		BuildJarPattern:   strings.TrimSpace(in.BuildJarPattern),
-		NginxHostID:       in.NginxHostID,
-		NginxUpstreamName: strings.TrimSpace(in.NginxUpstreamName),
-		ActiveGroup:       strings.TrimSpace(in.ActiveGroup),
-		DeployMode:        deploy.NormalizeDeployMode(in.DeployMode),
-		BuildMode:         normalizeBuildMode(in.BuildMode),
-		DockerRegistry:    strings.TrimSpace(in.DockerRegistry),
-		DockerImageName:   strings.TrimSpace(in.DockerImageName),
-		DockerImageTag:    strings.TrimSpace(in.DockerImageTag),
-		Dockerfile:        in.Dockerfile,
-		DockerBuildArgs:   strings.TrimSpace(in.DockerBuildArgs),
-		DockerRunArgs:     strings.TrimSpace(in.DockerRunArgs),
+		SystemdUser:         strings.TrimSpace(in.SystemdUser),
+		JavaPath:            strings.TrimSpace(in.JavaPath),
+		BuildModule:         strings.TrimSpace(in.BuildModule),
+		BuildJarPattern:     strings.TrimSpace(in.BuildJarPattern),
+		NginxHostID:         0,
+		NginxUpstreamName:   "",
+		ActiveGroup:         "",
+		DeployMode:          deploy.NormalizeDeployMode(in.DeployMode),
+		BuildMode:           normalizeBuildMode(in.BuildMode),
+		DockerRegistry:      strings.TrimSpace(in.DockerRegistry),
+		DockerImageName:     strings.TrimSpace(in.DockerImageName),
+		DockerImageTag:      strings.TrimSpace(in.DockerImageTag),
+		Dockerfile:          in.Dockerfile,
+		DockerBuildArgs:     strings.TrimSpace(in.DockerBuildArgs),
+		DockerContainerName: strings.TrimSpace(in.DockerContainerName),
+		DockerRunArgs:       strings.TrimSpace(in.DockerRunArgs),
 	}
 	if err := s.db.Create(a).Error; err != nil {
 		if isUniqueConstraint(err) {
@@ -176,18 +189,8 @@ func (s *AppService) Create(in AppInput) (AppView, error) {
 		}
 		return AppView{}, apperr.Wrap(err, "INTERNAL", "create app", 500)
 	}
-	// Sprint X.4：自动建一行 service_code="default" 的 AppService，
-	// 让单体 App 也能走多 service 链路（部署/构建 wave 调度找得到 service 行）。
-	if err := EnsureDefaultAppService(s.db, a); err != nil {
-		// 不阻塞 app 创建（已落库），但记日志
-		slog.Warn("ensure default service after app create", "app_id", a.ID, "err", err)
-	}
-	if tpl, err := EnsureDefaultDockerfileTemplate(s.db, a.ID); err != nil {
+	if _, err := EnsureDefaultDockerfileTemplate(s.db, a.ID); err != nil {
 		slog.Warn("ensure default dockerfile template after app create", "app_id", a.ID, "err", err)
-	} else {
-		_ = s.db.Model(&model.AppService{}).
-			Where("app_id = ? AND service_code = ? AND dockerfile_template_id = 0", a.ID, "default").
-			Update("dockerfile_template_id", tpl.ID).Error
 	}
 	return toAppView(a), nil
 }
@@ -232,7 +235,9 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.GitRef = refs[0]
 	a.GitRefs = marshalGitRefs(refs)
 	a.DeployPath = in.DeployPath
-	a.Port = in.Port
+	if in.Port > 0 {
+		a.Port = in.Port
+	}
 	a.HealthCheckURL = defaultHealthURL(in.HealthCheckURL)
 	a.JvmArgs = in.JvmArgs
 	a.EnvVars = in.EnvVars
@@ -240,9 +245,9 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.JavaPath = strings.TrimSpace(in.JavaPath)
 	a.BuildModule = strings.TrimSpace(in.BuildModule)
 	a.BuildJarPattern = strings.TrimSpace(in.BuildJarPattern)
-	a.NginxHostID = in.NginxHostID
-	a.NginxUpstreamName = strings.TrimSpace(in.NginxUpstreamName)
-	a.ActiveGroup = strings.TrimSpace(in.ActiveGroup)
+	a.NginxHostID = 0
+	a.NginxUpstreamName = ""
+	a.ActiveGroup = ""
 	a.DeployMode = deploy.NormalizeDeployMode(in.DeployMode)
 	a.BuildMode = normalizeBuildMode(in.BuildMode)
 	a.DockerRegistry = strings.TrimSpace(in.DockerRegistry)
@@ -250,6 +255,7 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 	a.DockerImageTag = strings.TrimSpace(in.DockerImageTag)
 	a.Dockerfile = in.Dockerfile
 	a.DockerBuildArgs = strings.TrimSpace(in.DockerBuildArgs)
+	a.DockerContainerName = strings.TrimSpace(in.DockerContainerName)
 	a.DockerRunArgs = strings.TrimSpace(in.DockerRunArgs)
 	if err := s.db.Save(a).Error; err != nil {
 		if isUniqueConstraint(err) {
@@ -257,11 +263,6 @@ func (s *AppService) Update(id uint, in AppInput) (AppView, error) {
 				fmt.Sprintf("app_code %q 已被占用", in.AppCode), 409)
 		}
 		return AppView{}, apperr.Wrap(err, "INTERNAL", "update app", 500)
-	}
-	if err := s.syncDefaultService(a); err != nil {
-		// default service 是单体 App 顶层配置的镜像；同步失败不吞掉，否则会出现
-		// app=docker 但 default service=systemd，部署阶段继续检查 Java 的漂移。
-		return AppView{}, err
 	}
 	return toAppView(a), nil
 }
@@ -300,39 +301,6 @@ func (s *AppService) findByID(id uint) (*model.Application, error) {
 	return &a, nil
 }
 
-func (s *AppService) syncDefaultService(a *model.Application) error {
-	updates := map[string]any{
-		"build_module":        strings.TrimSpace(a.BuildModule),
-		"build_jar_pattern":   strings.TrimSpace(a.BuildJarPattern),
-		"port":                a.Port,
-		"health_check_url":    defaultHealthURL(a.HealthCheckURL),
-		"jvm_args":            a.JvmArgs,
-		"env_vars":            a.EnvVars,
-		"systemd_user":        strings.TrimSpace(a.SystemdUser),
-		"java_path":           strings.TrimSpace(a.JavaPath),
-		"nginx_host_id":       a.NginxHostID,
-		"nginx_upstream_name": strings.TrimSpace(a.NginxUpstreamName),
-		"active_group":        strings.TrimSpace(a.ActiveGroup),
-		"deploy_mode":         deploy.NormalizeDeployMode(a.DeployMode),
-		"docker_registry":     strings.TrimSpace(a.DockerRegistry),
-		"docker_image_name":   strings.TrimSpace(a.DockerImageName),
-		"docker_image_tag":    strings.TrimSpace(a.DockerImageTag),
-		"dockerfile":          a.Dockerfile,
-		"docker_build_args":   strings.TrimSpace(a.DockerBuildArgs),
-		"docker_run_args":     strings.TrimSpace(a.DockerRunArgs),
-	}
-	res := s.db.Model(&model.AppService{}).
-		Where("app_id = ? AND service_code = ?", a.ID, "default").Updates(updates)
-	if res.Error != nil {
-		// 兼容只迁移 Application 的旧单测 / 一次性脚本环境；正式运行 store.AutoMigrate 会建表。
-		if strings.Contains(res.Error.Error(), "no such table") {
-			return nil
-		}
-		return apperr.Wrap(res.Error, "INTERNAL", "sync default service", 500)
-	}
-	return nil
-}
-
 func validateAppInput(in AppInput) error {
 	if !appCodeRE.MatchString(in.AppCode) {
 		return apperr.New("BAD_REQUEST",
@@ -351,20 +319,8 @@ func validateAppInput(in AppInput) error {
 		return apperr.New("BAD_REQUEST",
 			"systemd_user 必须是 POSIX 用户名（小写字母/下划线开头，长度 1-32，仅含小写字母/数字/下划线/连字符）", 400)
 	}
-	// 蓝绿配置（Sprint 4）：NginxHostID 与 NginxUpstreamName 要么都填、要么都不填
-	upstream := strings.TrimSpace(in.NginxUpstreamName)
-	if (in.NginxHostID > 0) != (upstream != "") {
-		return apperr.New("BAD_REQUEST",
-			"nginx_host_id 与 nginx_upstream_name 必须同时填或同时为空（启用/不启用蓝绿）", 400)
-	}
-	if upstream != "" && !nginxUpstreamRE.MatchString(upstream) {
-		return apperr.New("BAD_REQUEST",
-			"nginx_upstream_name 必须字母开头、长度 2-100、仅含字母/数字/下划线/连字符", 400)
-	}
-	switch strings.TrimSpace(in.ActiveGroup) {
-	case "", "blue", "green":
-	default:
-		return apperr.New("BAD_REQUEST", "active_group 仅允许 blue / green / 空", 400)
+	if err := validateDockerContainerNameTemplate(in.DockerContainerName); err != nil {
+		return err
 	}
 	if err := validateJavaPath(in.JavaPath); err != nil {
 		return err
@@ -399,7 +355,11 @@ func defaultAppType(t string) string {
 	if t == "" {
 		return "jar"
 	}
-	return t
+	// app_type 只作为历史兼容字段保留；新模型统一走 AppService。
+	if t == "spring-cloud" {
+		return t
+	}
+	return "jar"
 }
 
 func defaultHealthURL(u string) string {
@@ -407,6 +367,13 @@ func defaultHealthURL(u string) string {
 		return "/actuator/health"
 	}
 	return u
+}
+
+func defaultAppPort(port int) int {
+	if port <= 0 {
+		return 8080
+	}
+	return port
 }
 
 func defaultGitRef(ref string) string {

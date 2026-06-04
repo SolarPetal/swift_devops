@@ -17,7 +17,7 @@ import (
 // AppSpec 渲染 systemd 单元所需的应用规格（Sprint X.10 + X.11 扩展支持 nohup / docker）
 type AppSpec struct {
 	AppCode        string            // → devops-<AppCode>.service
-	ServiceName    string            // Sprint X.11：微服务名（单体应用 = AppCode）
+	ServiceName    string            // Sprint X.11：service 名（旧应用默认 = AppCode）
 	DeployPath     string            // jar 解析路径（绝对路径）
 	JarFileName    string            // 默认 "app.jar"
 	JvmArgs        string            // 透传到 java 命令行
@@ -28,12 +28,13 @@ type AppSpec struct {
 	JavaPath       string            // java 可执行路径，留空 → /usr/bin/java（Sprint 3.7）
 
 	// Sprint X.11：Docker 部署模式
-	DockerImage       string // 完整镜像名（registry/name:tag）
-	DockerRunArgs     string // docker run 参数
-	RemoteDockerBuild bool   // true = 目标机 docker build -t 后再 docker run
-	DockerfileName    string // 默认 Dockerfile
-	DockerfileContent string // 已上传/待上传的 Dockerfile 快照
-	DockerBuildArgs   string // docker build 参数
+	DockerImage         string // 完整镜像名（registry/name:tag）
+	DockerContainerName string // Docker 容器名；空则 devops-<ServiceName>
+	DockerRunArgs       string // docker run 参数
+	RemoteDockerBuild   bool   // true = 目标机 docker build -t 后再 docker run
+	DockerfileName      string // 默认 Dockerfile
+	DockerfileContent   string // 已上传/待上传的 Dockerfile 快照
+	DockerBuildArgs     string // docker build 参数
 }
 
 // UnitName 单元名（不含路径）

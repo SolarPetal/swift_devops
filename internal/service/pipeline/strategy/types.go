@@ -1,12 +1,11 @@
 // Package strategy 把 pipeline 的策略层（如何编排多主机部署）从 service 主流程解耦。
 // 拆分动机：
 //   - service 主流程只管"触发→落库→分派"，策略只管"按什么节奏跑、失败怎么停"
-//   - 后续 Rolling / Rollback / BlueGreen 各自独立文件，互不污染
+//   - Rolling / Rollback 各自独立文件，互不污染
 //   - 策略对副作用通过 Hooks 表达，service 层注入实现，测试可 mock
 package strategy
 
 import (
-	"context"
 	"time"
 
 	"swift-devops/internal/model"
@@ -15,13 +14,12 @@ import (
 
 // 部署阶段名（前端按这些固定 string 渲染时序卡片）。
 const (
-	StageDial       = "dial"
-	StageEnvCheck   = "env_check" // Sprint 3.7：远端 java/路径预检
-	StageUpload     = "upload"
-	StageUnit       = "write_unit"
-	StageRestart    = "restart"
-	StageHealth     = "health"
-	StageNginxApply = "nginx_apply" // 蓝绿专用：upstream 切流 + nginx -s reload
+	StageDial     = "dial"
+	StageEnvCheck = "env_check" // Sprint 3.7：远端 java/路径预检
+	StageUpload   = "upload"
+	StageUnit     = "write_unit"
+	StageRestart  = "restart"
+	StageHealth   = "health"
 )
 
 // Host 级状态机：与 model.PipelineRunHost.Status 字段一一对应。
@@ -93,11 +91,8 @@ type Plan struct {
 	ItemByServiceCode map[string]*model.ArtifactItem // service_code → item，sub-plan 拆解时按 service 找 jar
 
 	Deps      []model.Deployment // 已按 ID ASC 排好序；wave 编排后只含本 service 的 dep
-	EnvMap    map[string]string  // 已解析的 env vars（per-service）
+	EnvMap    map[string]string  // 已解析的 Application.EnvVars
 	BatchSize int                // rolling 专用；single/rollback 忽略；0/1 退化为单批
-	// 蓝绿专用（Sprint 4.3）：
-	TargetGroup string                          // blue / green —— BlueGreen 部署到这个组
-	NginxApply  func(ctx context.Context) error // 切流闭包：service 层注入，BlueGreen 在全 success 后调用一次
 }
 
 // HostLoader 从主机 ID 还原拨号参数（隔离对 HostService 的依赖，便于 mock）。
@@ -124,7 +119,4 @@ type Hooks interface {
 	// newArtifactItemID 是 Sprint X.6 新增的 ArtifactItem 指针；多 service 链路
 	// 走 Bundle 时填本 service 在 Bundle 内对应的 item id；旧链路传 0。
 	OnDeploymentSuccess(dep *model.Deployment, newArtifactID, newArtifactItemID uint)
-	// OnGroupSwitched 蓝绿专用：目标组切流成功后，由策略调用一次，
-	// service 实现里更新 App.ActiveGroup。
-	OnGroupSwitched(group string)
 }

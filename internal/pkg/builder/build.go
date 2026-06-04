@@ -18,14 +18,14 @@ type ServiceBuildSpec struct {
 	BuildModule string // 可空；非空时 mvn 加 -pl <module>（多个用逗号拼）
 	JarPattern  string // 可空；空走 builder 默认扫描 + Spring Boot 探测
 
-	// Dockerfile / 镜像配置（local-docker / remote-docker）
+	// Dockerfile 配置（local-docker / remote-docker）。镜像命名等 Docker 运行配置由 Plan 统一管理。
 	Port              int
-	DockerRegistry    string
-	DockerImageName   string
-	DockerImageTag    string
+	DockerRegistry    string // deprecated: ignored; use Plan.DockerRegistry
+	DockerImageName   string // deprecated: ignored; use Plan.DockerImageName with {{SERVICE_CODE}}
+	DockerImageTag    string // deprecated: ignored; use Plan.DockerImageTag
 	DockerfileName    string
 	DockerfileContent string
-	DockerBuildArgs   string
+	DockerBuildArgs   string // deprecated: ignored; use Plan.DockerBuildArgs
 }
 
 // Plan 一次构建的完整输入。service 层组装。
@@ -51,13 +51,9 @@ type Plan struct {
 	// 空时退化为旧的单 service 模式。
 	Services []ServiceBuildSpec
 
-	// Sprint 5.6：Docker 容器构建。DockerImage 非空 → mvn 在容器内跑
-	// （clone 仍在宿主机，不需要 MvnBin；容器自带 java/mvn）。
-	DockerImage string
-	DockerBin   string // docker 可执行；空 = "docker"
-
-	// Sprint X.11：Docker 镜像构建模式（app-level fallback；service-level 优先取 ServiceBuildSpec）
+	// Sprint X.11：Docker 镜像构建模式。镜像名、tag、registry、build args 由 app 统一管理。
 	BuildMode       string      // "local-jar" / "local-docker" / "remote-docker"
+	DockerBin       string      // docker 可执行；空 = "docker"（仅 local-docker 构建业务镜像时使用）
 	DockerRegistry  string      // 镜像仓库地址，如 docker.io / harbor.example.com
 	DockerImageName string      // 镜像名，如 myapp/user-service
 	DockerImageTag  string      // 镜像标签，如 git-abc123-45 / latest
@@ -107,8 +103,8 @@ func Build(ctx context.Context, plan Plan) (Result, error) {
 	if strings.TrimSpace(plan.GitURL) == "" {
 		return Result{}, errors.New("git url is empty")
 	}
-	if plan.DockerImage == "" && strings.TrimSpace(plan.MvnBin) == "" {
-		return Result{}, errors.New("mvn_bin is empty (Sprint X.8 要求注入绝对路径；docker 模式改配 docker_image)")
+	if strings.TrimSpace(plan.MvnBin) == "" {
+		return Result{}, errors.New("mvn_bin is empty (Sprint X.8 要求注入绝对路径)")
 	}
 	if strings.TrimSpace(plan.GitBin) == "" {
 		return Result{}, errors.New("git_bin is empty (Sprint X.8 要求注入绝对路径)")
@@ -246,21 +242,9 @@ func serviceSpecMap(specs []ServiceBuildSpec) map[string]ServiceBuildSpec {
 	return out
 }
 
-// runMvn 按 plan.DockerImage 决定容器构建还是本机构建（jar 提取统一由调用方做）。
-//   - docker 模式：mvn 在容器内跑，不需要 MvnBin/ExecEnv（容器自带 java/mvn）
-//   - 本机模式：exec 宿主机 mvn，SkipJarScan（jar 由调用方按 pattern 提取）
+// runMvn 使用宿主机构建环境执行 mvn，SkipJarScan（jar 由调用方按 pattern 提取）。
+// Maven 容器构建镜像功能已下线，后续如需容器化构建再重新设计。
 func runMvn(ctx context.Context, plan Plan, workDir, mvnArgs string) error {
-	if plan.DockerImage != "" {
-		return MvnPackageDocker(ctx, DockerMavenOptions{
-			WorkDir:       workDir,
-			Image:         plan.DockerImage,
-			DockerBin:     plan.DockerBin,
-			ExtraArgs:     mvnArgs,
-			MavenCacheDir: plan.MavenCacheDir,
-			LogWriter:     plan.LogWriter,
-			Timeout:       plan.BuildTimeout,
-		})
-	}
 	if _, err := MvnPackage(ctx, MavenOptions{
 		WorkDir:       workDir,
 		MvnBin:        plan.MvnBin,

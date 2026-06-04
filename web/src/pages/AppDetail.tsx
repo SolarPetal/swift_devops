@@ -3,38 +3,127 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Typography, Card, Button, Space, Table, Tag, Modal,
   Form, Select, InputNumber, Input, message, Descriptions, Skeleton, Tabs, Radio,
-  Drawer, Steps, Badge, Upload, Progress, Tooltip,
+  Drawer, Steps, Badge, Upload, Progress, Tooltip, Switch,
 } from 'antd'
 
 import type {
   App, Deployment, Host, Artifact, PipelineRun, RunSnapshot, StepResult, PipelineStage,
   BuildRun, GitCredential, BuilderEnv,
   AppService, AppServiceInput, ArtifactBundle, DockerfileTemplate, DockerfileTemplateInput, AppInput,
+  DeploymentRuntimeAction, DeploymentRuntimeLogs, AppServiceSuggestion,
 } from '../types'
 import { getApp, updateApp } from '../api/app'
 import { listHosts } from '../api/host'
-import { bindHost, listDeployments, unbindDeployment, updateDeploymentGroup } from '../api/deployment'
+import {
+  bindHost, checkDeploymentRuntime, listDeployments, unbindDeployment, getDeploymentRuntimeLogs,
+  restartDeploymentRuntime, stopDeploymentRuntime,
+} from '../api/deployment'
 import { createArtifact, deleteArtifact, listArtifacts, uploadArtifact, listBundles, cleanupBundleHistory } from '../api/artifact'
-import { cancelPipeline, deployApp, getPipeline, listPipelines, rollbackApp } from '../api/pipeline'
+import { cancelPipeline, deployApp, getPipeline, listPipelines, rollbackPipelineRun } from '../api/pipeline'
 import { getBuild, getBuildLog, listBuilds, triggerBuild } from '../api/build'
 import { listGitCreds } from '../api/gitcred'
 import { getBuilderEnv } from '../api/builderEnv'
-import { listAppServices, createAppService, updateAppService, deleteAppService } from '../api/appService'
+import {
+  batchImportAppServices,
+  createAppService,
+  deleteAppService,
+  discoverAppServices,
+  listAppServices,
+  updateAppService,
+} from '../api/appService'
 import { listDockerfileTemplates, createDockerfileTemplate, updateDockerfileTemplate, deleteDockerfileTemplate, ensureDefaultDockerfileTemplate } from '../api/dockerfile'
 import { buildWSURL, issueWSTicket, type PipelineWSEvent, type BuildWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
+import { EmptyState, PageHeader, StatCard, StatGrid } from '../components/PageFrame'
+import { LogTerminal } from '../components/LogTerminal'
+import {
+  StatusTag,
+  type StatusTone,
+  statusToneFromBuild,
+  statusToneFromPipeline,
+} from '../components/StatusTag'
 
 // 状态色
 const hostStatusTag = (s: string) => {
-  if (s === 'online') return <Tag color="green">● 在线</Tag>
-  if (s === 'offline') return <Tag color="red">● 离线</Tag>
-  return <Tag>○ 未知</Tag>
+  if (s === 'online') return <StatusTag tone="success">在线</StatusTag>
+  if (s === 'offline') return <StatusTag tone="danger">离线</StatusTag>
+  return <StatusTag>未知</StatusTag>
 }
 const pipeStatusTag = (s: string) => {
-  if (s === 'success') return <Tag color="green">✓ 成功</Tag>
-  if (s === 'failed') return <Tag color="red">✗ 失败</Tag>
-  if (s === 'running') return <Tag color="processing">● 进行中</Tag>
-  return <Tag>{s}</Tag>
+  if (s === 'success') return <StatusTag tone="success">成功</StatusTag>
+  if (s === 'failed') return <StatusTag tone="danger">失败</StatusTag>
+  if (s === 'running') return <StatusTag tone="processing">进行中</StatusTag>
+  if (s === 'pending') return <StatusTag tone="warning">等待中</StatusTag>
+  if (s === 'cancelled') return <StatusTag>已取消</StatusTag>
+  return <StatusTag>{s}</StatusTag>
+}
+const deployHostStatusTag = (s?: string) => {
+  if (s === 'success') return <StatusTag tone="success">成功</StatusTag>
+  if (s === 'failed') return <StatusTag tone="danger">失败</StatusTag>
+  if (s === 'running') return <StatusTag tone="processing">部署中</StatusTag>
+  if (s === 'skipped') return <StatusTag tone="warning">跳过</StatusTag>
+  if (s === 'pending') return <StatusTag tone="warning">等待中</StatusTag>
+  return <Typography.Text type="secondary">暂无部署记录</Typography.Text>
+}
+const runtimeStatusTag = (s?: string) => {
+  if (s === 'running') return <StatusTag tone="success">运行中</StatusTag>
+  if (s === 'failed') return <StatusTag tone="danger">异常</StatusTag>
+  if (s === 'stopped') return <StatusTag tone="danger">已停止</StatusTag>
+  if (s === 'pending') return <StatusTag tone="warning">待部署</StatusTag>
+  return <StatusTag>{s || '-'}</StatusTag>
+}
+
+const isDeploymentRunning = (d: Deployment) => d.status === 'running'
+
+const buildStatusTag = (s: string) => {
+  if (s === 'success') return <StatusTag tone="success">成功</StatusTag>
+  if (s === 'failed') return <StatusTag tone="danger">失败</StatusTag>
+  if (s === 'building') return <StatusTag tone="processing">构建中</StatusTag>
+  if (s === 'cancelled') return <StatusTag>已取消</StatusTag>
+  return <StatusTag>{s}</StatusTag>
+}
+
+const deploymentArtifactLabel = (d: Deployment) => {
+  if (d.current_bundle_id || d.current_artifact_item_id) {
+    return (
+      <Space direction="vertical" size={0}>
+        <Space size={4}>
+          {d.current_bundle_id > 0 && <StatusTag tone="info">Bundle #{d.current_bundle_id}</StatusTag>}
+          {d.current_bundle_version && <Typography.Text code>{d.current_bundle_version}</Typography.Text>}
+        </Space>
+        {d.current_artifact_item_id > 0 && (
+          <Typography.Text type="secondary">Item #{d.current_artifact_item_id}</Typography.Text>
+        )}
+      </Space>
+    )
+  }
+  if (d.current_artifact_id) return <StatusTag>Artifact #{d.current_artifact_id}</StatusTag>
+  return <Typography.Text type="secondary">-</Typography.Text>
+}
+
+const lastDeployStatusView = (d: Deployment) => {
+  const runtimeDetail = d.runtime_check_error || d.runtime_status_detail
+  const content = (
+    <Space direction="vertical" size={0}>
+      <Space size={4}>
+        {deployHostStatusTag(d.last_deploy_status)}
+        {d.last_run_id > 0 && <Typography.Text type="secondary">Run #{d.last_run_id}</Typography.Text>}
+      </Space>
+      <Typography.Text type="secondary">
+        运行态：{runtimeStatusTag(d.status)}
+        {d.last_deploy_stage ? <> · {d.last_deploy_stage}</> : null}
+        {d.runtime_check_error ? <> · 检测失败</> : null}
+      </Typography.Text>
+      {d.runtime_container_name && (
+        <Typography.Text type="secondary" ellipsis style={{ maxWidth: 170 }}>
+          容器：{d.runtime_container_name}
+        </Typography.Text>
+      )}
+    </Space>
+  )
+  const tips = [d.last_deploy_error, runtimeDetail].filter(Boolean).join('\n\n')
+  if (!tips) return content
+  return <Tooltip title={<pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{tips}</pre>}>{content}</Tooltip>
 }
 
 const appBuildRefs = (app: App) => {
@@ -53,6 +142,224 @@ const appBuildRefs = (app: App) => {
 const appToInput = (app: App): AppInput => {
   const { id, created_at, updated_at, ...input } = app
   return input
+}
+
+const describeServiceMode = (services: AppService[]) => {
+  const enabled = services.filter((s) => s.enabled)
+  if (services.length === 0) {
+    return {
+      label: '未配置服务',
+      color: 'default',
+      desc: '还没有配置 service；请在「服务」里扫描 Maven 模块或手动新增。',
+    }
+  }
+  if (enabled.length === 0) {
+    return {
+      label: '未启用服务',
+      color: 'red',
+      desc: '当前没有可部署 service，请先在「服务」启用至少一个 service。',
+    }
+  }
+  if (enabled.length === 1) {
+    return {
+      label: '单服务模式',
+      color: 'green',
+      desc: `当前可部署服务：${enabled[0].service_code || 'default'}。`,
+    }
+  }
+  return {
+    label: '多服务模式',
+    color: 'blue',
+    desc: `当前启用 ${enabled.length} 个可部署 service，构建和部署会按 service 编排。`,
+  }
+}
+
+const serviceModeTone = (color: string): StatusTone => {
+  if (color === 'red') return 'danger'
+  if (color === 'green') return 'success'
+  if (color === 'blue') return 'info'
+  return 'neutral'
+}
+
+const formatDateTime = (value?: string) => {
+  if (!value) return '-'
+  const time = new Date(value)
+  return Number.isNaN(time.getTime()) ? value : time.toLocaleString()
+}
+
+const timeValue = (value?: string) => {
+  if (!value) return 0
+  const time = new Date(value).getTime()
+  return Number.isFinite(time) ? time : 0
+}
+
+type StatCardTone = 'default' | 'success' | 'warning' | 'danger' | 'info'
+
+const tagTone = (tone: StatCardTone): StatusTone => tone === 'default' ? 'neutral' : tone
+
+const serviceCode = (s: AppService) => s.service_code || 'default'
+
+const enabledServicesOf = (services: AppService[]) => services.filter((s) => s.enabled)
+
+const effectiveServicePort = (app: App, service: AppService) => service.port || app.port
+
+const servicePortRows = (app: App, services: AppService[]) => {
+  const enabled = enabledServicesOf(services)
+  if (enabled.length === 0) {
+    return app.port ? [{ code: '应用默认', port: app.port }] : []
+  }
+  return enabled.map((service) => ({
+    code: serviceCode(service),
+    port: effectiveServicePort(app, service),
+  }))
+}
+
+const duplicatePortGroups = (rows: Array<{ code: string; port: number }>) => {
+  const groups = new Map<number, string[]>()
+  rows.forEach((row) => {
+    if (!row.port) return
+    groups.set(row.port, [...(groups.get(row.port) ?? []), row.code])
+  })
+  return Array.from(groups.entries()).filter(([, codes]) => codes.length > 1)
+}
+
+const compactPairs = (rows: Array<{ code: string; port: number }>, max = 3) => {
+  const pairs = rows
+    .filter((row) => row.port)
+    .slice(0, max)
+    .map((row) => `${row.code}:${row.port}`)
+  const more = rows.length > max ? ` 等 ${rows.length} 个 service` : ''
+  return pairs.length > 0 ? `${pairs.join(' / ')}${more}` : '暂无端口'
+}
+
+const summarizeServiceCard = (services: AppService[]) => {
+  const enabled = enabledServicesOf(services)
+  const mode = describeServiceMode(services)
+  return {
+    label: 'Services',
+    value: services.length === 0 ? '初始化中' : `${enabled.length}/${services.length}`,
+    description: mode.desc,
+    tone: serviceModeTone(mode.color) as StatCardTone,
+    meta: mode.label,
+  }
+}
+
+const summarizePortCard = (app: App, services: AppService[]) => {
+  const enabled = enabledServicesOf(services)
+  const rows = servicePortRows(app, services)
+  const uniquePorts = new Set(rows.map((row) => row.port).filter(Boolean))
+  const duplicated = duplicatePortGroups(rows)
+
+  if (services.length === 0) {
+    return {
+      label: 'Ports',
+      value: app.port || '-',
+      description: '这是应用默认端口；service 加载后以 service 端口为准。',
+      tone: 'warning' as StatCardTone,
+      meta: app.port ? `默认端口 :${app.port}` : '端口未配置',
+    }
+  }
+
+  if (enabled.length === 0) {
+    return {
+      label: 'Ports',
+      value: '-',
+      description: '没有启用的 service，无法判断实际监听端口。',
+      tone: 'danger' as StatCardTone,
+      meta: '无启用端口',
+    }
+  }
+
+  if (enabled.length === 1) {
+    const row = rows[0]
+    return {
+      label: 'Service Port',
+      value: row.port || '-',
+      description: `${row.code} 的实际监听端口；不是全应用唯一端口。`,
+      tone: row.port ? 'info' as StatCardTone : 'warning' as StatCardTone,
+      meta: row.port ? `${row.code}:${row.port}` : `${row.code}:未配置`,
+    }
+  }
+
+  if (duplicated.length > 0) {
+    const conflictText = duplicated
+      .map(([port, codes]) => `${port}(${codes.join(', ')})`)
+      .join(' / ')
+    return {
+      label: 'Service Ports',
+      value: `${uniquePorts.size} 个端口`,
+      description: `注意端口复用/冲突：${conflictText}`,
+      tone: 'warning' as StatCardTone,
+      meta: `端口 ${uniquePorts.size} 个`,
+    }
+  }
+
+  return {
+    label: 'Service Ports',
+    value: `${uniquePorts.size} 个端口`,
+    description: compactPairs(rows),
+    tone: 'info' as StatCardTone,
+    meta: `端口 ${uniquePorts.size} 个`,
+  }
+}
+
+const summarizeBuildSourceCard = (app: App) => {
+  const refs = appBuildRefs(app)
+  return {
+    label: 'Build Source',
+    value: <code>{app.git_ref || 'main'}</code>,
+    description: app.git_url ? `Git 已配置；${refs.length} 个可选 Ref。` : 'Git 仓库未配置，无法从仓库扫描和构建。',
+    tone: app.git_url ? 'success' as StatCardTone : 'warning' as StatCardTone,
+    meta: app.git_url ? 'Git Ready' : 'Git 未配置',
+  }
+}
+
+const summarizeRuntimePlanCard = (app: App, services: AppService[]) => {
+  const enabled = enabledServicesOf(services)
+  const modes = new Set(enabled.map((service) => service.deploy_mode || app.deploy_mode || 'systemd'))
+  const dockerEnabled = app.build_mode === 'local-docker' || app.build_mode === 'remote-docker' || app.deploy_mode === 'docker'
+  const dockerImage = [app.docker_registry, app.docker_image_name || `${app.app_code}/{{SERVICE_CODE}}`].filter(Boolean).join('/') || `${app.app_code}/{{SERVICE_CODE}}`
+  const value = modes.size > 1 ? `${modes.size} 种模式` : (Array.from(modes)[0] || app.deploy_mode || 'systemd')
+  return {
+    label: 'Runtime Plan',
+    value,
+    description: dockerEnabled
+      ? `Docker 镜像模板：${dockerImage}:${app.docker_image_tag || 'latest'}`
+      : enabled.length > 1
+        ? `按 service 编排部署；默认路径 ${app.deploy_path}`
+        : app.deploy_path,
+    tone: dockerEnabled ? 'warning' as StatCardTone : 'default' as StatCardTone,
+    meta: value,
+  }
+}
+
+const renderServicePortMatrix = (app: App, services: AppService[]) => {
+  const rows = servicePortRows(app, services)
+  return (
+    <div className="service-chip-list">
+      {rows.map((row) => (
+        <span className="service-chip" key={`${row.code}-${row.port}`}>
+          <span className="service-chip-name">{row.code}</span>
+          <code>:{row.port || '-'}</code>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+const renderServiceHealthMatrix = (app: App, services: AppService[]) => {
+  const enabled = enabledServicesOf(services)
+  if (enabled.length === 0) return <code>{app.health_check_url || '-'}</code>
+  return (
+    <div className="service-chip-list">
+      {enabled.map((service) => (
+        <span className="service-chip service-chip--wide" key={serviceCode(service)}>
+          <span className="service-chip-name">{serviceCode(service)}</span>
+          <code>{service.health_check_url || app.health_check_url || '-'}</code>
+        </span>
+      ))}
+    </div>
+  )
 }
 
 type DockerfileTemplateFormValues = DockerfileTemplateInput & {
@@ -119,16 +426,25 @@ export default function AppDetail() {
   const nav = useNavigate()
   const appId = Number(id)
   const [app, setApp] = useState<App | null>(null)
+  const [appServices, setAppServices] = useState<AppService[]>([])
+  const [activeTab, setActiveTab] = useState('overview')
   const [loadingApp, setLoadingApp] = useState(false)
   const [runtimeOpen, setRuntimeOpen] = useState(false)
-  const [runtimeHosts, setRuntimeHosts] = useState<Host[]>([])
   const [runtimeForm] = Form.useForm<AppInput>()
   const runtimeDeployMode = Form.useWatch('deploy_mode', runtimeForm)
 
   const refresh = async () => {
     setLoadingApp(true)
     try {
-      setApp(await getApp(appId))
+      const nextApp = await getApp(appId)
+      setApp(nextApp)
+      try {
+        const svcRows = await listAppServices(appId)
+        setAppServices(svcRows)
+      } catch (e) {
+        setAppServices([])
+        message.warning(`服务模式读取失败：${formatError(e)}`)
+      }
     } catch (e) {
       message.error(formatError(e))
     } finally {
@@ -139,9 +455,13 @@ export default function AppDetail() {
 
   if (loadingApp && !app) return <Skeleton active />
   if (!app) return <Typography.Text type="danger">应用不存在</Typography.Text>
+  const dockerEnabled = app.build_mode === 'local-docker' || app.build_mode === 'remote-docker' || app.deploy_mode === 'docker'
+  const serviceSummary = summarizeServiceCard(appServices)
+  const portSummary = summarizePortCard(app, appServices)
+  const buildSourceSummary = summarizeBuildSourceCard(app)
+  const runtimePlanSummary = summarizeRuntimePlanCard(app, appServices)
 
   const openRuntimeEdit = async () => {
-    try { setRuntimeHosts(await listHosts()) } catch {}
     runtimeForm.resetFields()
     runtimeForm.setFieldsValue({
       build_mode: app.build_mode || 'local-jar',
@@ -150,10 +470,12 @@ export default function AppDetail() {
       env_vars: app.env_vars || '',
       systemd_user: app.systemd_user || '',
       java_path: app.java_path || '',
+      docker_registry: app.docker_registry || '',
+      docker_image_name: app.docker_image_name || '',
+      docker_image_tag: app.docker_image_tag || 'latest',
+      docker_build_args: app.docker_build_args || '',
+      docker_container_name: app.docker_container_name || '',
       docker_run_args: app.docker_run_args || '',
-      nginx_host_id: app.nginx_host_id || 0,
-      nginx_upstream_name: app.nginx_upstream_name || '',
-      active_group: app.active_group || '',
     })
     setRuntimeOpen(true)
   }
@@ -161,12 +483,6 @@ export default function AppDetail() {
   const saveRuntimeConfig = async () => {
     try {
       const v = await runtimeForm.validateFields()
-      const hasHost = !!v.nginx_host_id && v.nginx_host_id > 0
-      const hasName = !!v.nginx_upstream_name && v.nginx_upstream_name.trim() !== ''
-      if (hasHost !== hasName) {
-        message.error('Nginx 主机和 upstream 名要么同时填，要么同时留空')
-        return
-      }
       await updateApp(app.id, {
         ...appToInput(app),
         ...v,
@@ -183,35 +499,36 @@ export default function AppDetail() {
   }
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16 }}>
-        <Button onClick={() => nav('/apps')}>← 返回列表</Button>
-        <Typography.Title level={4} style={{ margin: 0 }}>
-          {app.name}{' '}
-          <Typography.Text type="secondary" style={{ fontSize: 14 }}>
-            <code>{app.app_code}</code>
-          </Typography.Text>
-        </Typography.Title>
-      </Space>
+    <section className="page-shell app-detail-page">
+      <PageHeader
+        eyebrow="Application Detail"
+        title={app.name}
+        description={(
+          <>
+            应用代号 <code>{app.app_code}</code> · Git 仓库 / Maven Service 交付单元。这里按概览、服务、构建、部署、运行组织主路径。
+          </>
+        )}
+        actions={(
+          <>
+            <Button onClick={() => nav('/apps')}>返回列表</Button>
+            <Button type="primary" onClick={openRuntimeEdit}>编辑运行配置</Button>
+          </>
+        )}
+        meta={(
+          <>
+            <StatusTag tone={tagTone(serviceSummary.tone)}>{serviceSummary.meta}</StatusTag>
+            <StatusTag tone={tagTone(portSummary.tone)}>{portSummary.meta}</StatusTag>
+            <StatusTag tone={dockerEnabled ? 'info' : 'neutral'}>{runtimePlanSummary.meta}</StatusTag>
+          </>
+        )}
+      />
 
-      <Card
-        title="应用摘要"
-        size="small"
-        style={{ marginBottom: 16 }}
-        extra={<Button size="small" onClick={openRuntimeEdit}>编辑运行配置</Button>}
-      >
-        <Descriptions size="small" column={2}>
-          <Descriptions.Item label="类型">{app.app_type}</Descriptions.Item>
-          <Descriptions.Item label="端口">{app.port}</Descriptions.Item>
-          <Descriptions.Item label="默认构建 Ref"><code>{app.git_ref || 'main'}</code></Descriptions.Item>
-          <Descriptions.Item label="Git 仓库"><code>{app.git_url || '-'}</code></Descriptions.Item>
-          <Descriptions.Item label="可选构建 Ref" span={2}>
-            {appBuildRefs(app).map(ref => <Tag key={ref}>{ref}</Tag>)}
-          </Descriptions.Item>
-          <Descriptions.Item label="部署路径" span={2}><code>{app.deploy_path}</code></Descriptions.Item>
-          <Descriptions.Item label="健康检查">{app.health_check_url}</Descriptions.Item>
-        </Descriptions>
-      </Card>
+      <StatGrid>
+        <StatCard label={serviceSummary.label} value={serviceSummary.value} description={serviceSummary.description} tone={serviceSummary.tone} />
+        <StatCard label={portSummary.label} value={portSummary.value} description={portSummary.description} tone={portSummary.tone} />
+        <StatCard label={buildSourceSummary.label} value={buildSourceSummary.value} description={buildSourceSummary.description} tone={buildSourceSummary.tone} />
+        <StatCard label={runtimePlanSummary.label} value={runtimePlanSummary.value} description={runtimePlanSummary.description} tone={runtimePlanSummary.tone} />
+      </StatGrid>
 
       <Modal
         title={`运行与发布配置 - ${app.name}`}
@@ -224,14 +541,14 @@ export default function AppDetail() {
         maskClosable={false}
         keyboard={false}
       >
-        <Form form={runtimeForm} layout="vertical">
+        <Form form={runtimeForm} layout="vertical" className="runtime-config-form">
           <Form.Item
             name="build_mode"
             label="构建方式"
             rules={[{ required: true }]}
             tooltip="本地 jar：Maven 打包 jar；本地 Docker：本机 Maven 打 jar + docker build/push；远端 Docker：本机 Maven 打 jar，部署时上传 jar+Dockerfile 到目标机 docker build/run"
           >
-              <Radio.Group
+            <Radio.Group
               onChange={(e: any) => {
                 const next = e.target.value
                 if ((next === 'local-docker' || next === 'remote-docker') && runtimeForm.getFieldValue('deploy_mode') !== 'docker') {
@@ -284,111 +601,444 @@ export default function AppDetail() {
             </>
           )}
           {runtimeDeployMode === 'docker' && (
-            <Form.Item
-              name="docker_run_args"
-              label="docker run 参数"
-              tooltip="如 -p 8080:8080 -e ENV=prod --restart=unless-stopped，留空则自动生成"
-            >
-              <Input.TextArea rows={3} placeholder="留空自动生成" />
-            </Form.Item>
+            <>
+              <Typography.Title level={5}>Docker 配置</Typography.Title>
+              <Typography.Paragraph type="secondary" style={{ marginTop: -4 }}>
+                镜像名称不填时回退 <code>{app.app_code}/default</code>；容器名称不填时回退 <code>devops-{app.app_code}</code>。
+                名称模板支持 <code>{'{{APP_CODE}}'}</code> / <code>{'{{SERVICE_CODE}}'}</code> / <code>{'{app}'}</code> / <code>{'{service}'}</code>。
+              </Typography.Paragraph>
+              <Space style={{ display: 'flex' }} align="start">
+                <Form.Item
+                  name="docker_registry"
+                  label="镜像仓库"
+                  style={{ flex: 1 }}
+                  rules={[{ pattern: /^\S*$/, message: '不能包含空白字符' }]}
+                >
+                  <Input placeholder="如 registry.example.com；留空则不加 registry" />
+                </Form.Item>
+                <Form.Item
+                  name="docker_image_name"
+                  label="镜像名称"
+                  style={{ flex: 1 }}
+                  rules={[{ pattern: /^\S*$/, message: '不能包含空白字符' }]}
+                  tooltip="支持 {{APP_CODE}} / {{SERVICE_CODE}}，例如 team/{{APP_CODE}}-{{SERVICE_CODE}}"
+                >
+                  <Input placeholder={`${app.app_code}/default`} />
+                </Form.Item>
+              </Space>
+              <Space style={{ display: 'flex' }} align="start">
+                <Form.Item
+                  name="docker_image_tag"
+                  label="镜像标签"
+                  style={{ flex: 1 }}
+                  rules={[{ pattern: /^\S*$/, message: '不能包含空白字符' }]}
+                  tooltip="支持 {sha} / {build_id} / {{GIT_SHORT_SHA}} / {{BUILD_ID}}"
+                >
+                  <Input placeholder="latest / git-{sha}-{build_id}" />
+                </Form.Item>
+                <Form.Item
+                  name="docker_container_name"
+                  label="容器名称"
+                  style={{ flex: 1 }}
+                  rules={[{
+                    pattern: /^([A-Za-z0-9_.{}-]{1,160})?$/,
+                    message: '仅允许字母/数字/点/下划线/连字符和模板花括号',
+                  }]}
+                  tooltip="不要写到 docker run 参数里；这里会生成 docker run --name"
+                >
+                  <Input placeholder={`devops-${app.app_code}`} />
+                </Form.Item>
+              </Space>
+              <Form.Item
+                name="docker_build_args"
+                label="docker build 参数"
+                tooltip="如 --build-arg ENV=prod；remote-docker 会在目标机 build 时使用"
+              >
+                <Input placeholder="--build-arg ENV=prod" />
+              </Form.Item>
+              <Form.Item
+                name="docker_run_args"
+                label="docker run 参数"
+                tooltip="如 -p 8080:8080 -e ENV=prod --restart=unless-stopped，留空则自动生成。容器名请填上面的“容器名称”。"
+              >
+                <Input.TextArea rows={3} placeholder="留空自动生成 -d --restart=unless-stopped -p <port>:<port>" />
+              </Form.Item>
+            </>
           )}
           <Form.Item name="env_vars" label="环境变量 (JSON)">
             <Input.TextArea rows={3} placeholder='{"SPRING_PROFILES_ACTIVE":"prod"}' />
           </Form.Item>
-
-          <Typography.Title level={5}>蓝绿配置</Typography.Title>
-          <Form.Item name="nginx_host_id" label="Nginx 主机">
-            <Select
-              allowClear
-              placeholder="不启用蓝绿请留空"
-              options={[
-                { value: 0, label: '— 不启用 —' },
-                ...runtimeHosts.map((h) => ({
-                  value: h.id,
-                  label: `${h.name} (${h.ip})${h.status === 'online' ? ' ● 在线' : ''}`,
-                })),
-              ]}
-            />
-          </Form.Item>
-          <Form.Item
-            name="nginx_upstream_name"
-            label="Upstream 名"
-            rules={[{
-              pattern: /^([A-Za-z][A-Za-z0-9_-]{1,99})?$/,
-              message: '字母开头，2-100 位，仅含字母/数字/下划线/连字符',
-            }]}
-          >
-            <Input placeholder="如：user-svc-backend（留空表示不启用）" />
-          </Form.Item>
-          <Form.Item name="active_group" label="当前活跃组">
-            <Radio.Group>
-              <Radio value="">未设置</Radio>
-              <Radio value="blue">Blue</Radio>
-              <Radio value="green">Green</Radio>
-            </Radio.Group>
-          </Form.Item>
         </Form>
       </Modal>
 
-      <Card>
+      <Card className="surface-card detail-tabs-card">
         <Tabs
-          defaultActiveKey={
-            app.app_type === 'spring-cloud' ||
-            app.build_mode === 'local-docker' ||
-            app.build_mode === 'remote-docker'
-              ? 'services'
-              : 'hosts'
-          }
-          items={
-            app.app_type === 'spring-cloud'
-              ? [
-                  { key: 'services',  label: '微服务配置', children: <ServicesTab appId={appId} app={app} /> },
-                  { key: 'hosts',     label: '主机绑定', children: <HostBindTab appId={appId} appPort={app.port} /> },
-                  { key: 'artifacts', label: '制品 & 构建', children: <ArtifactTab app={app} /> },
-                  { key: 'pipelines', label: '部署历史', children: <PipelineTab app={app} /> },
-                ]
-              : [
-                  { key: 'services',  label: 'Dockerfile 配置', children: <ServicesTab appId={appId} app={app} /> },
-                  { key: 'hosts',     label: '主机绑定', children: <HostBindTab appId={appId} appPort={app.port} /> },
-                  { key: 'artifacts', label: '制品 & 构建', children: <ArtifactTab app={app} /> },
-                  { key: 'pipelines', label: '部署历史', children: <PipelineTab app={app} /> },
-                ]
-          }
+          activeKey={activeTab}
+          onChange={setActiveTab}
+          items={[
+            {
+              key: 'overview',
+              label: '概览',
+              children: (
+                <ApplicationOverviewTab
+                  app={app}
+                  services={appServices}
+                  onJump={setActiveTab}
+                />
+              ),
+            },
+            { key: 'services',  label: '服务', children: <ServicesTab appId={appId} app={app} onServicesChange={setAppServices} /> },
+            { key: 'runtime', label: '运行', children: <HostBindTab appId={appId} app={app} /> },
+            { key: 'build', label: '构建', children: <ArtifactTab app={app} /> },
+            { key: 'deploy', label: '部署', children: <PipelineTab app={app} /> },
+          ]}
         />
       </Card>
+    </section>
+  )
+}
+
+function DetailActionItem({
+  tone,
+  label,
+  title,
+  description,
+  action,
+}: {
+  tone: StatusTone
+  label: string
+  title: string
+  description: string
+  action?: React.ReactNode
+}) {
+  return (
+    <div className="action-item">
+      <StatusTag tone={tone}>{label}</StatusTag>
+      <div>
+        <div className="action-item-title">{title}</div>
+        <div className="action-item-desc">{description}</div>
+        {action && <div className="action-item-action">{action}</div>}
+      </div>
     </div>
+  )
+}
+
+function ApplicationOverviewTab({
+  app,
+  services,
+  onJump,
+}: {
+  app: App
+  services: AppService[]
+  onJump: (key: string) => void
+}) {
+  const [deployments, setDeployments] = useState<Deployment[]>([])
+  const [builds, setBuilds] = useState<BuildRun[]>([])
+  const [pipelines, setPipelines] = useState<PipelineRun[]>([])
+  const [bundles, setBundles] = useState<ArtifactBundle[]>([])
+
+  const refresh = async () => {
+    try {
+      const [ds, bs, ps, bundleRows] = await Promise.all([
+        listDeployments(app.id),
+        listBuilds(app.id),
+        listPipelines(app.id),
+        listBundles(app.id),
+      ])
+      setDeployments(ds)
+      setBuilds(bs)
+      setPipelines(ps)
+      setBundles(bundleRows)
+    } catch (e) {
+      message.error(formatError(e))
+    }
+  }
+
+  useEffect(() => { refresh() }, [app.id])
+
+  const serviceMode = describeServiceMode(services)
+  const buildRefs = appBuildRefs(app)
+  const enabledServices = services.filter((s) => s.enabled)
+  const dockerEnabled = app.build_mode === 'local-docker' || app.build_mode === 'remote-docker' || app.deploy_mode === 'docker'
+  const dockerImage = [app.docker_registry, app.docker_image_name || `${app.app_code}/{{SERVICE_CODE}}`].filter(Boolean).join('/') || `${app.app_code}/{{SERVICE_CODE}}`
+  const serviceSummary = summarizeServiceCard(services)
+  const portSummary = summarizePortCard(app, services)
+  const runtimePlanSummary = summarizeRuntimePlanCard(app, services)
+  const orderedBuilds = [...builds].sort((a, b) => timeValue(b.created_at) - timeValue(a.created_at))
+  const orderedPipelines = [...pipelines].sort((a, b) => timeValue(b.created_at) - timeValue(a.created_at))
+  const latestBuild = orderedBuilds[0]
+  const latestPipeline = orderedPipelines[0]
+  const runningDeployments = deployments.filter((d) => d.status === 'running')
+  const stoppedDeployments = deployments.filter((d) => d.status === 'stopped' || d.status === 'failed')
+  const missingArtifacts = deployments.filter((d) => !d.current_bundle_id && !d.current_artifact_id && !d.current_artifact_item_id)
+  const failedBuilds = builds.filter((b) => b.status === 'failed')
+  const failedPipelines = pipelines.filter((p) => p.status === 'failed')
+
+  const blockers = [
+    !app.git_url && {
+      tone: 'warning' as StatusTone,
+      label: '配置态',
+      title: 'Git 仓库未配置',
+      description: '当前系统以远端 Git 仓库为应用源，缺失仓库会阻断 Maven 扫描和从仓库构建。',
+      action: <Button size="small" onClick={() => onJump('services')}>查看服务配置</Button>,
+    },
+    enabledServices.length === 0 && {
+      tone: 'danger' as StatusTone,
+      label: '服务',
+      title: '没有启用的 service',
+      description: '部署按 service 编排，至少需要启用一个 service 才能构建和部署。',
+      action: <Button size="small" onClick={() => onJump('services')}>处理 service</Button>,
+    },
+    deployments.length === 0 && {
+      tone: 'warning' as StatusTone,
+      label: '运行态',
+      title: '还没有绑定部署主机',
+      description: '主机绑定是部署、运行态检测和日志读取的前置条件。',
+      action: <Button size="small" onClick={() => onJump('runtime')}>绑定主机</Button>,
+    },
+    bundles.length === 0 && {
+      tone: 'warning' as StatusTone,
+      label: '构建态',
+      title: '还没有 Bundle 制品',
+      description: '建议从远端 Git 仓库构建生成整组 Bundle，部署和回滚都会更清晰。',
+      action: <Button size="small" onClick={() => onJump('build')}>去构建</Button>,
+    },
+    failedBuilds.length > 0 && {
+      tone: 'danger' as StatusTone,
+      label: '构建态',
+      title: `${failedBuilds.length} 条构建失败`,
+      description: '优先看构建日志，常见原因是凭证、Maven 参数、模块路径或本机构建环境。',
+      action: <Button size="small" onClick={() => onJump('build')}>看构建</Button>,
+    },
+    failedPipelines.length > 0 && {
+      tone: 'danger' as StatusTone,
+      label: '部署态',
+      title: `${failedPipelines.length} 条部署失败`,
+      description: '优先查看部署详情中的阶段日志；状态=成功的历史才能作为回滚目标。',
+      action: <Button size="small" onClick={() => onJump('deploy')}>查部署</Button>,
+    },
+    stoppedDeployments.length > 0 && {
+      tone: 'danger' as StatusTone,
+      label: '运行态',
+      title: `${stoppedDeployments.length} 个绑定运行异常`,
+      description: '部署成功不等于远端容器仍在运行，请刷新运行态检测并核对当前制品。',
+      action: <Button size="small" onClick={() => onJump('runtime')}>检测运行态</Button>,
+    },
+    missingArtifacts.length > 0 && {
+      tone: 'warning' as StatusTone,
+      label: '制品',
+      title: `${missingArtifacts.length} 个绑定缺少当前制品`,
+      description: '当前制品为空会让日志、回滚和版本追踪变得模糊，需要重新部署成功版本。',
+      action: <Button size="small" onClick={() => onJump('deploy')}>选择版本部署</Button>,
+    },
+  ].filter(Boolean) as Array<{
+    tone: StatusTone
+    label: string
+    title: string
+    description: string
+    action: React.ReactNode
+  }>
+
+  return (
+    <section className="workbench-tab app-overview-tab">
+      <div className="overview-grid">
+        <div className="overview-stack">
+          <Card className="workbench-card" title="应用摘要">
+            <Descriptions size="small" column={2}>
+              <Descriptions.Item label="模型">远端 Git 仓库 / Maven Service</Descriptions.Item>
+              <Descriptions.Item label="当前模式" span={2}>
+                <Space style={{ flexWrap: 'wrap' }}>
+                  <StatusTag tone={serviceModeTone(serviceMode.color)}>{serviceMode.label}</StatusTag>
+                  <StatusTag tone={tagTone(portSummary.tone)}>{portSummary.meta}</StatusTag>
+                  <Typography.Text type="secondary">{serviceMode.desc}</Typography.Text>
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="Service 端口" span={2}>{renderServicePortMatrix(app, services)}</Descriptions.Item>
+              <Descriptions.Item label="默认构建 Ref"><code>{app.git_ref || 'main'}</code></Descriptions.Item>
+              <Descriptions.Item label="Git 仓库" span={2}><code>{app.git_url || '-'}</code></Descriptions.Item>
+              <Descriptions.Item label="可选构建 Ref" span={2}>
+                {buildRefs.map(ref => <StatusTag key={ref}>{ref}</StatusTag>)}
+              </Descriptions.Item>
+              <Descriptions.Item label="部署口径" span={2}>
+                <Space style={{ flexWrap: 'wrap' }}>
+                  <StatusTag tone={tagTone(runtimePlanSummary.tone)}>{runtimePlanSummary.value}</StatusTag>
+                  <Typography.Text type="secondary">{runtimePlanSummary.description}</Typography.Text>
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="Service 健康检查" span={2}>{renderServiceHealthMatrix(app, services)}</Descriptions.Item>
+              {dockerEnabled && (
+                <>
+                  <Descriptions.Item label="Docker 镜像" span={2}>
+                    <code>{dockerImage}</code>
+                    <Typography.Text type="secondary">:{app.docker_image_tag || 'latest'}</Typography.Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Docker 容器" span={2}>
+                    <code>{app.docker_container_name || `devops-${app.app_code}`}</code>
+                  </Descriptions.Item>
+                </>
+              )}
+            </Descriptions>
+          </Card>
+        </div>
+
+        <div className="overview-stack">
+          <Card className="workbench-card" title="需要关注">
+            {blockers.length > 0 ? (
+              <div className="action-list">
+                {blockers.map((item) => <DetailActionItem key={`${item.label}-${item.title}`} {...item} />)}
+              </div>
+            ) : (
+              <DetailActionItem
+                tone="success"
+                label="健康"
+                title="当前没有阻断项"
+                description="配置、构建、部署和运行态都没有明显异常；需要发布时直接进入部署页。"
+                action={<Button size="small" onClick={() => onJump('deploy')}>进入部署</Button>}
+              />
+            )}
+          </Card>
+
+          <Card className="workbench-card" title="最近状态">
+            <div className="action-list">
+              <DetailActionItem
+                tone={latestBuild ? statusToneFromBuild(latestBuild.status) : 'neutral'}
+                label="构建"
+                title={latestBuild ? `Build #${latestBuild.id}` : '暂无构建'}
+                description={latestBuild ? `${latestBuild.git_ref || '-'} · ${formatDateTime(latestBuild.created_at)}` : '从构建页触发远端 Git + Maven 构建。'}
+                action={<Button size="small" onClick={() => onJump('build')}>查看构建</Button>}
+              />
+              <DetailActionItem
+                tone={latestPipeline ? statusToneFromPipeline(latestPipeline.status) : 'neutral'}
+                label="部署"
+                title={latestPipeline ? `Run #${latestPipeline.id}` : '暂无部署'}
+                description={latestPipeline ? `${latestPipeline.strategy} · ${formatDateTime(latestPipeline.created_at)}` : '选择 Bundle 或 Artifact 后触发部署。'}
+                action={<Button size="small" onClick={() => onJump('deploy')}>查看部署</Button>}
+              />
+              <DetailActionItem
+                tone={stoppedDeployments.length > 0 || missingArtifacts.length > 0 ? 'danger' : deployments.length > 0 ? 'success' : 'warning'}
+                label="运行"
+                title={`${runningDeployments.length}/${deployments.length} 个绑定运行中`}
+                description="运行态来自部署绑定记录的最近一次检测，不等于部署历史状态。"
+                action={<Button size="small" onClick={() => onJump('runtime')}>查看运行态</Button>}
+              />
+            </div>
+          </Card>
+        </div>
+      </div>
+    </section>
   )
 }
 
 // ---------- 主机绑定 Tab ----------
 
-function HostBindTab({ appId, appPort }: { appId: number; appPort: number }) {
+function HostBindTab({ appId, app }: { appId: number; app: App }) {
   const [deployments, setDeployments] = useState<Deployment[]>([])
   const [hosts, setHosts] = useState<Host[]>([])
+  const [services, setServices] = useState<AppService[]>([])
   const [loading, setLoading] = useState(false)
+  const [runtimeChecking, setRuntimeChecking] = useState(false)
   const [bindOpen, setBindOpen] = useState(false)
   const [bindForm] = Form.useForm()
+  const [logOpen, setLogOpen] = useState(false)
+  const [logDeployment, setLogDeployment] = useState<Deployment | null>(null)
+  const [runtimeLog, setRuntimeLog] = useState<DeploymentRuntimeLogs | null>(null)
+  const [logLoading, setLogLoading] = useState(false)
+  const [logLines, setLogLines] = useState(300)
+  const [logTimestamps, setLogTimestamps] = useState(false)
+  const [logAutoRefresh, setLogAutoRefresh] = useState(true)
+  const [runtimeActionKey, setRuntimeActionKey] = useState('')
+  const latestRuntimeLogKeyRef = useRef('')
 
-  const refresh = async () => {
+  const runtimeLogKey = (d: Deployment) =>
+    `${d.id}:${d.host_id}:${logLines}:${logTimestamps ? 1 : 0}`
+
+  const refresh = async (withRuntimeCheck = true) => {
     setLoading(true)
     try {
-      const [ds, hs] = await Promise.all([listDeployments(appId), listHosts()])
-      setDeployments(ds); setHosts(hs)
+      const [ds, hs, svcRows] = await Promise.all([
+        listDeployments(appId),
+        listHosts(),
+        listAppServices(appId),
+      ])
+      setDeployments(ds); setHosts(hs); setServices(svcRows)
+      if (withRuntimeCheck && ds.length > 0) {
+        setRuntimeChecking(true)
+        try {
+          setDeployments(await checkDeploymentRuntime(appId))
+        } catch (e) {
+          message.warning(`运行状态检测失败：${formatError(e)}`)
+        } finally {
+          setRuntimeChecking(false)
+        }
+      }
     } catch (e) {
       message.error(formatError(e))
     } finally {
       setLoading(false)
     }
   }
-  useEffect(() => { refresh() }, [appId])
+  useEffect(() => { refresh(true) }, [appId])
 
-  const boundHostIds = new Set(deployments.map((d) => d.host_id))
-  const availableHosts = hosts.filter((h) => !boundHostIds.has(h.id))
+  const fetchRuntimeLog = async (d = logDeployment, silent = false) => {
+    if (!d) return
+    const requestKey = runtimeLogKey(d)
+    latestRuntimeLogKeyRef.current = requestKey
+    if (!silent) setLogLoading(true)
+    try {
+      const data = await getDeploymentRuntimeLogs(d.id, logLines, logTimestamps)
+      if (latestRuntimeLogKeyRef.current !== requestKey) return
+      setRuntimeLog(data)
+    } catch (e) {
+      if (!silent) message.error(formatError(e))
+    } finally {
+      if (!silent && latestRuntimeLogKeyRef.current === requestKey) setLogLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!logOpen || !logDeployment) return
+    fetchRuntimeLog(logDeployment)
+  }, [logOpen, logDeployment?.id])
+
+  useEffect(() => {
+    if (!logOpen || !logDeployment) return
+    fetchRuntimeLog(logDeployment)
+  }, [logLines, logTimestamps])
+
+  useEffect(() => {
+    if (!logOpen || !logDeployment || !logAutoRefresh) return
+    const timer = window.setInterval(() => {
+      fetchRuntimeLog(logDeployment, true)
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [logOpen, logDeployment?.id, logLines, logTimestamps, logAutoRefresh])
+
+  const enabledServices = services.filter((s) => s.enabled)
+  const deploymentKeys = new Set(deployments.map((d) => `${d.host_id}:${d.service_code || 'default'}`))
+  const availableHosts = hosts.filter((h) => {
+    if (enabledServices.length === 0) return false
+    return enabledServices.some((s) => !deploymentKeys.has(`${h.id}:${s.service_code || 'default'}`))
+  })
 
   const handleBind = async () => {
     try {
       const v = await bindForm.validateFields()
-      await bindHost(appId, v)
+      const serviceCodes = ((v.service_codes || []) as string[])
+        .map((code) => code || 'default')
+      if (serviceCodes.length === 0) {
+        message.warning('请至少选择一个 service')
+        return
+      }
+      const missing = serviceCodes.filter((code) => !deploymentKeys.has(`${v.host_id}:${code}`))
+      if (missing.length === 0) {
+        message.warning('选中的 service 已经绑定到这台主机')
+        return
+      }
+      await Promise.all(missing.map((serviceCode) => bindHost(appId, {
+        host_id: v.host_id,
+        service_code: serviceCode,
+        port: v.port,
+      })))
       message.success('已绑定')
       setBindOpen(false); refresh()
     } catch (e) {
@@ -397,6 +1047,10 @@ function HostBindTab({ appId, appPort }: { appId: number; appPort: number }) {
     }
   }
   const handleUnbind = (d: Deployment) => {
+    if (isDeploymentRunning(d)) {
+      message.warning('当前容器仍在运行，请先停止容器后再解绑主机')
+      return
+    }
     Modal.confirm({
       title: `确认解绑 ${d.host_name}（${d.host_ip}）？`,
       content: '解绑后该主机上的应用部署关系会被删除（不会真正卸载远端服务）',
@@ -407,47 +1061,162 @@ function HostBindTab({ appId, appPort }: { appId: number; appPort: number }) {
       },
     })
   }
-  const handleGroupChange = async (d: Deployment, group: string) => {
-    try { await updateDeploymentGroup(d.id, group); message.success(`已切换到 ${group || '未分组'}`); refresh() }
-    catch (e) { message.error(formatError(e)) }
+  const applyRuntimeActionResult = (out: DeploymentRuntimeAction) => {
+    setDeployments((rows) => rows.map((row) => row.id === out.deployment_id ? {
+      ...row,
+      status: out.status,
+      runtime_container_name: out.container_name,
+      runtime_status_detail: out.message,
+      runtime_checked_at: out.operated_at,
+    } : row))
+    setLogDeployment((row) => row && row.id === out.deployment_id ? {
+      ...row,
+      status: out.status,
+      runtime_container_name: out.container_name,
+      runtime_status_detail: out.message,
+      runtime_checked_at: out.operated_at,
+    } : row)
+  }
+  const handleRuntimeAction = (d: Deployment, action: 'stop' | 'restart') => {
+    const isStop = action === 'stop'
+    if (isStop && !isDeploymentRunning(d)) {
+      message.warning('当前容器不是运行中，无需停止')
+      return
+    }
+    Modal.confirm({
+      className: 'runtime-action-confirm',
+      title: `${isStop ? '停止' : '重启'}容器 ${d.runtime_container_name || ''}？`,
+      content: (
+        <Space direction="vertical" size={4}>
+          <Typography.Text>
+            主机：<code>{d.host_ip}</code>　Service：<code>{d.service_code || 'default'}</code>
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            后端会按当前 deployment 推导容器名，不允许切换或指定其它容器。
+          </Typography.Text>
+        </Space>
+      ),
+      okText: isStop ? '停止容器' : '重启容器',
+      okType: isStop ? 'danger' : 'primary',
+      onOk: async () => {
+        const key = `${d.id}:${action}`
+        setRuntimeActionKey(key)
+        try {
+          const out = isStop
+            ? await stopDeploymentRuntime(d.id)
+            : await restartDeploymentRuntime(d.id)
+          applyRuntimeActionResult(out)
+          message.success(out.message || `${isStop ? '停止' : '重启'}容器操作已执行`)
+          if (logOpen && logDeployment?.id === d.id) {
+            fetchRuntimeLog(d, true)
+          }
+        } catch (e) {
+          message.error(formatError(e))
+        } finally {
+          setRuntimeActionKey('')
+        }
+      },
+    })
+  }
+  const openRuntimeLog = (d: Deployment) => {
+    setLogDeployment(d)
+    setRuntimeLog(null)
+    latestRuntimeLogKeyRef.current = ''
+    setLogOpen(true)
   }
 
   return (
-    <>
-      <Space style={{ marginBottom: 12 }}>
-        <Button type="primary" disabled={availableHosts.length === 0}
-          onClick={() => { bindForm.resetFields(); setBindOpen(true) }}>
-          + 绑定主机
-        </Button>
-        <Button onClick={refresh}>刷新</Button>
-      </Space>
+    <section className="workbench-tab host-bind-tab">
+      <div className="workbench-toolbar">
+        <div className="workbench-toolbar-main">
+          <Button type="primary" disabled={availableHosts.length === 0}
+            onClick={() => {
+              bindForm.resetFields()
+              bindForm.setFieldsValue({
+                service_codes: enabledServices.map((s) => s.service_code),
+              })
+              setBindOpen(true)
+            }}>
+            绑定主机
+          </Button>
+          <Button loading={loading || runtimeChecking} onClick={() => refresh(true)}>
+            刷新并检测运行状态
+          </Button>
+        </div>
+        <div className="workbench-hint">
+          {runtimeChecking ? '正在 SSH 到远端校验容器状态…' : '绑定关系按 app × host × service 管理，运行态建议刷新时同步检测。'}
+        </div>
+      </div>
       <Table<Deployment>
         rowKey="id" loading={loading} dataSource={deployments} pagination={false}
-        locale={{ emptyText: '还没绑定主机，点上方"+ 绑定主机"开始' }}
+        locale={{ emptyText: <EmptyState title="还没绑定主机" description="先选择目标主机和 service，建立部署关系后才能触发发布。" /> }}
         columns={[
           { title: '部署 ID', dataIndex: 'id', width: 80 },
           { title: '主机', render: (_, d) => <><code>{d.host_ip}</code>　<Typography.Text>{d.host_name}</Typography.Text></> },
-          { title: '主机状态', dataIndex: 'host_status', width: 100, render: (s) => hostStatusTag(s) },
           {
-            title: '蓝绿分组', dataIndex: 'group_tag', width: 140,
-            render: (g, d) => (
-              <Select size="small" value={g || ''} style={{ width: 110 }}
-                onChange={(v) => handleGroupChange(d, v)}
-                options={[
-                  { value: '', label: '未分组' },
-                  { value: 'blue', label: <Tag color="blue">Blue</Tag> },
-                  { value: 'green', label: <Tag color="green">Green</Tag> },
-                ]} />
-            ),
+            title: 'Service',
+            dataIndex: 'service_code',
+            width: 170,
+            render: (v: string) => v
+              ? <Tag color="blue">{v}</Tag>
+              : <Tag>default</Tag>,
           },
+          { title: '主机状态', dataIndex: 'host_status', width: 100, render: (s) => hostStatusTag(s) },
           { title: '端口覆盖', dataIndex: 'port', width: 90, render: (p) => p || <Typography.Text type="secondary">（继承）</Typography.Text> },
-          { title: '当前制品', dataIndex: 'current_artifact_id', width: 100, render: (id) => id ? `#${id}` : '-' },
-          { title: '部署状态', dataIndex: 'status', width: 100, render: (s) => <Tag>{s}</Tag> },
-          { title: '操作', width: 100, render: (_, d) => <Button danger size="small" onClick={() => handleUnbind(d)}>解绑</Button> },
+          { title: '当前制品', width: 210, render: (_, d) => deploymentArtifactLabel(d) },
+          { title: '最近部署', width: 180, render: (_, d) => lastDeployStatusView(d) },
+          {
+            title: '操作', width: 300,
+            render: (_, d) => {
+              const anyRuntimeActionLoading = runtimeActionKey !== ''
+              const stopKey = `${d.id}:stop`
+              const restartKey = `${d.id}:restart`
+              const stopDisabled = !isDeploymentRunning(d) || anyRuntimeActionLoading
+              const restartDisabled = (d.status === 'pending' && !d.runtime_container_name && !d.current_artifact_id && !d.current_artifact_item_id) || anyRuntimeActionLoading
+              const unbindDisabled = isDeploymentRunning(d) || anyRuntimeActionLoading
+              return (
+                <Space size={4} wrap>
+                  <Button size="small" onClick={() => openRuntimeLog(d)}>运行日志</Button>
+                  <Tooltip title={stopDisabled ? (isDeploymentRunning(d) ? '正在执行运行操作' : '当前容器不是运行中，无需停止') : ''}>
+                    <span>
+                      <Button
+                        size="small"
+                        danger
+                        loading={runtimeActionKey === stopKey}
+                        disabled={stopDisabled}
+                        onClick={() => handleRuntimeAction(d, 'stop')}
+                      >
+                        停止
+                      </Button>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title={restartDisabled ? (anyRuntimeActionLoading ? '正在执行运行操作' : '当前还没有可重启的容器') : ''}>
+                    <span>
+                      <Button
+                        size="small"
+                        loading={runtimeActionKey === restartKey}
+                        disabled={restartDisabled}
+                        onClick={() => handleRuntimeAction(d, 'restart')}
+                      >
+                        重启
+                      </Button>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title={unbindDisabled ? (anyRuntimeActionLoading ? '正在执行运行操作' : '当前容器运行中，请先停止容器后再解绑主机') : ''}>
+                    <span>
+                      <Button danger size="small" disabled={unbindDisabled} onClick={() => handleUnbind(d)}>
+                        解绑
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </Space>
+              )
+            },
+          },
         ]}
       />
       <Modal title="绑定主机" open={bindOpen} onOk={handleBind} onCancel={() => setBindOpen(false)} okText="绑定" cancelText="取消" maskClosable={false} keyboard={false}>
-        <Form form={bindForm} layout="vertical" initialValues={{ group_tag: '' }}>
+        <Form form={bindForm} layout="vertical">
           <Form.Item name="host_id" label="选择主机" rules={[{ required: true, message: '必选' }]}>
             <Select placeholder="从可用主机里选一台"
               options={availableHosts.map((h) => ({
@@ -455,19 +1224,92 @@ function HostBindTab({ appId, appPort }: { appId: number; appPort: number }) {
                 label: `${h.name} (${h.ip})${h.status === 'online' ? ' ● 在线' : ''}`,
               }))} />
           </Form.Item>
-          <Form.Item name="group_tag" label="蓝绿分组">
-            <Select options={[
-              { value: '', label: '未分组' },
-              { value: 'blue', label: 'Blue' },
-              { value: 'green', label: 'Green' },
-            ]} />
+          <Form.Item
+            name="service_codes"
+            label="选择 Service"
+            rules={[{ required: true, message: '至少选择一个 service' }]}
+            tooltip="会为每个 service 创建一条 app × host × service 绑定关系；只有一个启用 service 时就是单服务部署。"
+          >
+            <Select
+              mode="multiple"
+              placeholder={enabledServices.length === 0 ? '请先在「服务」启用 service' : '选择要部署到这台主机的 service'}
+              options={enabledServices.map((s) => ({
+                value: s.service_code,
+                label: `${s.service_code} · :${s.port}`,
+              }))}
+            />
           </Form.Item>
-          <Form.Item name="port" label="端口覆盖（可选，留空继承应用默认）">
-            <InputNumber min={1} max={65535} style={{ width: 200 }} placeholder={String(appPort)} />
+          <Form.Item name="port" label="端口覆盖（可选，留空继承 service / 应用默认）">
+            <InputNumber min={1} max={65535} style={{ width: 200 }} placeholder={String(app.port)} />
           </Form.Item>
         </Form>
       </Modal>
-    </>
+      <Drawer
+        className="runtime-log-drawer"
+        title={
+          <Space>
+            <span>容器运行日志</span>
+            {runtimeLog?.container_name && <Tag color="blue">{runtimeLog.container_name}</Tag>}
+            {runtimeLog?.status && <Tag>{runtimeLog.status}</Tag>}
+          </Space>
+        }
+        open={logOpen}
+        width={920}
+        onClose={() => setLogOpen(false)}
+        destroyOnClose
+        extra={
+          <Space>
+            <Typography.Text type="secondary">自动刷新</Typography.Text>
+            <Switch size="small" checked={logAutoRefresh} onChange={setLogAutoRefresh} />
+            <Button size="small" loading={logLoading} onClick={() => fetchRuntimeLog()}>
+              刷新
+            </Button>
+          </Space>
+        }
+      >
+        <div className="drawer-toolbar">
+          <Typography.Text type="secondary">
+            主机：<code>{logDeployment?.host_ip || '-'}</code>
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            service：<code>{
+              runtimeLog?.service_code || logDeployment?.service_code || 'default'
+            }</code>
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            当前容器：<code>{runtimeLog?.container_name || logDeployment?.runtime_container_name || '读取中'}</code>
+          </Typography.Text>
+          <Typography.Text type="secondary">行数</Typography.Text>
+          <Select
+            size="small"
+            value={logLines}
+            style={{ width: 110 }}
+            onChange={setLogLines}
+            options={[
+              { value: 100, label: '100 行' },
+              { value: 300, label: '300 行' },
+              { value: 800, label: '800 行' },
+              { value: 1500, label: '1500 行' },
+            ]}
+          />
+          <Typography.Text type="secondary">时间戳</Typography.Text>
+          <Switch size="small" checked={logTimestamps} onChange={setLogTimestamps} />
+          {runtimeLog?.captured_at && (
+            <Typography.Text type="secondary">
+              获取时间：{new Date(runtimeLog.captured_at).toLocaleString()}
+            </Typography.Text>
+          )}
+        </div>
+        <RuntimeLogBox
+          loading={logLoading}
+          text={runtimeLog?.logs || (logLoading ? '正在读取远端 docker logs ...' : '暂无日志')}
+        />
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12 }}>
+          这里读取的是远端 <code>docker logs --tail {logLines}</code>。
+          如果应用把日志写入容器内文件而不是 stdout/stderr，这里仍然看不到，需要调整 Java 日志输出到 console。
+        </Typography.Paragraph>
+      </Drawer>
+    </section>
   )
 }
 
@@ -701,45 +1543,37 @@ function ArtifactTab({ app }: { app: App }) {
     })
   }
 
-  const buildStatusTag = (s: string) => {
-    if (s === 'success') return <Tag color="green">✓ 成功</Tag>
-    if (s === 'failed') return <Tag color="red">✗ 失败</Tag>
-    if (s === 'building') return <Tag color="processing">● 构建中</Tag>
-    if (s === 'cancelled') return <Tag color="default">○ 已取消</Tag>
-    return <Tag>{s}</Tag>
-  }
-
   return (
-    <>
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Tooltip title={
-          !app.git_url ? '应用未配 git_url' :
-          !builderEnv?.valid ? '构建环境未就绪，去「⚙ 构建环境」配置 java_home / maven_home 并检测' :
-          ''
-        }>
-          <Button type="primary" onClick={openBuild}
-            disabled={!app.git_url || !builderEnv?.valid}>
-            ⚙ 从仓库构建
-          </Button>
-        </Tooltip>
-        <Button onClick={openUpload}>↑ 上传文件</Button>
-        <Button onClick={() => { form.resetFields(); setOpen(true) }}>+ 注册路径</Button>
-        <Button onClick={() => { refresh(); refreshBuilds(); getBuilderEnv().then(setBuilderEnv).catch(() => {}) }}>刷新</Button>
-        {bundles.length > 0 && (
-          <Button danger onClick={handleCleanup}>🧹 清理历史</Button>
-        )}
-        {!app.git_url && (
-          <Typography.Text type="secondary">应用未配 git_url，构建按钮不可用；先去「应用管理」补上。</Typography.Text>
-        )}
-        {app.git_url && builderEnv && !builderEnv.valid && (
-          <Typography.Text type="warning">构建环境未就绪，去左侧菜单「⚙ 构建环境」配一下。</Typography.Text>
-        )}
-      </Space>
+    <section className="workbench-tab artifact-tab">
+      <div className="workbench-toolbar">
+        <div className="workbench-toolbar-main">
+          <Tooltip title={
+            !app.git_url ? '应用未配 git_url' :
+            !builderEnv?.valid ? '构建环境未就绪，去「构建环境」配置 java_home / maven_home 并检测' :
+            ''
+          }>
+            <Button type="primary" onClick={openBuild}
+              disabled={!app.git_url || !builderEnv?.valid}>
+              从仓库构建
+            </Button>
+          </Tooltip>
+          <Button onClick={openUpload}>上传文件</Button>
+          <Button onClick={() => { form.resetFields(); setOpen(true) }}>注册路径</Button>
+          <Button onClick={() => { refresh(); refreshBuilds(); getBuilderEnv().then(setBuilderEnv).catch(() => {}) }}>刷新</Button>
+          {bundles.length > 0 && (
+            <Button danger onClick={handleCleanup}>清理历史</Button>
+          )}
+        </div>
+        <div className="workbench-hint">
+          {!app.git_url && '应用未配 git_url，构建按钮不可用；先去「应用管理」补上。'}
+          {app.git_url && builderEnv && !builderEnv.valid && '构建环境未就绪，去「系统设置」里的构建环境配一下。'}
+          {app.git_url && builderEnv?.valid && '构建产物会优先落 Bundle，多 service 场景按整组制品部署。'}
+        </div>
+      </div>
 
       {/* 构建历史：仅有记录时显示 */}
       {builds.length > 0 && (
-        <Card size="small" title={`构建历史（最近 ${Math.min(builds.length, 10)} 条）`}
-          style={{ marginBottom: 12 }}>
+        <Card className="workbench-card" size="small" title={`构建历史（最近 ${Math.min(builds.length, 10)} 条）`}>
           <Table<BuildRun>
             rowKey="id" size="small" pagination={false}
             loading={buildsLoading}
@@ -768,9 +1602,8 @@ function ArtifactTab({ app }: { app: App }) {
       {/* Sprint X.6：整组制品（多 service 构建产出）。bundles 为空时不显示，
           避免对仅用上传/注册的老应用造成视觉噪音。 */}
       {bundles.length > 0 && (
-        <Card size="small"
-          title={`整组制品 Bundle（从仓库构建产出 · 共 ${bundles.length} 组）`}
-          style={{ marginBottom: 12 }}>
+        <Card className="workbench-card" size="small"
+          title={`整组制品 Bundle（从仓库构建产出 · 共 ${bundles.length} 组）`}>
           <Table<ArtifactBundle>
             rowKey="id" size="small" pagination={false}
             dataSource={bundles}
@@ -817,7 +1650,7 @@ function ArtifactTab({ app }: { app: App }) {
 
       <Table<Artifact>
         rowKey="id" loading={loading} dataSource={list} pagination={false}
-        locale={{ emptyText: '还没有制品，点上方"⚙ 从仓库构建" / "↑ 上传文件" / "+ 注册路径"添加' }}
+        locale={{ emptyText: <EmptyState title="还没有制品" description="可以从仓库构建、上传 jar 文件，或者注册本地 jar 路径。" /> }}
         columns={[
           { title: 'ID', dataIndex: 'id', width: 60 },
           { title: '版本', dataIndex: 'version_tag', width: 180, render: (v) => <Tag>{v}</Tag> },
@@ -863,7 +1696,7 @@ function ArtifactTab({ app }: { app: App }) {
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             构建在 swift-devops 服务器本机进程跑（需装 git + mvn + JDK）。
             成功后自动落 Artifact，version_tag 形如 <code>git-&lt;短SHA&gt;-&lt;BuildID&gt;</code>。
-            构建模块 / Jar 匹配请在应用详情的服务配置里维护。
+            构建模块 / Jar 匹配请在「服务」里维护。
           </Typography.Text>
         </Form>
       </Modal>
@@ -885,16 +1718,11 @@ function ArtifactTab({ app }: { app: App }) {
               </Descriptions.Item>
             </Descriptions>
             {logTarget.error && (
-              <Card size="small" type="inner" style={{ marginBottom: 12, borderColor: '#ff4d4f' }}>
+              <Card className="danger-card" size="small" type="inner">
                 <Typography.Text type="danger">{logTarget.error}</Typography.Text>
               </Card>
             )}
-            <pre style={{
-              background: '#1e1e1e', color: '#d4d4d4', padding: 12, borderRadius: 4,
-              maxHeight: 500, overflow: 'auto', fontSize: 12,
-              fontFamily: 'Consolas, Monaco, monospace',
-              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-            }}>
+            <pre className="runtime-log-box build-log-box">
               {logText || '(空)'}
             </pre>
           </>
@@ -943,7 +1771,7 @@ function ArtifactTab({ app }: { app: App }) {
               fileList={upFile ? [{ uid: '-1', name: upFile.name, status: 'done', size: upFile.size } as any] : []}
               disabled={uploading}
             >
-              <p className="ant-upload-drag-icon" style={{ fontSize: 36, color: '#1677ff' }}>⬆</p>
+              <p className="ant-upload-drag-icon upload-mark">⬆</p>
               <p className="ant-upload-text">点击或拖拽 jar 文件到此区域</p>
               <p className="ant-upload-hint">单文件，最大受服务端 storage.max_upload_mb 限制</p>
             </Upload.Dragger>
@@ -953,7 +1781,7 @@ function ArtifactTab({ app }: { app: App }) {
           )}
         </Form>
       </Modal>
-    </>
+    </section>
   )
 }
 
@@ -1005,16 +1833,14 @@ function PipelineTab({ app }: { app: App }) {
   const handleDeploy = async () => {
     try {
       const v = await form.validateFields()
-      const strategy = (v.strategy ?? 'single') as 'single' | 'rolling' | 'blue_green'
+      const strategy = (v.strategy ?? 'single') as 'single' | 'rolling'
       const batchSize = strategy === 'rolling' ? Number(v.batch_size ?? 1) : undefined
       const sourceType = (v.source_type ?? 'bundle') as 'bundle' | 'artifact'
       const source = sourceType === 'bundle'
         ? { bundle_id: Number(v.bundle_id) }
         : { artifact_id: Number(v.artifact_id) }
       const run = await deployApp(app.id, source, strategy, batchSize)
-      const detail =
-        strategy === 'rolling' ? `, batch=${batchSize}` :
-        strategy === 'blue_green' ? `（目标组由后端自动选）` : ''
+      const detail = strategy === 'rolling' ? `, batch=${batchSize}` : ''
       message.success(`已触发：#${run.id}（${strategy}${detail}）`)
       setOpen(false); setDrawerRun(run); refresh()
     } catch (e) {
@@ -1023,26 +1849,37 @@ function PipelineTab({ app }: { app: App }) {
     }
   }
 
-  const handleRollback = () => {
+  const rollbackTargetLabel = (r: PipelineRun) => {
+    const bundleID = r.bundle_id || r.previous_bundle_id
+    if (bundleID) return `Bundle #${bundleID}`
+    if (r.artifact_id) return `Artifact #${r.artifact_id}`
+    return '该版本'
+  }
+
+  const canRollbackToRun = (r: PipelineRun) =>
+    r.status === 'success' && Boolean(r.bundle_id || r.previous_bundle_id || r.artifact_id)
+
+  const handleRollbackToRun = (r: PipelineRun) => {
+    const label = rollbackTargetLabel(r)
     Modal.confirm({
-      title: `回滚 ${app.name}？`,
+      title: `回滚 ${app.name} 到 ${label}？`,
       content: (
         <>
-          <div>多 service 应用整组退到上一个 Bundle（Sprint X.7）；单 jar 应用退到自己的 <code>previous_artifact_id</code>。</div>
+          <div>将根据部署历史 <code>#{r.id}</code> 重新部署它对应的成功版本。</div>
           <div style={{ marginTop: 8 }}>
             <Typography.Text type="secondary">
-              没有 previous 的主机会被跳过；按 startup_order 分波退回，任一 service 失败将停止后续 wave。
+              只有状态=成功且关联了 Bundle / Artifact 的历史才能作为回滚目标；本操作会新建一条 rollback 流水线。
             </Typography.Text>
           </div>
         </>
       ),
       okType: 'danger',
-      okText: '确认回滚',
+      okText: '确认回滚到此版本',
       cancelText: '取消',
       onOk: async () => {
         try {
-          const run = await rollbackApp(app.id)
-          message.success(`已触发回滚：#${run.id}`)
+          const run = await rollbackPipelineRun(r.id)
+          message.success(`已触发回滚到 ${label}：#${run.id}`)
           setDrawerRun(run); refresh()
         } catch (e) {
           message.error(formatError(e))
@@ -1052,48 +1889,83 @@ function PipelineTab({ app }: { app: App }) {
   }
 
   return (
-    <>
-      <Space style={{ marginBottom: 12 }}>
-        <Button type="primary" disabled={arts.length === 0 && bundles.length === 0}
-          onClick={() => {
-            form.resetFields()
-            const defaultSource = bundles.length > 0 ? 'bundle' : 'artifact'
-            form.setFieldsValue({
-              strategy: 'single', batch_size: 2,
-              source_type: defaultSource,
-              bundle_id: bundles[0]?.id,
-              artifact_id: arts[0]?.id,
-            })
-            setOpen(true)
-          }}>
-          🚀 触发部署
-        </Button>
-        <Button danger onClick={handleRollback}>↩ 回滚</Button>
-        <Button onClick={refresh}>刷新</Button>
-        {arts.length === 0 && bundles.length === 0 && (
-          <Typography.Text type="secondary">先去"制品"页注册一个 jar 或触发构建产出 Bundle，再来部署。</Typography.Text>
-        )}
-      </Space>
+    <section className="workbench-tab pipeline-tab">
+      <div className="workbench-toolbar">
+        <div className="workbench-toolbar-main">
+          <Button type="primary" disabled={arts.length === 0 && bundles.length === 0}
+            onClick={() => {
+              form.resetFields()
+              const defaultSource = bundles.length > 0 ? 'bundle' : 'artifact'
+              form.setFieldsValue({
+                strategy: 'single', batch_size: 2,
+                source_type: defaultSource,
+                bundle_id: bundles[0]?.id,
+                artifact_id: arts[0]?.id,
+              })
+              setOpen(true)
+            }}>
+            触发部署
+          </Button>
+          <Button onClick={refresh}>刷新</Button>
+        </div>
+        <div className="workbench-hint">
+          {arts.length === 0 && bundles.length === 0
+            ? '先去「构建」注册 jar 或触发构建产出 Bundle，再来部署。'
+            : '选择状态=成功的部署历史，点击“回滚到此版本”。'}
+        </div>
+      </div>
       <Table<PipelineRun>
         rowKey="id" loading={loading} dataSource={list} pagination={false}
-        locale={{ emptyText: '还没有部署记录' }}
+        locale={{ emptyText: <EmptyState title="还没有部署记录" description="先选择一个 Bundle 或 Artifact 触发部署，成功记录才能作为回滚目标。" /> }}
         columns={[
           { title: '#', dataIndex: 'id', width: 60 },
           { title: '策略', dataIndex: 'strategy', width: 90, render: (v) => <Tag>{v}</Tag> },
           {
-            title: '产物', width: 110,
+            title: '产物', width: 180,
             render: (_: any, r: PipelineRun) => {
-              const anyR = r as any
-              if (anyR.bundle_id) return <Tag color="blue">Bundle #{anyR.bundle_id}</Tag>
-              if (r.artifact_id) return <Tag>Art #{r.artifact_id}</Tag>
-              return '-'
+              const version = r.bundle_id
+                ? <Tag color="blue">Bundle #{r.bundle_id}</Tag>
+                : r.previous_bundle_id
+                  ? <Tag color="purple">目标 Bundle #{r.previous_bundle_id}</Tag>
+                  : r.artifact_id
+                    ? <Tag>Art #{r.artifact_id}</Tag>
+                    : null
+              if (!version) return '-'
+              return (
+                <Space size={4} wrap>
+                  {version}
+                  {r.is_current && (
+                    <Tag color={r.current_partial ? 'gold' : 'green'}>
+                      {r.current_partial ? '当前部分部署' : '当前部署'}
+                    </Tag>
+                  )}
+                </Space>
+              )
             },
           },
           { title: '状态', dataIndex: 'status', width: 110, render: (s) => pipeStatusTag(s) },
           { title: '触发人', dataIndex: 'triggered_by', width: 110 },
           { title: '开始', dataIndex: 'started_at', width: 170, render: (s) => s ? new Date(s).toLocaleString() : '-' },
           { title: '结束', dataIndex: 'finished_at', width: 170, render: (s) => s ? new Date(s).toLocaleString() : '-' },
-          { title: '操作', width: 90, render: (_, r) => <Button size="small" onClick={() => setDrawerRun(r)}>详情</Button> },
+          {
+            title: '操作',
+            width: 210,
+            render: (_, r) => {
+              const canRollback = canRollbackToRun(r)
+              return (
+                <Space size={8}>
+                  <Button size="small" onClick={() => setDrawerRun(r)}>详情</Button>
+                  <Tooltip title={canRollback ? `回滚到 ${rollbackTargetLabel(r)}` : '只有状态=成功且关联了制品版本的历史才能回滚'}>
+                    <span>
+                      <Button size="small" danger disabled={!canRollback} onClick={() => handleRollbackToRun(r)}>
+                        回滚到此版本
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </Space>
+              )
+            },
+          },
         ]}
       />
       <Modal title={`触发部署 - ${app.name}`} open={open} onOk={handleDeploy} onCancel={() => setOpen(false)} okText="触发" cancelText="取消" maskClosable={false} keyboard={false} width={600}>
@@ -1137,9 +2009,8 @@ function PipelineTab({ app }: { app: App }) {
           <Form.Item name="strategy" label="部署策略" rules={[{ required: true }]}>
             <Select
               options={[
-                { value: 'single',     label: 'single（顺序逐台、任一失败立刻停止）' },
-                { value: 'rolling',    label: 'rolling（分批并行、批级 fail-fast）' },
-                { value: 'blue_green', label: 'blue_green（双组并存、切流到非活跃组；需先在应用配 nginx）' },
+                { value: 'single', label: 'single（顺序逐台、任一失败立刻停止）' },
+                { value: 'rolling', label: 'rolling（分批并行、批级 fail-fast）' },
               ]}
             />
           </Form.Item>
@@ -1160,23 +2031,13 @@ function PipelineTab({ app }: { app: App }) {
                   </Form.Item>
                 )
               }
-              if (strategy === 'blue_green') {
-                const activeText = app.active_group
-                  ? `当前活跃 ${app.active_group}，本次将部署到 ${app.active_group === 'blue' ? 'green' : 'blue'} 组`
-                  : '首次蓝绿部署：将默认部署到 blue 组'
-                return (
-                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
-                    📘 {activeText}；目标组主机部署完成后会重写 nginx upstream 切流。
-                  </Typography.Text>
-                )
-              }
               return null
             }}
           </Form.Item>
         </Form>
       </Modal>
       <PipelineDetailDrawer run={drawerRun} onClose={() => setDrawerRun(null)} />
-    </>
+    </section>
   )
 }
 
@@ -1185,11 +2046,56 @@ function PipelineTab({ app }: { app: App }) {
 const stageLabel: Record<PipelineStage, string> = {
   dial: 'SSH 拨号',
   env_check: '远端环境预检',
-  upload: '上传 jar',
-  write_unit: '写 systemd unit',
-  restart: 'systemctl restart',
+  upload: '上传产物',
+  write_unit: '准备运行单元',
+  restart: '重启服务',
   health: '健康探针',
-  nginx_apply: 'Nginx 切流',
+  nginx_apply: '历史切流步骤',
+}
+
+function stageTitle(step: StepResult): string {
+  const text = `${step.detail ?? ''}\n${step.error ?? ''}`.toLowerCase()
+  const modeMatch = text.match(/mode=(docker|nohup|systemd)/)
+  const mode = modeMatch?.[1]
+
+  if (step.stage === 'upload') {
+    if (text.includes('dockerfile')) return '上传 Dockerfile'
+    if (text.includes('skip jar upload')) return '跳过 jar 上传'
+    return '上传产物'
+  }
+
+  if (step.stage === 'write_unit') {
+    if (mode === 'docker' || text.includes('docker container')) return '准备 Docker 容器'
+    if (mode === 'nohup' || text.includes('start.sh') || text.includes('stop.sh')) return '写 nohup 脚本'
+    if (mode === 'systemd' || text.includes('.service')) return '写 systemd unit'
+    return stageLabel[step.stage] ?? step.stage
+  }
+
+  if (step.stage === 'restart') {
+    if (mode === 'docker') return '重启 Docker 容器'
+    if (mode === 'nohup') return '重启 nohup 进程'
+    if (mode === 'systemd') return 'systemctl restart'
+    return stageLabel[step.stage] ?? step.stage
+  }
+
+  return stageLabel[step.stage] ?? step.stage
+}
+
+function StepLogText({ text, danger = false }: { text?: string; danger?: boolean }) {
+  if (!text) return null
+  const multiLine = text.includes('\n')
+  return (
+    <Typography.Text
+      type={danger ? 'danger' : 'secondary'}
+      className={`step-log-text ${multiLine ? 'step-log-text--block' : ''} ${danger ? 'step-log-text--danger' : ''}`}
+    >
+      {text}
+    </Typography.Text>
+  )
+}
+
+function RuntimeLogBox({ text, loading = false }: { text?: string; loading?: boolean }) {
+  return <LogTerminal text={text} loading={loading} />
 }
 
 function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClose: () => void }) {
@@ -1303,6 +2209,7 @@ function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClo
 
   return (
     <Drawer
+      className="pipeline-detail-drawer"
       title={run ? `部署详情 #${run.id}` : ''}
       open={!!run}
       onClose={onClose}
@@ -1321,28 +2228,36 @@ function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClo
           <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
             <Descriptions.Item label="状态">{pipeStatusTag(displayStatus)}</Descriptions.Item>
             <Descriptions.Item label="策略">{run.strategy}</Descriptions.Item>
-            <Descriptions.Item label="制品">#{run.artifact_id}</Descriptions.Item>
+            <Descriptions.Item label="制品">
+              {run.bundle_id
+                ? <Tag color="blue">Bundle #{run.bundle_id}</Tag>
+                : run.previous_bundle_id
+                  ? <Tag color="purple">Prev Bundle #{run.previous_bundle_id}</Tag>
+                  : run.artifact_id
+                    ? <Tag>Art #{run.artifact_id}</Tag>
+                    : '-'}
+            </Descriptions.Item>
             <Descriptions.Item label="触发人">{run.triggered_by}</Descriptions.Item>
             <Descriptions.Item label="开始">{run.started_at ? new Date(run.started_at).toLocaleString() : '-'}</Descriptions.Item>
             <Descriptions.Item label="结束">{run.finished_at ? new Date(run.finished_at).toLocaleString() : '-'}</Descriptions.Item>
           </Descriptions>
           {snap?.error && (
-            <Card size="small" type="inner" style={{ marginBottom: 16, borderColor: '#ff4d4f' }}>
+            <Card className="danger-card" size="small" type="inner">
               <Typography.Text type="danger">{snap.error}</Typography.Text>
             </Card>
           )}
           {Array.from(byHost.entries()).map(([hostId, steps]) => (
-            <Card key={hostId} size="small" type="inner" style={{ marginBottom: 12 }}
+            <Card key={hostId} className="pipeline-host-card" size="small" type="inner"
               title={<><Badge status={steps.every((s) => s.ok) ? 'success' : 'error'} />
                 {steps[0]?.host_name}（<code>{steps[0]?.host_ip}</code>）</>}>
               <Steps direction="vertical" size="small" current={steps.length - 1}
                 items={steps.map((s) => ({
-                  title: stageLabel[s.stage] ?? s.stage,
+                  title: stageTitle(s),
                   status: s.ok ? 'finish' : 'error',
                   description: (
                     <>
-                      {s.detail && <div><Typography.Text type="secondary">{s.detail}</Typography.Text></div>}
-                      {s.error && <div><Typography.Text type="danger">✗ {s.error}</Typography.Text></div>}
+                      {s.detail && <StepLogText text={s.detail} />}
+                      {s.error && <StepLogText danger text={`✗ ${s.error}`} />}
                     </>
                   ),
                 }))} />
@@ -1358,29 +2273,44 @@ function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClo
 }
 
 function WSStatusTag({ state }: { state: 'idle' | 'connecting' | 'open' | 'closed' | 'error' }) {
-  if (state === 'open') return <Tag color="green">● 实时</Tag>
-  if (state === 'connecting') return <Tag color="processing">○ 连接中</Tag>
-  if (state === 'error') return <Tag color="red">⚠ 连接失败 (轮询兜底)</Tag>
-  if (state === 'closed') return <Tag>○ 已断开</Tag>
+  if (state === 'open') return <StatusTag tone="success">实时</StatusTag>
+  if (state === 'connecting') return <StatusTag tone="processing">连接中</StatusTag>
+  if (state === 'error') return <StatusTag tone="danger">连接失败（轮询兜底）</StatusTag>
+  if (state === 'closed') return <StatusTag>已断开</StatusTag>
   return null
 }
 
-// ---------- 微服务 Tab (Sprint X.4) ----------
+// ---------- 服务配置 Tab (Sprint X.4) ----------
 //
-// 列表 + 新建/编辑/删除。单体 App 自动有一行 service_code="default"。
-// 多服务 App 通过这里加 N 行（每个 jar 一个 AppService）。
-function ServicesTab({ appId, app }: { appId: number; app: App }) {
+// 列表 + 新建/编辑/删除。旧应用会自动补一行 service_code="default"。
+// 多 service 应用通过这里加 N 行（每个可部署模块一个 AppService）。
+type DiscoverServiceRow = AppServiceSuggestion & { key: string }
+
+function ServicesTab({
+  appId,
+  app,
+  onServicesChange,
+}: {
+  appId: number
+  app: App
+  onServicesChange?: (items: AppService[]) => void
+}) {
   const [items, setItems] = useState<AppService[]>([])
   const [loading, setLoading] = useState(false)
   const [editing, setEditing] = useState<AppService | null>(null)
   const [creating, setCreating] = useState(false)
   const [form] = Form.useForm<AppServiceInput>()
+  const [discoverOpen, setDiscoverOpen] = useState(false)
+  const [discoverLoading, setDiscoverLoading] = useState(false)
+  const [importLoading, setImportLoading] = useState(false)
+  const [discoverRows, setDiscoverRows] = useState<DiscoverServiceRow[]>([])
+  const [selectedDiscoverKeys, setSelectedDiscoverKeys] = useState<string[]>([])
   const [dockerfiles, setDockerfiles] = useState<DockerfileTemplate[]>([])
   const [dfEditing, setDfEditing] = useState<DockerfileTemplate | null>(null)
   const [dfCreating, setDfCreating] = useState(false)
   const [dfForm] = Form.useForm<DockerfileTemplateFormValues>()
-
-  const [builderEnv, setBuilderEnv] = useState<BuilderEnv | null>(null)
+  const inheritedDeployMode = app.deploy_mode || 'systemd'
+  const renderRuntimeConfig = () => <Tag color="processing">继承应用：{inheritedDeployMode}</Tag>
 
   const refresh = async () => {
     setLoading(true)
@@ -1391,6 +2321,7 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
       ])
       setItems(svcRows)
       setDockerfiles(dfRows)
+      onServicesChange?.(svcRows)
     } catch (e) {
       message.error(formatError(e))
     } finally {
@@ -1399,7 +2330,6 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
   }
   useEffect(() => {
     refresh()
-    getBuilderEnv().then(setBuilderEnv).catch(() => {})
   }, [appId])
 
   const openCreate = () => {
@@ -1408,10 +2338,8 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
     form.setFieldsValue({
       service_code: '', name: '',
       port: app.port,
-      health_check_url: app.health_check_url || '/actuator/health',
-      jvm_args: app.jvm_args || '',
-      systemd_user: app.systemd_user || '',
-      deploy_mode: (app.deploy_mode || '') as 'systemd' | 'nohup' | 'docker' | '',
+      systemd_user: '',
+      java_path: '',
       startup_order: 100,
       optional: false, enabled: true,
       dockerfile_template_id: dockerfiles.find(d => d.is_default)?.id || dockerfiles[0]?.id || 0,
@@ -1423,18 +2351,10 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
     form.setFieldsValue({
       service_code: row.service_code, name: row.name,
       build_module: row.build_module, build_jar_pattern: row.build_jar_pattern,
-      port: row.port, health_check_url: row.health_check_url,
-      jvm_args: row.jvm_args, env_vars: row.env_vars,
+      port: row.port,
       systemd_user: row.systemd_user, java_path: row.java_path,
-      deploy_mode: (row.deploy_mode || '') as 'systemd' | 'nohup' | 'docker' | '',
       dockerfile_template_id: row.dockerfile_template_id || dockerfiles.find(d => d.is_default)?.id || 0,
-      docker_registry: row.docker_registry || '',
-      docker_image_name: row.docker_image_name || '',
-      docker_image_tag: row.docker_image_tag || '',
-      docker_build_args: row.docker_build_args || '',
-      docker_run_args: row.docker_run_args || '',
       startup_order: row.startup_order, optional: row.optional, enabled: row.enabled,
-      nginx_host_id: row.nginx_host_id, nginx_upstream_name: row.nginx_upstream_name,
     })
   }
   const closeModal = () => { setCreating(false); setEditing(null); form.resetFields() }
@@ -1448,25 +2368,12 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
         build_module: editing.build_module,
         build_jar_pattern: editing.build_jar_pattern,
         port: editing.port,
-        health_check_url: editing.health_check_url,
-        jvm_args: editing.jvm_args,
-        env_vars: editing.env_vars,
         systemd_user: editing.systemd_user,
         java_path: editing.java_path,
         startup_order: editing.startup_order,
         optional: editing.optional,
         enabled: editing.enabled,
-        nginx_host_id: editing.nginx_host_id,
-        nginx_upstream_name: editing.nginx_upstream_name,
-        active_group: editing.active_group,
-        deploy_mode: editing.deploy_mode,
-        docker_registry: editing.docker_registry,
-        docker_image_name: editing.docker_image_name,
-        docker_image_tag: editing.docker_image_tag,
         dockerfile_template_id: editing.dockerfile_template_id,
-        dockerfile: editing.dockerfile,
-        docker_build_args: editing.docker_build_args,
-        docker_run_args: editing.docker_run_args,
       } : {}
       const payload = { ...preservedValues, ...values }
       if (editing) {
@@ -1499,6 +2406,61 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
         }
       },
     })
+  }
+
+  const updateDiscoverRow = (key: string, patch: Partial<DiscoverServiceRow>) => {
+    setDiscoverRows((rows) => rows.map((row) => row.key === key ? { ...row, ...patch } : row))
+  }
+
+  const openDiscover = async () => {
+    setDiscoverOpen(true)
+    setDiscoverLoading(true)
+    setDiscoverRows([])
+    setSelectedDiscoverKeys([])
+    try {
+      const rows = await discoverAppServices(appId, { git_ref: app.git_ref || undefined })
+      const withKey = rows.map((row, idx) => ({ ...row, key: `${row.service_code}-${idx}` }))
+      setDiscoverRows(withKey)
+      setSelectedDiscoverKeys(withKey.filter((row) => row.recommended).map((row) => row.key))
+      if (withKey.length === 0) {
+        message.warning('没有扫描到可导入的 Maven service')
+      }
+    } catch (e) {
+      message.error(formatError(e))
+    } finally {
+      setDiscoverLoading(false)
+    }
+  }
+
+  const submitDiscoverImport = async () => {
+    const selected = discoverRows.filter((row) => selectedDiscoverKeys.includes(row.key))
+    if (selected.length === 0) {
+      message.warning('请至少选择一个 service')
+      return
+    }
+    setImportLoading(true)
+    try {
+      const defaultTpl = dockerfiles.find(d => d.is_default)?.id || dockerfiles[0]?.id || 0
+      const payload: AppServiceInput[] = selected.map((row) => ({
+        service_code: row.service_code,
+        name: row.name || row.service_code,
+        build_module: row.build_module,
+        build_jar_pattern: row.build_jar_pattern,
+        port: row.port || app.port,
+        dockerfile_template_id: defaultTpl,
+        startup_order: row.startup_order || 100,
+        optional: row.optional,
+        enabled: row.enabled,
+      }))
+      const result = await batchImportAppServices(appId, payload, { upsert: true, disable_default: true })
+      message.success(`导入完成：新增 ${result.created}，更新 ${result.updated}，跳过 ${result.skipped}`)
+      setDiscoverOpen(false)
+      await refresh()
+    } catch (e) {
+      message.error(formatError(e))
+    } finally {
+      setImportLoading(false)
+    }
   }
 
   const openDockerfileCreate = () => {
@@ -1568,13 +2530,14 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
       },
     })
   }
+  const serviceMode = describeServiceMode(items)
 
   return (
-    <>
+    <section className="workbench-tab services-tab">
       <Card
-        title={app.app_type === 'spring-cloud' ? 'Dockerfile 模板' : 'Dockerfile 模板（单体 jar）'}
+        className="workbench-card"
+        title="Dockerfile 模板"
         size="small"
-        style={{ marginBottom: 16 }}
         extra={
           <Space>
             <Button size="small" onClick={async () => { await ensureDefaultDockerfileTemplate(appId); await refresh(); message.success('已确认默认模板') }}>
@@ -1593,6 +2556,7 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
           size="small"
           dataSource={dockerfiles}
           pagination={false}
+          locale={{ emptyText: <EmptyState title="还没有 Dockerfile 模板" description="初始化默认模板后，可按 service 绑定不同构建模板。" /> }}
           columns={[
             { title: '模板名称', dataIndex: 'name', render: (v: string, row: DockerfileTemplate) => <Space><code>{v}</code>{row.is_default && <Tag color="blue">default</Tag>}</Space> },
             { title: '说明', dataIndex: 'description', render: (v: string) => v || '—' },
@@ -1610,21 +2574,18 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
       </Card>
 
       <Card
-        title={app.app_type === 'spring-cloud' ? '微服务列表' : '单体服务配置'}
+        className="workbench-card"
+        title="服务列表"
         size="small"
-        extra={app.app_type === 'spring-cloud' ? <Button type="primary" onClick={openCreate}>+ 新建 Service</Button> : null}
+        extra={<Button type="primary" loading={discoverLoading} onClick={openDiscover}>扫描 Maven 模块</Button>}
       >
+        <Space style={{ marginBottom: 12, flexWrap: 'wrap' }}>
+          <Tag color={serviceMode.color}>当前：{serviceMode.label}</Tag>
+          <Typography.Text type="secondary">{serviceMode.desc}</Typography.Text>
+        </Space>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-          {app.app_type === 'spring-cloud' ? (
-            <>
-              多 service 应用在这里增删。Spring Cloud 项目可加 <code>eureka</code> / <code>gateway</code> / <code>user-service</code> 等。
-              部署按 <strong>startup_order</strong> 分波，同波内并发。
-            </>
-          ) : (
-            <>
-              单体 App 使用自动创建的 <code>default</code> service。这里主要用于为该服务绑定 Dockerfile 模板。
-            </>
-          )}
+          应用统一按 service 管理：一个启用 service 就是单服务模式；扫描并导入多个 Maven 模块后就是多服务模式。
+          Dockerfile / 镜像构建细节请在上方模板里维护，部署按 <strong>startup_order</strong> 分波，同波内并发。
         </Typography.Paragraph>
         <Table
         rowKey="id"
@@ -1632,6 +2593,7 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
         loading={loading}
         dataSource={items}
         pagination={false}
+        locale={{ emptyText: <EmptyState title="还没有 service 配置" description="点击扫描 Maven 模块，或手动新建 service。" /> }}
         columns={[
           { title: 'service_code', dataIndex: 'service_code', render: (v: string) => <code>{v}</code> },
           { title: '展示名', dataIndex: 'name' },
@@ -1642,6 +2604,11 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
             title: 'Dockerfile',
             dataIndex: 'dockerfile_template_id',
             render: (v: number) => dockerfiles.find(d => d.id === v)?.name || <Typography.Text type="secondary">默认</Typography.Text>,
+          },
+          {
+            title: '运行配置',
+            width: 150,
+            render: renderRuntimeConfig,
           },
           {
             title: '状态', width: 130,
@@ -1673,65 +2640,37 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
         width={680}
       >
         <Form form={form} layout="vertical" size="small">
-          {app.app_type === 'spring-cloud' ? (
-            <>
-              <Form.Item
-                name="service_code" label="service_code"
-                rules={[{ required: true, pattern: /^[a-z][a-z0-9-]{1,49}$/,
-                  message: '小写字母开头，2-50 位，仅小写字母/数字/连字符' }]}
-                tooltip="systemd unit 命名一部分，创建后不可改"
-              >
-                <Input placeholder="eureka / gateway / user-service" disabled={!!editing} />
-              </Form.Item>
-              <Form.Item name="name" label="展示名">
-                <Input placeholder="留空走 service_code" />
-              </Form.Item>
-              <Space style={{ display: 'flex' }} align="start">
-                <Form.Item name="port" label="Port" rules={[{ required: true }]} style={{ flex: 1 }}>
-                  <InputNumber min={1} max={65535} style={{ width: '100%' }} />
-                </Form.Item>
-                <Form.Item name="startup_order" label="startup_order" style={{ flex: 1 }}
-                  tooltip="同值的 service 同波并发；小先起。注册中心 0，网关 10，业务 100"
-                >
-                  <InputNumber min={0} max={9999} style={{ width: '100%' }} />
-                </Form.Item>
-              </Space>
-              <Form.Item name="health_check_url" label="健康检查 URL">
-                <Input placeholder="/actuator/health" />
-              </Form.Item>
-              <Form.Item name="build_module" label="build_module" tooltip="multi-module 项目用，mvn -pl">
-                <Input placeholder="user-service" />
-              </Form.Item>
-              <Form.Item name="build_jar_pattern" label="build_jar_pattern" tooltip="glob 在 workspace 下匹配 jar">
-                <Input placeholder="user-service/target/*.jar" />
-              </Form.Item>
-              <Form.Item name="jvm_args" label="JVM 参数">
-                <Input placeholder="-Xms512m -Xmx512m" />
-              </Form.Item>
-              <Form.Item name="env_vars" label="环境变量 (JSON)">
-                <Input.TextArea rows={2} placeholder='{"SPRING_PROFILES_ACTIVE":"prod"}' />
-              </Form.Item>
-              <Form.Item
-                name="deploy_mode"
-                label="部署模式（覆盖 app 默认）"
-                tooltip="留空 = 沿用 app 的 deploy_mode。systemd 需 root/sudo；nohup 免 root；docker 用目标主机 Docker 容器启动。"
-              >
-                <Select
-                  allowClear
-                  placeholder="留空 = 沿用 app 默认"
-                  options={[
-                    { value: 'systemd', label: 'systemd（推荐，crash 自愈）' },
-                    { value: 'nohup', label: 'nohup（免 root，crash 不自愈）' },
-                    { value: 'docker', label: 'Docker（目标主机容器）' },
-                  ]}
-                />
-              </Form.Item>
-            </>
-          ) : (
-            <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-              单体应用的 <code>default</code> service 继承应用基础配置；这里仅选择构建/部署时使用的 Dockerfile 模板。
-            </Typography.Paragraph>
-          )}
+          <Form.Item
+            name="service_code" label="service_code"
+            rules={[{ required: true, pattern: /^[a-z][a-z0-9-]{1,49}$/,
+              message: '小写字母开头，2-50 位，仅小写字母/数字/连字符' }]}
+            tooltip="systemd unit / Docker 容器命名的一部分，创建后不可改"
+          >
+            <Input placeholder="default / gateway / user-service" disabled={!!editing} />
+          </Form.Item>
+          <Form.Item name="name" label="展示名">
+            <Input placeholder="留空走 service_code" />
+          </Form.Item>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="port" label="Port" rules={[{ required: true }]} style={{ flex: 1 }}>
+              <InputNumber min={1} max={65535} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="startup_order" label="startup_order" style={{ flex: 1 }}
+              tooltip="同值的 service 同波并发；小先起。注册中心 0，网关 10，业务 100"
+            >
+              <InputNumber min={0} max={9999} style={{ width: '100%' }} />
+            </Form.Item>
+          </Space>
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+            健康检查、JVM 参数、环境变量、部署方式和 Docker 配置都由应用的「运行配置」统一管理。
+            service 这里只维护模块、端口、启动顺序、Dockerfile 模板，以及必要的账号路径覆盖。
+          </Typography.Paragraph>
+          <Form.Item name="build_module" label="build_module" tooltip="multi-module 项目用，mvn -pl；根模块可留空">
+            <Input placeholder="user-service；根模块 service 可留空" />
+          </Form.Item>
+          <Form.Item name="build_jar_pattern" label="build_jar_pattern" tooltip="glob 在 workspace 下匹配 jar">
+            <Input placeholder="user-service/target/*.jar；根模块 service 可用 target/*.jar" />
+          </Form.Item>
           <Form.Item
             name="dockerfile_template_id"
             label="Dockerfile 模板"
@@ -1743,29 +2682,137 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
               options={dockerfiles.map(d => ({ value: d.id, label: `${d.name}${d.is_default ? '（default）' : ''}` }))}
             />
           </Form.Item>
-          {app.app_type === 'spring-cloud' && (
-            <>
-              <Space style={{ display: 'flex' }} align="start">
-                <Form.Item name="systemd_user" label="systemd User" style={{ flex: 1 }}>
-                  <Input placeholder="留空 = root" />
-                </Form.Item>
-                <Form.Item name="java_path" label="JavaPath 覆盖" style={{ flex: 1 }}>
-                  <Input placeholder="留空 = 沿用 Host" />
-                </Form.Item>
-              </Space>
-              <Space style={{ display: 'flex' }}>
-                <Form.Item name="optional" label="Optional" valuePropName="checked" style={{ flex: 1 }}
-                  tooltip="勾上则该 service 失败不阻塞整组部署"
-                >
-                  <Input type="checkbox" />
-                </Form.Item>
-                <Form.Item name="enabled" label="Enabled" valuePropName="checked" style={{ flex: 1 }}>
-                  <Input type="checkbox" />
-                </Form.Item>
-              </Space>
-            </>
-          )}
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="systemd_user" label="systemd User 覆盖" style={{ flex: 1 }}>
+              <Input placeholder="留空 = 沿用应用运行用户" />
+            </Form.Item>
+            <Form.Item name="java_path" label="JavaPath 覆盖" style={{ flex: 1 }}>
+              <Input placeholder="留空 = 沿用应用 / 主机 JavaPath" />
+            </Form.Item>
+          </Space>
+          <Space style={{ display: 'flex' }}>
+            <Form.Item name="optional" label="Optional" valuePropName="checked" style={{ flex: 1 }}
+              tooltip="勾上则该 service 失败不阻塞整组部署"
+            >
+              <Input type="checkbox" />
+            </Form.Item>
+            <Form.Item name="enabled" label="Enabled" valuePropName="checked" style={{ flex: 1 }}>
+              <Input type="checkbox" />
+            </Form.Item>
+          </Space>
         </Form>
+      </Modal>
+
+      <Modal
+        title="扫描 Maven 模块并导入 Service"
+        open={discoverOpen}
+        onCancel={() => setDiscoverOpen(false)}
+        onOk={submitDiscoverImport}
+        okText="导入选中"
+        confirmLoading={importLoading}
+        width={980}
+        destroyOnClose
+      >
+        <Typography.Paragraph type="secondary">
+          姐姐会从 Git 仓库读取 <code>pom.xml</code>、Spring Boot 入口和 <code>server.port</code>，
+          自动推断 <code>service_code</code>、<code>build_module</code> 和 <code>build_jar_pattern</code>。
+          导入非 default 服务后会自动停用占位的 <code>default</code> service；如果只启用一个 service，它就是单服务部署。
+        </Typography.Paragraph>
+        <Table<DiscoverServiceRow>
+          rowKey="key"
+          size="small"
+          loading={discoverLoading}
+          dataSource={discoverRows}
+          pagination={false}
+          rowSelection={{
+            selectedRowKeys: selectedDiscoverKeys,
+            onChange: (keys) => setSelectedDiscoverKeys(keys.map(String)),
+          }}
+          columns={[
+            {
+              title: 'Service',
+              dataIndex: 'service_code',
+              width: 190,
+              render: (v: string, row) => (
+                <Space direction="vertical" size={2}>
+                  <Input
+                    size="small"
+                    value={v}
+                    onChange={(e) => updateDiscoverRow(row.key, { service_code: e.target.value })}
+                  />
+                  <Space size={4}>
+                    <Tag color={row.confidence === 'high' ? 'green' : row.confidence === 'medium' ? 'blue' : 'orange'}>
+                      {row.confidence}
+                    </Tag>
+                    {row.existing && <Tag color="purple">已存在</Tag>}
+                  </Space>
+                </Space>
+              ),
+            },
+            {
+              title: 'module',
+              dataIndex: 'build_module',
+              width: 190,
+              render: (v: string, row) => (
+                <Input
+                  size="small"
+                  value={v}
+                  placeholder="根模块留空"
+                  onChange={(e) => updateDiscoverRow(row.key, { build_module: e.target.value })}
+                />
+              ),
+            },
+            {
+              title: 'jar pattern',
+              dataIndex: 'build_jar_pattern',
+              render: (v: string, row) => (
+                <Input
+                  size="small"
+                  value={v}
+                  onChange={(e) => updateDiscoverRow(row.key, { build_jar_pattern: e.target.value })}
+                />
+              ),
+            },
+            {
+              title: 'Port',
+              dataIndex: 'port',
+              width: 100,
+              render: (v: number, row) => (
+                <InputNumber
+                  size="small"
+                  min={1}
+                  max={65535}
+                  value={v}
+                  style={{ width: 88 }}
+                  onChange={(value) => updateDiscoverRow(row.key, { port: Number(value || app.port) })}
+                />
+              ),
+            },
+            {
+              title: '启动',
+              dataIndex: 'startup_order',
+              width: 90,
+              render: (v: number, row) => (
+                <InputNumber
+                  size="small"
+                  min={0}
+                  max={9999}
+                  value={v}
+                  style={{ width: 78 }}
+                  onChange={(value) => updateDiscoverRow(row.key, { startup_order: Number(value || 100) })}
+                />
+              ),
+            },
+            {
+              title: '原因',
+              dataIndex: 'reason',
+              render: (v: string) => <Typography.Text type="secondary">{v}</Typography.Text>,
+            },
+          ]}
+        />
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+          小宝，导入只是写 service 配置；之后还要在「运行」里选择这些 service 要部署到哪台主机。
+        </Typography.Paragraph>
       </Modal>
 
       <Modal
@@ -1789,9 +2836,9 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
             <Input placeholder="如 Java 21 Spring Boot 默认模板" />
           </Form.Item>
           <Card
+            className="workbench-card"
             size="small"
             title="字段生成 Dockerfile"
-            style={{ marginBottom: 12 }}
             extra={<Button size="small" type="primary" onClick={generateDockerfilePreview}>生成/刷新预览</Button>}
           >
             <Space style={{ display: 'flex' }} align="start">
@@ -1860,6 +2907,6 @@ function ServicesTab({ appId, app }: { appId: number; app: App }) {
       </Modal>
 
     </Card>
-    </>
+    </section>
   )
 }

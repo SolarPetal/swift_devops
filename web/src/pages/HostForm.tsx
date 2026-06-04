@@ -26,7 +26,6 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
         port: editing.port,
         auth_type: editing.auth_type,
         username: editing.username,
-        group_tag: editing.group_tag,
         tags: editing.tags,
         java_path: editing.java_path,
       })
@@ -35,7 +34,6 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
         port: 22,
         auth_type: 'password',
         username: 'root',
-        group_tag: '',
         java_path: '/usr/bin/java',
       })
     }
@@ -117,13 +115,6 @@ export default function HostForm({ open, editing, onClose, onSaved }: Props) {
               </>
             )
           }}
-        </Form.Item>
-        <Form.Item name="group_tag" label="蓝绿分组（可选）">
-          <Radio.Group>
-            <Radio.Button value="">未分组</Radio.Button>
-            <Radio.Button value="blue">Blue</Radio.Button>
-            <Radio.Button value="green">Green</Radio.Button>
-          </Radio.Group>
         </Form.Item>
         <Form.Item
           name="java_path"

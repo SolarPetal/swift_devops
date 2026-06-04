@@ -7,7 +7,6 @@
 //
 // 不范围：
 //   - 远端构建机（SSH 过去跑）—— 留 Sprint 5.5
-//   - Docker 容器构建 —— 留 Sprint 5.5
 //   - 工件签名 / SBOM —— 不在 swift-devops 当前定位
 package builder
 

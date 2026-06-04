@@ -10,12 +10,14 @@ import (
 	"swift-devops/internal/service"
 )
 
-// AppServiceHandler AppService（微服务层）CRUD —— Sprint X.4。
+// AppServiceHandler AppService（可部署服务层）CRUD —— Sprint X.4。
 //
 // 路由：
 //
 //	POST   /apps/:id/services           Create
 //	GET    /apps/:id/services           List
+//	POST   /apps/:id/services/discover  Discover
+//	POST   /apps/:id/services/batch     BatchImport
 //	GET    /app-services/:id            Get
 //	PUT    /app-services/:id            Update
 //	DELETE /app-services/:id            Delete
@@ -58,6 +60,44 @@ func (h *AppServiceHandler) List(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (h *AppServiceHandler) Discover(c *gin.Context) {
+	appID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		apperr.Respond(c, apperr.New("BAD_REQUEST", "app id 非法", http.StatusBadRequest))
+		return
+	}
+	var in service.AppServiceDiscoverInput
+	if err := c.ShouldBindJSON(&in); err != nil && err.Error() != "EOF" {
+		apperr.Respond(c, apperr.Wrap(err, "BAD_REQUEST", err.Error(), http.StatusBadRequest))
+		return
+	}
+	out, err := h.svc.Discover(c.Request.Context(), uint(appID), in)
+	if err != nil {
+		apperr.Respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (h *AppServiceHandler) BatchImport(c *gin.Context) {
+	appID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		apperr.Respond(c, apperr.New("BAD_REQUEST", "app id 非法", http.StatusBadRequest))
+		return
+	}
+	var in service.AppServiceBatchImportInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		apperr.Respond(c, apperr.Wrap(err, "BAD_REQUEST", err.Error(), http.StatusBadRequest))
+		return
+	}
+	out, err := h.svc.BatchImport(uint(appID), in)
+	if err != nil {
+		apperr.Respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (h *AppServiceHandler) Get(c *gin.Context) {

@@ -8,13 +8,48 @@ export type Host = {
   auth_type: 'password' | 'key'
   username: string
   status: 'online' | 'offline' | 'unknown'
-  group_tag?: string
   tags?: string
   java_path: string  // Sprint 3.7：远端 java 可执行路径，默认 /usr/bin/java
+  running_instance_count: number
   has_secret: boolean
   has_host_key: boolean
   created_at: string
   updated_at: string
+}
+
+export type HostDockerContainer = {
+  id: string
+  name: string
+  image: string
+  state: string
+  status: string
+  ports: string
+  created_at: string
+}
+
+export type HostDockerLogs = {
+  host_id: number
+  host_name: string
+  host_ip: string
+  container_name: string
+  lines: number
+  status: string
+  logs: string
+  captured_at: string
+}
+
+export type HostMetrics = {
+  host_id: number
+  host_name: string
+  host_ip: string
+  host_status: 'online' | 'offline' | 'unknown' | string
+  cpu_usage: number
+  memory_usage: number
+  disk_usage: number
+  load1: number
+  checked_at: string
+  cached: boolean
+  error?: string
 }
 
 export type HostInput = {
@@ -26,7 +61,6 @@ export type HostInput = {
   password?: string
   private_key?: string
   passphrase?: string
-  group_tag?: string
   tags?: string
   java_path?: string  // 留空 = /usr/bin/java
 }
@@ -93,11 +127,9 @@ export type BuilderEnv = {
   maven_home: string
   git_path: string
   maven_local_repo: string  // Sprint X.9：空 = 用 mvn settings.xml 默认 <localRepository>
-  docker_image: string      // Sprint X.11：Docker 构建镜像（仅 docker_enabled=true 时生效）
   java_version: string
   maven_version: string
   git_version: string
-  docker_version: string    // Sprint X.11：docker version 输出（docker_enabled=true 时检测）
   detected_at?: string
   valid: boolean
   detect_message: string
@@ -108,7 +140,6 @@ export type BuilderEnvInput = {
   maven_home: string
   git_path?: string
   maven_local_repo?: string  // Sprint X.9
-  docker_image?: string      // Sprint X.11
 }
 
 export type App = {
@@ -130,10 +161,10 @@ export type App = {
   // Sprint 5.4.7 构建参数（multi-module 项目）
   build_module: string        // mvn -pl 用，如 "car-dealer-admin"
   build_jar_pattern: string   // glob 选 jar，如 "car-dealer-admin/target/*.jar"
-  // Sprint 4 蓝绿配置（可选）
-  nginx_host_id: number       // 0 = 未启用蓝绿
-  nginx_upstream_name: string // upstream block 名，与 nginx_host_id 同填同空
-  active_group: string        // 'blue' | 'green' | ''；蓝绿部署成功后由后端写入
+  // Legacy traffic-switch fields：功能已下线，字段保留为后端兼容，写入会被清空。
+  nginx_host_id: number
+  nginx_upstream_name: string
+  active_group: string
   // Sprint X.10 + X.11：构建 & 部署模式
   //   build_mode:
   //     'local-jar'      → 本机 Maven 打包 jar（默认）
@@ -151,6 +182,7 @@ export type App = {
   docker_image_tag: string     // 镜像标签模板，如 git-{sha}-{build_id} / latest
   dockerfile: string           // 自定义 Dockerfile（可选）
   docker_build_args: string    // docker build 参数
+  docker_container_name: string // 容器名模板，如 {{APP_CODE}}-{{SERVICE_CODE}}；空 = devops-<service>
   docker_run_args: string      // docker run 参数，如 -p 8080:8080 -e ENV=prod
   created_at: string
   updated_at: string
@@ -158,7 +190,7 @@ export type App = {
 
 export type AppInput = Omit<App, 'id' | 'created_at' | 'updated_at'>
 
-// Sprint X.1/X.4：AppService 微服务层
+// Sprint X.1/X.4：AppService 可部署服务层
 export type AppService = {
   id: number
   app_id: number
@@ -175,10 +207,11 @@ export type AppService = {
   startup_order: number
   optional: boolean
   enabled: boolean
+  // Legacy traffic-switch fields：功能已下线，字段保留为后端兼容，写入会被清空。
   nginx_host_id: number
   nginx_upstream_name: string
   active_group: string
-  // Sprint X.10 + X.11：部署模式，覆盖 Application.DeployMode。空串 = 沿用 app 字段。
+  // Sprint X.10 + X.11：部署模式。空串 = 沿用 app 字段。
   deploy_mode: 'systemd' | 'nohup' | 'docker' | ''
   // Sprint X.11：Docker 配置（空时回退 Application 的对应字段）
   docker_registry: string
@@ -187,6 +220,7 @@ export type AppService = {
   dockerfile_template_id: number
   dockerfile: string
   docker_build_args: string
+  docker_container_name: string
   docker_run_args: string
   created_at: string
   updated_at: string
@@ -206,9 +240,6 @@ export type AppServiceInput = {
   startup_order?: number
   optional?: boolean
   enabled?: boolean
-  nginx_host_id?: number
-  nginx_upstream_name?: string
-  active_group?: string
   // Sprint X.10 + X.11：部署模式（覆盖 app 字段；空 = 沿用）
   deploy_mode?: 'systemd' | 'nohup' | 'docker' | ''
   // Sprint X.11：Docker 配置（可选，空时回退 app 字段）
@@ -218,29 +249,99 @@ export type AppServiceInput = {
   dockerfile_template_id?: number
   dockerfile?: string
   docker_build_args?: string
+  docker_container_name?: string
   docker_run_args?: string
+}
+
+export type AppServiceSuggestion = {
+  service_code: string
+  name: string
+  build_module: string
+  build_jar_pattern: string
+  port: number
+  health_check_url: string
+  startup_order: number
+  optional: boolean
+  enabled: boolean
+  recommended: boolean
+  confidence: 'high' | 'medium' | 'low' | string
+  reason: string
+  artifact_id: string
+  packaging: string
+  existing: boolean
+}
+
+export type AppServiceBatchImportResult = {
+  items: AppService[]
+  created: number
+  updated: number
+  skipped: number
+  disabled_default: boolean
 }
 
 export type Deployment = {
   id: number
   app_id: number
   host_id: number
+  service_code: string
   host_name: string
   host_ip: string
   host_status: 'online' | 'offline' | 'unknown'
-  group_tag: '' | 'blue' | 'green'
   current_artifact_id: number
   previous_artifact_id: number
+  current_artifact_item_id: number
+  previous_artifact_item_id: number
+  current_bundle_id: number
+  current_bundle_version: string
   port: number
   status: 'pending' | 'running' | 'stopped' | 'failed'
+  last_run_id: number
+  last_deploy_status: 'pending' | 'running' | 'success' | 'failed' | 'skipped' | ''
+  last_deploy_stage: string
+  last_deploy_error: string
+  last_deploy_at: string
+  runtime_container_name: string
+  runtime_checked_at: string
+  runtime_status_detail: string
+  runtime_check_error: string
   created_at: string
   updated_at: string
 }
 
 export type DeploymentInput = {
   host_id: number
-  group_tag?: '' | 'blue' | 'green'
+  service_code?: string
   port?: number
+}
+
+export type DeploymentRuntimeLogs = {
+  deployment_id: number
+  app_id: number
+  host_id: number
+  host_name: string
+  host_ip: string
+  service_code: string
+  deploy_mode: string
+  container_name: string
+  lines: number
+  status: string
+  logs: string
+  captured_at: string
+}
+
+export type DeploymentRuntimeAction = {
+  deployment_id: number
+  app_id: number
+  host_id: number
+  host_name: string
+  host_ip: string
+  service_code: string
+  deploy_mode: string
+  container_name: string
+  action: 'stop' | 'restart'
+  status: 'pending' | 'running' | 'stopped' | 'failed'
+  message: string
+  operated_at: string
 }
 
 // --- 制品 ---
@@ -338,6 +439,10 @@ export type PipelineRun = {
   id: number
   app_id: number
   artifact_id: number
+  bundle_id: number
+  previous_bundle_id: number
+  is_current?: boolean
+  current_partial?: boolean
   strategy: string // 'single' | 'rolling' | 'rollback'
   status: 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
   state_snapshot: string // JSON 字符串，前端 JSON.parse 成 RunSnapshot

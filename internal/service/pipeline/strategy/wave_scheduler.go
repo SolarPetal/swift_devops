@@ -14,7 +14,7 @@ import (
 // 设计：
 //   - 同 Wave 内 service 并发部署（互不依赖）
 //   - Wave 之间串行：前 Wave 任一非 Optional service 失败 → 后续 Wave 全 skipped
-//   - 单体 App（无 AppService 行）退化为 1 个 Wave + 1 个隐式 "default" service
+//   - 旧 App（无 AppService 行）退化为 1 个 Wave + 1 个隐式 "default" service
 type Wave struct {
 	Order    int
 	Services []model.AppService
@@ -64,7 +64,7 @@ type WaveResult struct {
 // RunWaves 串行执行 waves，波内并发跑每个 service 的 strategy.Run。
 //
 // 参数：
-//   - build: 给定 service 返回它的 sub-plan + 选定 strategy（pipeline_service 决定 single/rolling/bluegreen/rollback）
+//   - build: 给定 service 返回它的 sub-plan + 选定 strategy（pipeline_service 决定 single/rolling/rollback）
 //   - 若 build 返回 nil plan 且 err == nil，视为"该 service 无需部署"，跳过
 //
 // 失败语义（决策 Q3 答案 A）：

@@ -131,3 +131,24 @@ func (h *PipelineHandler) Rollback(c *gin.Context) {
 	}
 	c.JSON(http.StatusAccepted, out)
 }
+
+// RollbackRun POST /pipelines/:id/rollback
+// 回滚到用户在「部署历史」里选中的成功记录。
+func (h *PipelineHandler) RollbackRun(c *gin.Context) {
+	runID, ok := parseID(c)
+	if !ok {
+		return
+	}
+	actor := "unknown"
+	if v, ok := c.Get("user"); ok {
+		if s, ok := v.(string); ok {
+			actor = s
+		}
+	}
+	out, err := h.svc.RollbackToRun(runID, actor)
+	if err != nil {
+		apperr.Respond(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, out)
+}

@@ -106,9 +106,29 @@ func TestUnitName_AndPaths(t *testing.T) {
 	if s.JarPath() != "/srv/order/app.jar" {
 		t.Errorf("JarPath: %s", s.JarPath())
 	}
+	if s.ContainerName() != "devops-order-svc" {
+		t.Errorf("ContainerName default: %s", s.ContainerName())
+	}
+	s.DockerContainerName = "order-api"
+	if s.ContainerName() != "order-api" {
+		t.Errorf("ContainerName custom: %s", s.ContainerName())
+	}
 	s.JarFileName = "service.jar"
 	if s.JarPath() != "/srv/order/service.jar" {
 		t.Errorf("JarPath custom: %s", s.JarPath())
+	}
+}
+
+func TestDockerRuntimeNameTemplate(t *testing.T) {
+	got := RenderDockerRuntimeNameTemplate("{{APP_CODE}}-{service}", "shop", "order")
+	if got != "shop-order" {
+		t.Fatalf("render name=%q", got)
+	}
+	if err := ValidateDockerContainerName(got); err != nil {
+		t.Fatalf("ValidateDockerContainerName: %v", err)
+	}
+	if err := ValidateDockerContainerName("bad/name"); err == nil {
+		t.Fatalf("expected invalid docker container name")
 	}
 }
 

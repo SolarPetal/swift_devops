@@ -36,7 +36,7 @@ type Runtime interface {
 	// HumanizeError 从 dump 识别常见错误码，返回友好中文 hint。无命中返回空串。
 	HumanizeError(dump string) string
 
-	// Stop 停止服务（蓝绿切流保留旧组、解绑、显式停服用）。
+	// Stop 停止服务（解绑、切换部署模式、显式停服用）。
 	Stop(ctx context.Context, spec AppSpec) error
 
 	// StopOther best-effort 清理"另一种部署模式"的残留：
@@ -45,6 +45,14 @@ type Runtime interface {
 	//   - dockerRuntime 调用时 → systemctl stop + disable 同名 unit + nohup pid / 进程
 	// 失败不阻塞主流程，仅返回 nil（调用方可忽略错误）。
 	StopOther(ctx context.Context, spec AppSpec) error
+}
+
+// StartupLogProvider 是可选能力：runtime 启动成功后，返回一段适合展示在部署详情里的启动日志。
+//
+// 当前 Docker runtime 实现它，用于在 docker run 成功后把 `docker logs --tail N` 附到 restart 步骤。
+// systemd/nohup 仍然只在失败时通过 StatusDump 展示日志，避免成功路径过度刷屏。
+type StartupLogProvider interface {
+	StartupLogs(ctx context.Context, spec AppSpec, lines int) string
 }
 
 // DeployMode 取值常量。

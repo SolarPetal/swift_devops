@@ -34,7 +34,7 @@ func BuildDockerImage(ctx context.Context, plan Plan, sp ServiceBuildSpec, jarPa
 
 	// 3. docker build
 	buildArgs := []string{"build", "-t", fullImageName, "-f", dockerfilePath}
-	buildArgString := strings.TrimSpace(firstNonEmpty(sp.DockerBuildArgs, plan.DockerBuildArgs))
+	buildArgString := strings.TrimSpace(plan.DockerBuildArgs)
 	if buildArgString != "" {
 		buildArgs = append(buildArgs, strings.Fields(buildArgString)...)
 	}
@@ -66,20 +66,21 @@ func BuildDockerImage(ctx context.Context, plan Plan, sp ServiceBuildSpec, jarPa
 	}
 
 	// 4. docker push（如果配置了镜像仓库）
-	if plan.DockerRegistry != "" {
+	registry := strings.TrimSpace(plan.DockerRegistry)
+	if registry != "" {
 		// 先登录（如果有认证信息）
 		if plan.DockerPushAuth != nil && plan.DockerPushAuth.Username != "" {
 			loginCmd := exec.CommandContext(ctx, dockerBin, "login",
 				"-u", plan.DockerPushAuth.Username,
 				"-p", plan.DockerPushAuth.Password,
-				plan.DockerRegistry)
+				registry)
 			loginCmd.Stdout = plan.LogWriter
 			loginCmd.Stderr = plan.LogWriter
 			if err := loginCmd.Run(); err != nil {
 				return "", fmt.Errorf("docker login 失败: %w", err)
 			}
 			if plan.LogWriter != nil {
-				fmt.Fprintf(plan.LogWriter, "[docker] 登录镜像仓库成功：%s\n", plan.DockerRegistry)
+				fmt.Fprintf(plan.LogWriter, "[docker] 登录镜像仓库成功：%s\n", registry)
 			}
 		}
 
@@ -101,17 +102,18 @@ func BuildDockerImage(ctx context.Context, plan Plan, sp ServiceBuildSpec, jarPa
 
 // ResolveDockerImageName 生成完整镜像名（registry/name:tag）。
 func ResolveDockerImageName(plan Plan, sp ServiceBuildSpec, serviceCode, commitSHA string) string {
-	imageName := strings.TrimSpace(firstNonEmpty(sp.DockerImageName, plan.DockerImageName))
+	imageName := strings.TrimSpace(plan.DockerImageName)
 	if imageName == "" {
 		imageName = fmt.Sprintf("%s/%s", plan.AppCode, serviceCode)
 	}
-	imageTag := strings.TrimSpace(firstNonEmpty(sp.DockerImageTag, plan.DockerImageTag))
+	imageName = renderDockerToken(imageName, plan, sp, serviceCode, commitSHA, "")
+	imageTag := strings.TrimSpace(plan.DockerImageTag)
 	if imageTag == "" {
 		imageTag = "latest"
 	}
 	imageTag = renderDockerToken(imageTag, plan, sp, serviceCode, commitSHA, "")
 	fullImageName := fmt.Sprintf("%s:%s", imageName, imageTag)
-	registry := strings.TrimSpace(firstNonEmpty(sp.DockerRegistry, plan.DockerRegistry))
+	registry := strings.TrimSpace(plan.DockerRegistry)
 	if registry != "" {
 		fullImageName = fmt.Sprintf("%s/%s", registry, fullImageName)
 	}

@@ -75,6 +75,55 @@ func TestHostService_DefaultPort22(t *testing.T) {
 	}
 }
 
+func TestHostService_ListIncludesRunningInstanceCount(t *testing.T) {
+	svc, db := setupSvc(t)
+	h1, err := svc.Create(service.HostInput{
+		Name: "h1", IP: "1.1.1.1", AuthType: "password",
+		Username: "root", Password: "p",
+	})
+	if err != nil {
+		t.Fatalf("create h1: %v", err)
+	}
+	h2, err := svc.Create(service.HostInput{
+		Name: "h2", IP: "1.1.1.2", AuthType: "password",
+		Username: "root", Password: "p",
+	})
+	if err != nil {
+		t.Fatalf("create h2: %v", err)
+	}
+	if err := db.Create([]model.Deployment{
+		{AppID: 1, HostID: h1.ID, Status: "running"},
+		{AppID: 2, HostID: h1.ID, Status: "running"},
+		{AppID: 3, HostID: h1.ID, Status: "failed"},
+		{AppID: 4, HostID: h2.ID, Status: "pending"},
+	}).Error; err != nil {
+		t.Fatalf("create deployments: %v", err)
+	}
+
+	hosts, err := svc.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	counts := map[uint]int64{}
+	for _, h := range hosts {
+		counts[h.ID] = h.RunningInstanceCount
+	}
+	if counts[h1.ID] != 2 {
+		t.Fatalf("h1 running count = %d, want 2", counts[h1.ID])
+	}
+	if counts[h2.ID] != 0 {
+		t.Fatalf("h2 running count = %d, want 0", counts[h2.ID])
+	}
+
+	got, err := svc.Get(h1.ID)
+	if err != nil {
+		t.Fatalf("get h1: %v", err)
+	}
+	if got.RunningInstanceCount != 2 {
+		t.Fatalf("get h1 running count = %d, want 2", got.RunningInstanceCount)
+	}
+}
+
 func TestHostService_ValidationFailures(t *testing.T) {
 	svc, _ := setupSvc(t)
 	cases := []struct {

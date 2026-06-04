@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Modal, Form, Input, InputNumber, Radio, Select, Tabs, Typography, message } from 'antd'
+import { Modal, Form, Input, Select, Tabs, Typography, message } from 'antd'
 
 import type { App, AppInput, GitCredential } from '../types'
 import { createApp, updateApp } from '../api/app'
@@ -33,7 +33,6 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
   const [creds, setCreds] = useState<GitCredential[]>([])
   const [activeTab, setActiveTab] = useState('basic')
   const isEdit = !!editing
-  const appType = Form.useWatch('app_type', form)
 
   useEffect(() => {
     if (!open) return
@@ -45,19 +44,15 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
       form.setFieldsValue({
         app_code: editing.app_code,
         name: editing.name,
-        app_type: editing.app_type || 'jar',
         git_url: editing.git_url,
         git_cred_id: editing.git_cred_id,
         git_ref: refs[0],
         git_refs: refs,
         deploy_path: editing.deploy_path,
-        port: editing.port,
         health_check_url: editing.health_check_url,
       })
     } else {
       form.setFieldsValue({
-        app_type: 'jar',
-        port: 8080,
         health_check_url: '/actuator/health',
         git_url: '',
         git_cred_id: '',
@@ -81,14 +76,12 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         systemd_user: editing!.systemd_user || '',
         java_path: editing!.java_path || '',
         deploy_mode: editing!.deploy_mode || 'systemd',
-        nginx_host_id: editing!.nginx_host_id || 0,
-        nginx_upstream_name: editing!.nginx_upstream_name || '',
-        active_group: editing!.active_group || '',
         docker_registry: editing!.docker_registry || '',
         docker_image_name: editing!.docker_image_name || '',
         docker_image_tag: editing!.docker_image_tag || 'latest',
         dockerfile: editing!.dockerfile || '',
         docker_build_args: editing!.docker_build_args || '',
+        docker_container_name: editing!.docker_container_name || '',
         docker_run_args: editing!.docker_run_args || '',
       } : {
         build_mode: 'local-jar',
@@ -99,19 +92,18 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
         systemd_user: '',
         java_path: '',
         deploy_mode: 'systemd',
-        nginx_host_id: 0,
-        nginx_upstream_name: '',
-        active_group: '',
         docker_registry: '',
         docker_image_name: '',
         docker_image_tag: 'latest',
         dockerfile: '',
         docker_build_args: '',
+        docker_container_name: '',
         docker_run_args: '',
       }
       const payload = {
         ...preservedValues,
         ...v,
+        app_type: isEdit ? (editing!.app_type || 'jar') : 'jar',
         git_ref: refs.includes(selectedRef) ? selectedRef : refs[0],
         git_refs: refs,
       }
@@ -131,8 +123,8 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
       if (e?.errorFields && e.errorFields.length > 0) {
         const errField = e.errorFields[0].name?.[0]
         const tabOf: Record<string, string> = {
-          app_code: 'basic', name: 'basic', app_type: 'basic',
-          deploy_path: 'basic', port: 'basic', health_check_url: 'basic',
+          app_code: 'basic', name: 'basic',
+          deploy_path: 'basic', health_check_url: 'basic',
           git_url: 'build', git_cred_id: 'build', git_ref: 'build',
         }
         if (errField && tabOf[errField]) setActiveTab(tabOf[errField])
@@ -183,35 +175,23 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                   <Form.Item name="name" label="应用名称" rules={[{ required: true }]}>
                     <Input placeholder="如：用户服务" />
                   </Form.Item>
-                  <Form.Item
-                    name="app_type"
-                    label="应用类型"
-                    rules={[{ required: true }]}
-                    tooltip="单体应用：一个 Git 仓库编译出一个 jar；微服务应用：一个 Git 仓库编译出多个 jar（如 Spring Cloud 多模块项目）"
-                  >
-                    <Radio.Group>
-                      <Radio.Button value="jar">单体应用（一个 jar）</Radio.Button>
-                      <Radio.Button value="spring-cloud">微服务应用（多个 jar）</Radio.Button>
-                    </Radio.Group>
-                  </Form.Item>
-                  {appType === 'spring-cloud' && (
-                    <Typography.Text type="warning" style={{ fontSize: 12, display: 'block', marginTop: -16, marginBottom: 16 }}>
-                      💡 创建后请先在「微服务配置」Tab 添加各个微服务模块，再触发构建。
-                    </Typography.Text>
-                  )}
+                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 16 }}>
+                    💡 应用按 Git 仓库轻量建档；创建后在「服务」里扫描 Maven 模块，每个 service 再维护自己的端口、健康检查和部署参数。
+                  </Typography.Text>
 
                   <Form.Item name="deploy_path" label="部署绝对路径" rules={[{ required: true }]}>
                     <Input placeholder="如：/opt/apps/user-service" />
                   </Form.Item>
-                  <Form.Item name="port" label="服务端口" rules={[{ required: true }]}>
-                    <InputNumber min={1} max={65535} style={{ width: 160 }} />
-                  </Form.Item>
-                  <Form.Item name="health_check_url" label="健康检查路径">
+                  <Form.Item
+                    name="health_check_url"
+                    label={isEdit ? '应用级默认健康检查路径' : '默认健康检查路径（可选）'}
+                    tooltip="多 service 场景以 service 健康检查为准；这里作为默认兜底。"
+                  >
                     <Input placeholder="/actuator/health" />
                   </Form.Item>
                   {!isEdit && (
                     <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-                      💡 创建后进入「应用详情」配置运行时、蓝绿和部署相关参数。
+                    💡 创建后进入「应用详情 / 服务」扫描 Maven 模块并确认各 service 端口。
                     </Typography.Text>
                   )}
                 </>
@@ -296,7 +276,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                     💡 这里仅维护代码源和可构建 Ref。构建模块、Jar 匹配、Dockerfile 模板和镜像参数，请在「应用详情」配置。
                   </Typography.Text>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    💡 没有凭证？去左侧菜单「🔑 Git 凭证」先创建一个，再回来选。<br />
+                    💡 没有凭证？去左侧菜单「凭证」先创建一个，再回来选。<br />
                     💡 新建应用会先完成轻量建档，保存后自动进入详情页继续配置运行时与部署。
                   </Typography.Text>
                 </>

@@ -39,12 +39,13 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 
 	hostSvc := service.NewHostService(db, aes)
 	appSvc := service.NewAppService(db)
-	appServiceSvc := service.NewAppServiceService(db) // Sprint X.4：微服务层 CRUD
 	dockerfileTplSvc := service.NewDockerfileTemplateService(db)
-	depSvc := service.NewDeploymentService(db)
+	depSvc := service.NewDeploymentService(db, service.WithDeploymentRuntimeLogs(hostSvc, cfg.SSH.ConnectTimeout))
 	artSvc := service.NewArtifactService(db, cfg.Storage.ArtifactDir, int64(cfg.Storage.MaxUploadMB)<<20)
 	gitCredSvc := service.NewGitCredentialService(db, aes)
 	builderEnvSvc := service.NewBuilderEnvService(db)
+	appServiceSvc := service.NewAppServiceService(db,
+		service.WithAppServiceDiscovery(gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace)) // Sprint X.4：可部署服务 CRUD + Maven discover
 	buildSvc := service.NewBuildService(db, artSvc, gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace, cfg.Storage.MaxHistory, cfg.Builder.DockerEnabled)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
 	pipeSvc.SetPublisher(wsHub)  // 异步推送 step/status 到 hub
@@ -65,10 +66,13 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		hostH := handler.NewHostHandler(hostSvc)
 		v1.POST("/hosts", hostH.Create)
 		v1.GET("/hosts", hostH.List)
+		v1.GET("/hosts/metrics", hostH.Metrics)
 		v1.GET("/hosts/:id", hostH.Get)
 		v1.PUT("/hosts/:id", hostH.Update)
 		v1.DELETE("/hosts/:id", hostH.Delete)
 		v1.POST("/hosts/:id/test", hostH.TestConnect)
+		v1.GET("/hosts/:id/docker/containers", hostH.DockerContainers)
+		v1.GET("/hosts/:id/docker/logs", hostH.DockerLogs)
 
 		// 应用管理
 		appH := handler.NewAppHandler(appSvc)
@@ -78,10 +82,12 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.PUT("/apps/:id", appH.Update)
 		v1.DELETE("/apps/:id", appH.Delete)
 
-		// 微服务层 AppService（Sprint X.4）
+		// 可部署服务 AppService（Sprint X.4）
 		asH := handler.NewAppServiceHandler(appServiceSvc)
 		v1.POST("/apps/:id/services", asH.Create)
 		v1.GET("/apps/:id/services", asH.List)
+		v1.POST("/apps/:id/services/discover", asH.Discover)
+		v1.POST("/apps/:id/services/batch", asH.BatchImport)
 		v1.GET("/app-services/:id", asH.Get)
 		v1.PUT("/app-services/:id", asH.Update)
 		v1.DELETE("/app-services/:id", asH.Delete)
@@ -99,8 +105,11 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		depH := handler.NewDeploymentHandler(depSvc)
 		v1.POST("/apps/:id/hosts", depH.Bind)
 		v1.GET("/apps/:id/hosts", depH.ListByApp)
+		v1.POST("/apps/:id/hosts/runtime-check", depH.CheckRuntimeByApp)
 		v1.DELETE("/deployments/:id", depH.Unbind)
-		v1.PATCH("/deployments/:id", depH.UpdateGroup)
+		v1.GET("/deployments/:id/runtime-logs", depH.RuntimeLogs)
+		v1.POST("/deployments/:id/runtime/stop", depH.StopRuntime)
+		v1.POST("/deployments/:id/runtime/restart", depH.RestartRuntime)
 
 		// 制品（注册已有路径 + multipart 上传）
 		maxUp := int64(cfg.Storage.MaxUploadMB) << 20
@@ -121,6 +130,7 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.POST("/apps/:id/rollback", pipeH.Rollback)
 		v1.GET("/pipelines", pipeH.List)
 		v1.GET("/pipelines/:id", pipeH.Get)
+		v1.POST("/pipelines/:id/rollback", pipeH.RollbackRun)
 		v1.POST("/pipelines/:id/cancel", pipeH.Cancel)
 
 		// Git 凭证管理（Sprint 5.1）
