@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,8 +33,12 @@ func main() {
 	switch cmd {
 	case "serve":
 		runServe(args)
+	case "service-run":
+		runService(args)
 	case "hash-pwd":
 		runHashPwd(args)
+	case "init-config":
+		runInitConfig(args)
 	case "cleanup-apps":
 		runCleanupApps(args)
 	case "version", "-v", "--version":
@@ -54,6 +57,8 @@ func usage() {
 
 Usage:
   swift-devops serve --config <path>      Run the HTTP server
+  swift-devops service-run --config <p>   Run as Windows Service
+  swift-devops init-config --config <p>   Generate an initial config.yaml
   swift-devops cleanup-apps --config <p>  Wipe app data (apps/artifacts/deployments/runs)
                                           and drop legacy unique indexes (Sprint X.1)
   swift-devops hash-pwd <password>        Output bcrypt hash for a password
@@ -74,6 +79,21 @@ func runHashPwd(args []string) {
 }
 
 func runServe(args []string) {
+	cfgPath := parseConfigPath(args)
+	stop := make(chan struct{})
+	go func() {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, shutdownSignals()...)
+		<-signals
+		close(stop)
+	}()
+	if err := serve(cfgPath, stop); err != nil {
+		fmt.Fprintf(os.Stderr, "serve failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func parseConfigPath(args []string) string {
 	cfgPath := "/etc/swift-devops/config.yaml"
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--config" && i+1 < len(args) {
@@ -81,35 +101,33 @@ func runServe(args []string) {
 			i++
 		}
 	}
+	return cfgPath
+}
 
+func serve(cfgPath string, stop <-chan struct{}) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("load config: %w", err)
 	}
 	setupLogger(cfg)
 	slog.Info("starting swift-devops", "version", Version, "config", cfgPath)
 
 	db, err := store.Open(cfg.Database.DSN)
 	if err != nil {
-		slog.Error("open db failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("open db: %w", err)
 	}
 	if err := store.AutoMigrate(db); err != nil {
-		slog.Error("migrate failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("migrate: %w", err)
 	}
 
 	aes, err := crypto.NewAESGCM(cfg.Security.MasterKey)
 	if err != nil {
-		slog.Error("master_key invalid", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("master_key invalid: %w", err)
 	}
 
 	dist, err := fs.Sub(web.FS, "dist")
 	if err != nil {
-		slog.Error("embed dist failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("embed dist: %w", err)
 	}
 
 	gin.SetMode(cfg.Server.Mode)
@@ -123,22 +141,32 @@ func runServe(args []string) {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("listening", "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server died", "err", err)
-			os.Exit(1)
+			errCh <- err
+			return
 		}
+		errCh <- nil
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
-	slog.Info("shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
-	slog.Info("bye")
+	select {
+	case <-stop:
+		slog.Info("shutting down...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		<-errCh
+		slog.Info("bye")
+		return nil
+	case err := <-errCh:
+		if err != nil {
+			slog.Error("server died", "err", err)
+			return err
+		}
+		return nil
+	}
 }
 
 func setupLogger(cfg *config.Config) {

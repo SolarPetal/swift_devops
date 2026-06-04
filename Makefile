@@ -5,8 +5,11 @@ GOFLAGS    := -trimpath -ldflags "$(GO_LDFLAGS)"
 
 WEB_DIR    := web
 WEB_DIST   := $(WEB_DIR)/dist
+WIN_DIR    := dist/windows
+WIN_SETUP_ASSET_DIR := cmd/swift-devops-setup/assets
+WIN_SETUP := dist/release/$(APP)-setup-windows-amd64-$(VERSION).exe
 
-.PHONY: all build web go-build release release-arm64 run dev tidy fmt vet clean
+.PHONY: all build web go-build build-windows release release-arm64 release-windows run dev tidy fmt vet clean
 
 all: build
 
@@ -24,6 +27,11 @@ go-build:
 	@mkdir -p dist
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -o dist/$(APP) ./cmd/swift-devops
 
+# Windows exe（前端静态资源已 embed 到二进制）
+build-windows: web
+	@mkdir -p $(WIN_DIR)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -o $(WIN_DIR)/$(APP).exe ./cmd/swift-devops
+
 # 完整构建（前端 + 后端）
 build: web go-build
 
@@ -40,6 +48,13 @@ release-arm64: web
 	@mkdir -p dist/release
 	tar -czf dist/release/$(APP)-linux-arm64-$(VERSION).tar.gz -C dist $(APP)-arm64
 	cp deploy/install.sh dist/release/
+
+release-windows: build-windows
+	@mkdir -p dist/release
+	@mkdir -p $(WIN_SETUP_ASSET_DIR)
+	cp $(WIN_DIR)/$(APP).exe $(WIN_SETUP_ASSET_DIR)/$(APP).exe
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -tags windows_installer $(GOFLAGS) -o $(WIN_SETUP) ./cmd/swift-devops-setup
+	@echo ">> windows installer artifact: $(WIN_SETUP)"
 
 # --- 本地跑 ---
 run: build
@@ -63,3 +78,4 @@ vet:
 
 clean:
 	rm -rf dist $(WEB_DIST) $(WEB_DIR)/node_modules
+	rm -f $(WIN_SETUP_ASSET_DIR)/$(APP).exe

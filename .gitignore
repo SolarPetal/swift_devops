@@ -2,6 +2,7 @@
 /dist/
 /swift-devops
 *.exe
+cmd/swift-devops-setup/assets/swift-devops.exe
 
 # Web build & deps
 web/node_modules/
