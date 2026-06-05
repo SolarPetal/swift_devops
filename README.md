@@ -30,25 +30,6 @@ flowchart LR
   Hosts --> Docker[Docker]
 ```
 
-## 发布链路
-
-```mermaid
-flowchart TD
-  A[配置构建环境] --> B[添加 Git 凭证]
-  B --> C[纳管目标主机]
-  C --> D[创建应用与 AppService]
-  D --> E[触发 Git + Maven 构建]
-  E --> F[生成 Artifact / Bundle]
-  F --> G{选择发布策略}
-  G --> H[single]
-  G --> I[rolling]
-  H --> J[systemd / nohup / docker]
-  I --> J
-  J --> K[健康检查与实时日志]
-  K --> L[成功历史]
-  L --> M[rollback]
-```
-
 ## 核心能力
 
 - **主机纳管**：通过 SSH 管理 Linux 主机，支持密码 / 私钥认证、连通性检测、TOFU host key 记录与 Docker 容器/日志查询。
