@@ -344,6 +344,131 @@ export type DeploymentRuntimeAction = {
   operated_at: string
 }
 
+// --- 前端项目 Docker 部署 / 网关容器 ---
+
+export type FrontendPackageManager = 'auto' | 'npm' | 'pnpm' | 'yarn'
+
+export type FrontendAppConfig = {
+  id: number
+  app_id: number
+  service_code: string
+  package_manager: FrontendPackageManager
+  install_command: string
+  build_command: string
+  dist_dir: string
+  node_image: string
+  nginx_image: string
+  spa_fallback: boolean
+  container_name: string
+  target_port: number
+  dockerfile: string
+  nginx_config: string
+  docker_build_args: string
+  docker_run_args: string
+  created_at: string
+  updated_at: string
+}
+
+export type FrontendAppConfigInput = Partial<Omit<FrontendAppConfig, 'id' | 'app_id' | 'created_at' | 'updated_at'>>
+
+export type FrontendTemplatePreview = {
+  dockerfile: string
+  nginx_config: string
+}
+
+export type FrontendGateway = {
+  id: number
+  host_id: number
+  host_name: string
+  host_ip: string
+  container_name: string
+  network_name: string
+  image: string
+  http_port: number
+  https_port: number
+  config_dir: string
+  cert_dir: string
+  log_dir: string
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export type FrontendGatewayEnsureInput = {
+  container_name?: string
+  network_name?: string
+  image?: string
+  http_port?: number
+  https_port?: number
+  base_dir?: string
+  config_dir?: string
+  cert_dir?: string
+  log_dir?: string
+  start?: boolean
+  force_recreate?: boolean
+}
+
+export type FrontendGatewayRoute = {
+  id: number
+  gateway_id: number
+  host_id: number
+  app_id: number
+  app_code: string
+  app_name: string
+  service_code: string
+  domain: string
+  container_name: string
+  target_port: number
+  https: boolean
+  cert_path: string
+  key_path: string
+  enabled: boolean
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export type FrontendGatewayApply = {
+  gateway: FrontendGateway
+  routes: FrontendGatewayRoute[]
+  applied_at: string
+  message: string
+}
+
+export type FrontendGatewayPreview = {
+  route_id: number
+  file_name: string
+  content: string
+}
+
+export type FrontendDeployInput = {
+  host_id: number
+  service_code?: string
+  git_ref?: string
+  cred_id?: number
+  domain: string
+  https?: boolean
+  cert_path?: string
+  key_path?: string
+  apply_gateway?: boolean
+  force_recreate_gateway?: boolean
+}
+
+export type FrontendDeployResult = {
+  app_id: number
+  app_code: string
+  service_code: string
+  host_id: number
+  domain: string
+  container_name: string
+  image: string
+  commit_sha: string
+  remote_work_dir: string
+  gateway_route: FrontendGatewayRoute
+  gateway_apply?: FrontendGatewayApply
+  deployed_at: string
+}
+
 // --- 制品 ---
 
 export type Artifact = {

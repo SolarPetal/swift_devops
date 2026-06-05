@@ -38,3 +38,16 @@ func TestOpenRejectsUnsupportedDriverBeforeDial(t *testing.T) {
 		t.Fatal("expected unsupported driver error")
 	}
 }
+
+func TestAutoMigrateSQLite(t *testing.T) {
+	db, err := Open(DriverSQLite, ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite memory db: %v", err)
+	}
+	if err := AutoMigrate(db, DriverSQLite); err != nil {
+		t.Fatalf("AutoMigrate sqlite: %v", err)
+	}
+	if !db.Migrator().HasTable("hosts") {
+		t.Fatal("expected hosts table after AutoMigrate")
+	}
+}

@@ -44,6 +44,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
       form.setFieldsValue({
         app_code: editing.app_code,
         name: editing.name,
+        app_type: editing.app_type || 'jar',
         git_url: editing.git_url,
         git_cred_id: editing.git_cred_id,
         git_ref: refs[0],
@@ -53,6 +54,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
       })
     } else {
       form.setFieldsValue({
+        app_type: 'jar',
         health_check_url: '/actuator/health',
         git_url: '',
         git_cred_id: '',
@@ -103,7 +105,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
       const payload = {
         ...preservedValues,
         ...v,
-        app_type: isEdit ? (editing!.app_type || 'jar') : 'jar',
+        app_type: v.app_type || (isEdit ? (editing!.app_type || 'jar') : 'jar'),
         git_ref: refs.includes(selectedRef) ? selectedRef : refs[0],
         git_refs: refs,
       }
@@ -123,7 +125,7 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
       if (e?.errorFields && e.errorFields.length > 0) {
         const errField = e.errorFields[0].name?.[0]
         const tabOf: Record<string, string> = {
-          app_code: 'basic', name: 'basic',
+          app_code: 'basic', name: 'basic', app_type: 'basic',
           deploy_path: 'basic', health_check_url: 'basic',
           git_url: 'build', git_cred_id: 'build', git_ref: 'build',
         }
@@ -175,8 +177,22 @@ export default function AppForm({ open, editing, onClose, onSaved }: Props) {
                   <Form.Item name="name" label="应用名称" rules={[{ required: true }]}>
                     <Input placeholder="如：用户服务" />
                   </Form.Item>
+                  <Form.Item
+                    name="app_type"
+                    label="项目类型"
+                    rules={[{ required: true, message: '请选择项目类型' }]}
+                    tooltip="Java 项目统一通过扫描 Maven pom.xml 发现 service；前端项目走源码 Docker build + 网关容器转发。"
+                  >
+                    <Select
+                      disabled={isEdit}
+                      options={[
+                        { value: 'jar', label: 'Java Maven 项目（扫描 pom.xml）' },
+                        { value: 'frontend', label: '前端 SPA 应用（React / Vue）' },
+                      ]}
+                    />
+                  </Form.Item>
                   <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 16 }}>
-                    💡 应用按 Git 仓库轻量建档；创建后在「服务」里扫描 Maven 模块，每个 service 再维护自己的端口、健康检查和部署参数。
+                    💡 应用按 Git 仓库轻量建档；Java 应用创建后去「服务」扫描 Maven 模块，前端应用也按「服务 / 运行 / 构建 / 部署」完成配置和发布。
                   </Typography.Text>
 
                   <Form.Item name="deploy_path" label="部署绝对路径" rules={[{ required: true }]}>

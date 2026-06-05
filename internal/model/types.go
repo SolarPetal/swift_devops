@@ -34,7 +34,7 @@ type Application struct {
 	ID        uint   `gorm:"primaryKey" json:"id"`
 	AppCode   string `gorm:"size:50;uniqueIndex;not null" json:"app_code"`
 	Name      string `gorm:"size:100;not null" json:"name"`
-	AppType   string `gorm:"size:30" json:"app_type"` // jar / spring-cloud
+	AppType   string `gorm:"size:30" json:"app_type"` // jar / spring-cloud / frontend
 	GitURL    string `gorm:"size:255" json:"git_url"`
 	GitCredID string `gorm:"size:100" json:"git_cred_id"`
 	// GitRef Sprint X.1：默认分支/tag/commit，多 service 一次构建共用。
@@ -245,6 +245,73 @@ type Deployment struct {
 	Status                 string    `gorm:"size:20" json:"status"` // running / stopped / failed
 	CreatedAt              time.Time `json:"created_at"`
 	UpdatedAt              time.Time `json:"updated_at"`
+}
+
+// FrontendGatewayInstance 前端统一入口网关实例。
+//
+// 一个 Host 最多一个 gateway 容器，由它独占宿主机 80/443，并按域名把请求
+// 转发到同一 Docker network 内的前端项目容器。宿主机无需再安装 Nginx。
+type FrontendGatewayInstance struct {
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	HostID        uint   `gorm:"uniqueIndex;not null" json:"host_id"`
+	ContainerName string `gorm:"size:128;not null" json:"container_name"`
+	NetworkName   string `gorm:"size:128;not null" json:"network_name"`
+	Image         string `gorm:"size:255;not null" json:"image"`
+	HTTPPort      int    `gorm:"column:http_port;not null;default:80" json:"http_port"`
+	HTTPSPort     int    `gorm:"column:https_port;not null;default:443" json:"https_port"`
+	ConfigDir     string `gorm:"size:255;not null" json:"config_dir"`
+	CertDir       string `gorm:"size:255;not null" json:"cert_dir"`
+	LogDir        string `gorm:"size:255;not null" json:"log_dir"`
+	Status        string `gorm:"size:20;default:'pending'" json:"status"` // pending / running / failed
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// FrontendGatewayRoute 前端域名路由。
+//
+// 同一台 Host 上 domain 唯一；target 指向 gateway network 内的前端容器，
+// 因此前端容器不需要绑定宿主机端口。
+type FrontendGatewayRoute struct {
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	GatewayID     uint   `gorm:"index;not null" json:"gateway_id"`
+	HostID        uint   `gorm:"uniqueIndex:idx_frontend_gateway_host_domain;not null;index" json:"host_id"`
+	AppID         uint   `gorm:"index;not null" json:"app_id"`
+	ServiceCode   string `gorm:"size:50;not null" json:"service_code"`
+	Domain        string `gorm:"uniqueIndex:idx_frontend_gateway_host_domain;size:255;not null" json:"domain"`
+	ContainerName string `gorm:"size:128;not null" json:"container_name"`
+	TargetPort    int    `gorm:"not null;default:80" json:"target_port"`
+	HTTPS         bool   `gorm:"default:false" json:"https"`
+	CertPath      string `gorm:"size:255" json:"cert_path"`
+	KeyPath       string `gorm:"size:255" json:"key_path"`
+	Enabled       bool   `gorm:"default:true;index" json:"enabled"`
+	Status        string `gorm:"size:20;default:'pending'" json:"status"` // pending / active / disabled / failed
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// FrontendAppConfig 前端项目部署配置。
+//
+// 与 Java 的 Maven/Jar 配置分离：前端项目以源码目录为 Docker build context，
+// 在目标机器构建静态资源镜像，再通过 FrontendGatewayRoute 暴露域名。
+type FrontendAppConfig struct {
+	ID              uint   `gorm:"primaryKey" json:"id"`
+	AppID           uint   `gorm:"uniqueIndex:idx_frontend_config_app_service;not null;index" json:"app_id"`
+	ServiceCode     string `gorm:"uniqueIndex:idx_frontend_config_app_service;size:50;not null;default:'web'" json:"service_code"`
+	PackageManager  string `gorm:"size:20;not null;default:'auto'" json:"package_manager"` // auto / npm / pnpm / yarn
+	InstallCommand  string `gorm:"type:text" json:"install_command"`
+	BuildCommand    string `gorm:"type:text" json:"build_command"`
+	DistDir         string `gorm:"size:255;not null;default:'dist'" json:"dist_dir"`
+	NodeImage       string `gorm:"size:255;not null;default:'node:20-alpine'" json:"node_image"`
+	NginxImage      string `gorm:"size:255;not null;default:'nginx:1.27-alpine'" json:"nginx_image"`
+	SPAFallback     bool   `gorm:"default:true" json:"spa_fallback"`
+	ContainerName   string `gorm:"size:128" json:"container_name"`
+	TargetPort      int    `gorm:"not null;default:80" json:"target_port"`
+	Dockerfile      string `gorm:"type:text" json:"dockerfile"`
+	NginxConfig     string `gorm:"type:text" json:"nginx_config"`
+	DockerBuildArgs string `gorm:"type:text" json:"docker_build_args"`
+	DockerRunArgs   string `gorm:"type:text" json:"docker_run_args"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // PipelineRun 一次发布或构建任务。

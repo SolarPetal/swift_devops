@@ -306,8 +306,8 @@ func validateAppInput(in AppInput) error {
 		return apperr.New("BAD_REQUEST",
 			"app_code 必须以小写字母开头，2-50 位，仅含小写字母/数字/连字符", 400)
 	}
-	if in.AppType != "" && in.AppType != "jar" && in.AppType != "spring-cloud" {
-		return apperr.New("BAD_REQUEST", "app_type 必须为 jar 或 spring-cloud", 400)
+	if in.AppType != "" && in.AppType != "jar" && in.AppType != "spring-cloud" && in.AppType != "frontend" {
+		return apperr.New("BAD_REQUEST", "app_type 必须为 jar / spring-cloud / frontend", 400)
 	}
 	if in.EnvVars != "" {
 		var m map[string]string
@@ -356,7 +356,7 @@ func defaultAppType(t string) string {
 		return "jar"
 	}
 	// app_type 只作为历史兼容字段保留；新模型统一走 AppService。
-	if t == "spring-cloud" {
+	if t == "spring-cloud" || t == "frontend" {
 		return t
 	}
 	return "jar"

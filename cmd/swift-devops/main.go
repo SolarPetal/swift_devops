@@ -116,7 +116,7 @@ func serve(cfgPath string, stop <-chan struct{}) error {
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
-	if err := store.AutoMigrate(db); err != nil {
+	if err := store.AutoMigrate(db, cfg.Database.Driver); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 

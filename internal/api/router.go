@@ -41,12 +41,14 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	appSvc := service.NewAppService(db)
 	dockerfileTplSvc := service.NewDockerfileTemplateService(db)
 	depSvc := service.NewDeploymentService(db, service.WithDeploymentRuntimeLogs(hostSvc, cfg.SSH.ConnectTimeout))
+	frontendGatewaySvc := service.NewFrontendGatewayService(db, hostSvc, cfg.SSH.ConnectTimeout)
 	artSvc := service.NewArtifactService(db, cfg.Storage.ArtifactDir, int64(cfg.Storage.MaxUploadMB)<<20)
 	gitCredSvc := service.NewGitCredentialService(db, aes)
 	builderEnvSvc := service.NewBuilderEnvService(db)
 	appServiceSvc := service.NewAppServiceService(db,
 		service.WithAppServiceDiscovery(gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace)) // Sprint X.4：可部署服务 CRUD + Maven discover
 	buildSvc := service.NewBuildService(db, artSvc, gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace, cfg.Storage.MaxHistory, cfg.Builder.DockerEnabled)
+	frontendDeploySvc := service.NewFrontendDeployService(db, hostSvc, gitCredSvc, builderEnvSvc, frontendGatewaySvc, cfg.Storage.BuildWorkspace, cfg.SSH.ConnectTimeout)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
 	pipeSvc.SetPublisher(wsHub)  // 异步推送 step/status 到 hub
 	buildSvc.SetPublisher(wsHub) // Sprint 5.5：构建日志实时推 hub
@@ -74,6 +76,18 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/hosts/:id/docker/containers", hostH.DockerContainers)
 		v1.GET("/hosts/:id/docker/logs", hostH.DockerLogs)
 
+		// 前端统一入口网关（gateway container + domain routes）
+		fgH := handler.NewFrontendGatewayHandler(frontendGatewaySvc)
+		v1.PUT("/hosts/:id/frontend-gateway", fgH.EnsureGateway)
+		v1.GET("/hosts/:id/frontend-gateway", fgH.GetGateway)
+		v1.POST("/hosts/:id/frontend-gateway/apply", fgH.ApplyGateway)
+		v1.GET("/hosts/:id/frontend-gateway/routes", fgH.ListRoutes)
+		v1.POST("/hosts/:id/frontend-gateway/routes", fgH.CreateRoute)
+		v1.GET("/frontend-gateway/routes/:id", fgH.GetRoute)
+		v1.PUT("/frontend-gateway/routes/:id", fgH.UpdateRoute)
+		v1.DELETE("/frontend-gateway/routes/:id", fgH.DeleteRoute)
+		v1.GET("/frontend-gateway/routes/:id/preview", fgH.PreviewRoute)
+
 		// 应用管理
 		appH := handler.NewAppHandler(appSvc)
 		v1.POST("/apps", appH.Create)
@@ -81,6 +95,13 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/apps/:id", appH.Get)
 		v1.PUT("/apps/:id", appH.Update)
 		v1.DELETE("/apps/:id", appH.Delete)
+
+		// 前端项目 Docker 部署配置与触发
+		fdH := handler.NewFrontendDeployHandler(frontendDeploySvc)
+		v1.GET("/apps/:id/frontend-config", fdH.GetConfig)
+		v1.PUT("/apps/:id/frontend-config", fdH.SaveConfig)
+		v1.GET("/apps/:id/frontend-config/preview", fdH.Preview)
+		v1.POST("/apps/:id/frontend-deploy", fdH.Deploy)
 
 		// 可部署服务 AppService（Sprint X.4）
 		asH := handler.NewAppServiceHandler(appServiceSvc)

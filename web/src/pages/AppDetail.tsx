@@ -11,6 +11,9 @@ import type {
   BuildRun, GitCredential, BuilderEnv,
   AppService, AppServiceInput, ArtifactBundle, DockerfileTemplate, DockerfileTemplateInput, AppInput,
   DeploymentRuntimeAction, DeploymentRuntimeLogs, AppServiceSuggestion,
+  FrontendAppConfig, FrontendDeployInput, FrontendDeployResult, FrontendGateway,
+  FrontendGatewayPreview, FrontendGatewayRoute, FrontendPackageManager,
+  FrontendTemplatePreview,
 } from '../types'
 import { getApp, updateApp } from '../api/app'
 import { listHosts } from '../api/host'
@@ -32,6 +35,17 @@ import {
   updateAppService,
 } from '../api/appService'
 import { listDockerfileTemplates, createDockerfileTemplate, updateDockerfileTemplate, deleteDockerfileTemplate, ensureDefaultDockerfileTemplate } from '../api/dockerfile'
+import {
+  applyFrontendGateway,
+  deployFrontendApp,
+  ensureFrontendGateway,
+  getFrontendConfig,
+  getFrontendGateway,
+  listFrontendGatewayRoutes,
+  previewFrontendConfig,
+  previewFrontendGatewayRoute,
+  saveFrontendConfig,
+} from '../api/frontend'
 import { buildWSURL, issueWSTicket, type PipelineWSEvent, type BuildWSEvent } from '../api/ws'
 import { formatError } from '../api/client'
 import { EmptyState, PageHeader, StatCard, StatGrid } from '../components/PageFrame'
@@ -455,11 +469,36 @@ export default function AppDetail() {
 
   if (loadingApp && !app) return <Skeleton active />
   if (!app) return <Typography.Text type="danger">应用不存在</Typography.Text>
-  const dockerEnabled = app.build_mode === 'local-docker' || app.build_mode === 'remote-docker' || app.deploy_mode === 'docker'
-  const serviceSummary = summarizeServiceCard(appServices)
-  const portSummary = summarizePortCard(app, appServices)
+  const isFrontendApp = app.app_type === 'frontend'
+  const dockerEnabled = isFrontendApp || app.build_mode === 'local-docker' || app.build_mode === 'remote-docker' || app.deploy_mode === 'docker'
+  const serviceSummary = isFrontendApp
+    ? {
+        label: 'Frontend',
+        value: 'SPA',
+        description: '源码拉取后在目标机 docker build，静态资源容器通过统一 gateway container 暴露域名。',
+        tone: 'info' as StatCardTone,
+        meta: 'Frontend',
+      }
+    : summarizeServiceCard(appServices)
+  const portSummary = isFrontendApp
+    ? {
+        label: 'Gateway',
+        value: '80 / 443',
+        description: '宿主机只暴露网关容器端口；每个前端项目容器不直接占用宿主机端口。',
+        tone: 'success' as StatCardTone,
+        meta: 'Gateway 模式',
+      }
+    : summarizePortCard(app, appServices)
   const buildSourceSummary = summarizeBuildSourceCard(app)
-  const runtimePlanSummary = summarizeRuntimePlanCard(app, appServices)
+  const runtimePlanSummary = isFrontendApp
+    ? {
+        label: 'Runtime Plan',
+        value: 'Docker + Nginx',
+        description: '每个前端项目一个静态资源镜像；统一网关容器按 domain 转发。',
+        tone: 'info' as StatCardTone,
+        meta: 'Gateway Container',
+      }
+    : summarizeRuntimePlanCard(app, appServices)
 
   const openRuntimeEdit = async () => {
     runtimeForm.resetFields()
@@ -505,13 +544,18 @@ export default function AppDetail() {
         title={app.name}
         description={(
           <>
-            应用代号 <code>{app.app_code}</code> · Git 仓库 / Maven Service 交付单元。这里按概览、服务、构建、部署、运行组织主路径。
+            应用代号 <code>{app.app_code}</code>
+            {isFrontendApp
+              ? <> · 前端 SPA 源码部署，按 Docker 静态资源容器 + gateway container 暴露域名。</>
+              : <> · Git 仓库 / Maven Service 交付单元。这里按概览、服务、运行、构建、部署组织主路径。</>}
           </>
         )}
         actions={(
           <>
             <Button onClick={() => nav('/apps')}>返回列表</Button>
-            <Button type="primary" onClick={openRuntimeEdit}>编辑运行配置</Button>
+            {isFrontendApp
+              ? <Button type="primary" onClick={() => setActiveTab('deploy')}>进入部署</Button>
+              : <Button type="primary" onClick={openRuntimeEdit}>编辑运行配置</Button>}
           </>
         )}
         meta={(
@@ -687,10 +731,19 @@ export default function AppDetail() {
                 />
               ),
             },
-            { key: 'services',  label: '服务', children: <ServicesTab appId={appId} app={app} onServicesChange={setAppServices} /> },
-            { key: 'runtime', label: '运行', children: <HostBindTab appId={appId} app={app} /> },
-            { key: 'build', label: '构建', children: <ArtifactTab app={app} /> },
-            { key: 'deploy', label: '部署', children: <PipelineTab app={app} /> },
+            ...(isFrontendApp
+              ? [
+                  { key: 'services', label: '服务', children: <FrontendDeployTab app={app} phase="services" /> },
+                  { key: 'runtime', label: '运行', children: <FrontendDeployTab app={app} phase="runtime" /> },
+                  { key: 'build', label: '构建', children: <FrontendDeployTab app={app} phase="build" /> },
+                  { key: 'deploy', label: '部署', children: <FrontendDeployTab app={app} phase="deploy" /> },
+                ]
+              : [
+                  { key: 'services', label: '服务', children: <ServicesTab appId={appId} app={app} onServicesChange={setAppServices} /> },
+                  { key: 'runtime', label: '运行', children: <HostBindTab appId={appId} app={app} /> },
+                  { key: 'build', label: '构建', children: <ArtifactTab app={app} /> },
+                  { key: 'deploy', label: '部署', children: <PipelineTab app={app} /> },
+                ]),
           ]}
         />
       </Card>
@@ -758,6 +811,7 @@ function ApplicationOverviewTab({
 
   const serviceMode = describeServiceMode(services)
   const buildRefs = appBuildRefs(app)
+  const isFrontendApp = app.app_type === 'frontend'
   const enabledServices = services.filter((s) => s.enabled)
   const dockerEnabled = app.build_mode === 'local-docker' || app.build_mode === 'remote-docker' || app.deploy_mode === 'docker'
   const dockerImage = [app.docker_registry, app.docker_image_name || `${app.app_code}/{{SERVICE_CODE}}`].filter(Boolean).join('/') || `${app.app_code}/{{SERVICE_CODE}}`
@@ -773,6 +827,72 @@ function ApplicationOverviewTab({
   const missingArtifacts = deployments.filter((d) => !d.current_bundle_id && !d.current_artifact_id && !d.current_artifact_item_id)
   const failedBuilds = builds.filter((b) => b.status === 'failed')
   const failedPipelines = pipelines.filter((p) => p.status === 'failed')
+
+  if (isFrontendApp) {
+    const blockers = [
+      !app.git_url && {
+        tone: 'warning' as StatusTone,
+        label: '代码源',
+        title: 'Git 仓库未配置',
+        description: '构建会从 Git 拉取 React/Vue 源码，缺少 git_url 就无法生成前端镜像。',
+        action: <Button size="small" onClick={() => onJump('build')}>查看构建配置</Button>,
+      },
+      {
+        tone: 'info' as StatusTone,
+        label: '服务',
+        title: '前端 service 与 Java service 一样先建档',
+        description: '先确认 service_code、容器名和运行端口，再进入构建与部署。',
+        action: <Button size="small" onClick={() => onJump('services')}>配置服务</Button>,
+      },
+      {
+        tone: 'info' as StatusTone,
+        label: '部署',
+        title: '网关容器统一入口',
+        description: '每个前端项目一个静态资源容器；宿主机 80/443 只由 swift-devops-gateway 暴露。',
+        action: <Button size="small" type="primary" onClick={() => onJump('deploy')}>进入部署</Button>,
+      },
+    ].filter(Boolean) as Array<{
+      tone: StatusTone
+      label: string
+      title: string
+      description: string
+      action: React.ReactNode
+    }>
+
+    return (
+      <section className="workbench-tab app-overview-tab">
+        <div className="overview-grid">
+          <div className="overview-stack">
+            <Card className="workbench-card" title="前端应用摘要">
+              <Descriptions size="small" column={2}>
+                <Descriptions.Item label="模型">React / Vue SPA 源码部署</Descriptions.Item>
+                <Descriptions.Item label="默认构建 Ref"><code>{app.git_ref || 'main'}</code></Descriptions.Item>
+                <Descriptions.Item label="Git 仓库" span={2}><code>{app.git_url || '-'}</code></Descriptions.Item>
+                <Descriptions.Item label="可选构建 Ref" span={2}>
+                  {buildRefs.map(ref => <StatusTag key={ref}>{ref}</StatusTag>)}
+                </Descriptions.Item>
+                <Descriptions.Item label="远端工作目录" span={2}><code>{app.deploy_path}</code></Descriptions.Item>
+                <Descriptions.Item label="入口模型" span={2}>
+                  <Space style={{ flexWrap: 'wrap' }}>
+                    <StatusTag tone="info">Docker 静态资源容器</StatusTag>
+                    <StatusTag tone="success">Gateway Container</StatusTag>
+                    <Typography.Text type="secondary">同一宿主机可以部署多个域名，各自独立容器，由网关按 domain 转发。</Typography.Text>
+                  </Space>
+                </Descriptions.Item>
+              </Descriptions>
+            </Card>
+          </div>
+          <div className="overview-stack">
+            <Card className="workbench-card" title="需要关注">
+              <div className="action-list">
+                {blockers.map((item) => <DetailActionItem key={`${item.label}-${item.title}`} {...item} />)}
+              </div>
+            </Card>
+          </div>
+        </div>
+      </section>
+    )
+  }
 
   const blockers = [
     !app.git_url && {
@@ -925,6 +1045,608 @@ function ApplicationOverviewTab({
           </Card>
         </div>
       </div>
+    </section>
+  )
+}
+
+
+// ---------- 前端应用：服务 / 运行 / 构建 / 部署 ----------
+
+type FrontendWorkbenchPhase = 'services' | 'runtime' | 'build' | 'deploy'
+
+type FrontendConfigFormValues = {
+  service_code: string
+  package_manager: FrontendPackageManager
+  install_command?: string
+  build_command?: string
+  dist_dir: string
+  node_image: string
+  nginx_image: string
+  spa_fallback: boolean
+  container_name?: string
+  target_port: number
+  dockerfile?: string
+  nginx_config?: string
+  docker_build_args?: string
+  docker_run_args?: string
+}
+
+type FrontendDeployFormValues = FrontendDeployInput & {
+  https?: boolean
+  apply_gateway?: boolean
+  force_recreate_gateway?: boolean
+}
+
+const frontendGatewayStatusTag = (s?: string) => {
+  if (s === 'running') return <StatusTag tone="success">运行中</StatusTag>
+  if (s === 'failed') return <StatusTag tone="danger">异常</StatusTag>
+  if (s === 'pending') return <StatusTag tone="warning">待同步</StatusTag>
+  return <StatusTag>{s || '-'}</StatusTag>
+}
+
+const frontendRouteStatusTag = (row: FrontendGatewayRoute) => {
+  if (!row.enabled) return <StatusTag>停用</StatusTag>
+  if (row.status === 'active') return <StatusTag tone="success">active</StatusTag>
+  if (row.status === 'failed') return <StatusTag tone="danger">failed</StatusTag>
+  return <StatusTag tone="warning">{row.status || 'pending'}</StatusTag>
+}
+
+function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchPhase }) {
+  const [config, setConfig] = useState<FrontendAppConfig | null>(null)
+  const [hosts, setHosts] = useState<Host[]>([])
+  const [gateway, setGateway] = useState<FrontendGateway | null>(null)
+  const [routes, setRoutes] = useState<FrontendGatewayRoute[]>([])
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [deploying, setDeploying] = useState(false)
+  const [deployOpen, setDeployOpen] = useState(false)
+  const [deployResult, setDeployResult] = useState<FrontendDeployResult | null>(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [preview, setPreview] = useState<FrontendTemplatePreview | null>(null)
+  const [routePreview, setRoutePreview] = useState<FrontendGatewayPreview | null>(null)
+  const [routePreviewOpen, setRoutePreviewOpen] = useState(false)
+  const [gatewayHostID, setGatewayHostID] = useState<number | undefined>()
+  const [gatewayLoading, setGatewayLoading] = useState(false)
+  const [form] = Form.useForm<FrontendConfigFormValues>()
+  const [deployForm] = Form.useForm<FrontendDeployFormValues>()
+
+  const selectedHost = hosts.find((h) => h.id === gatewayHostID)
+  const serviceCode = config?.service_code || form.getFieldValue('service_code') || 'web'
+
+  const loadGatewayState = async (hostID?: number) => {
+    const id = Number(hostID || gatewayHostID || 0)
+    if (!id) {
+      setGateway(null)
+      setRoutes([])
+      return
+    }
+    setGatewayLoading(true)
+    try {
+      const [gw, routeRows] = await Promise.all([
+        getFrontendGateway(id).catch((e) => {
+          const msg = formatError(e)
+          if (msg.includes('不存在') || msg.includes('not found')) return null
+          throw e
+        }),
+        listFrontendGatewayRoutes(id),
+      ])
+      setGateway(gw)
+      setRoutes(routeRows)
+    } catch (e) {
+      setGateway(null)
+      setRoutes([])
+      message.warning(`网关状态读取失败：${formatError(e)}`)
+    } finally {
+      setGatewayLoading(false)
+    }
+  }
+
+  const applyConfigToForm = (cfg: FrontendAppConfig) => {
+    form.setFieldsValue({
+      service_code: cfg.service_code,
+      package_manager: cfg.package_manager,
+      install_command: cfg.install_command,
+      build_command: cfg.build_command,
+      dist_dir: cfg.dist_dir,
+      node_image: cfg.node_image,
+      nginx_image: cfg.nginx_image,
+      spa_fallback: cfg.spa_fallback,
+      container_name: cfg.container_name,
+      target_port: cfg.target_port,
+      dockerfile: cfg.dockerfile,
+      nginx_config: cfg.nginx_config,
+      docker_build_args: cfg.docker_build_args,
+      docker_run_args: cfg.docker_run_args,
+    })
+  }
+
+  const refresh = async () => {
+    setLoading(true)
+    try {
+      const requestedServiceCode = form.getFieldValue('service_code') || config?.service_code || 'web'
+      const [cfg, hostRows] = await Promise.all([
+        getFrontendConfig(app.id, requestedServiceCode),
+        listHosts(),
+      ])
+      setConfig(cfg)
+      setHosts(hostRows)
+      applyConfigToForm(cfg)
+      const nextHostID = gatewayHostID || hostRows[0]?.id
+      if (nextHostID && !gatewayHostID) setGatewayHostID(nextHostID)
+      if (nextHostID) void loadGatewayState(nextHostID)
+    } catch (e) {
+      message.error(formatError(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { refresh() }, [app.id, phase])
+
+  useEffect(() => {
+    if (!gatewayHostID) return
+    loadGatewayState(gatewayHostID)
+  }, [gatewayHostID])
+
+  const persistConfig = async (showSuccess = false) => {
+    const v = await form.validateFields()
+    const saved = await saveFrontendConfig(app.id, {
+      service_code: v.service_code || 'web',
+      package_manager: v.package_manager || 'auto',
+      install_command: v.install_command || '',
+      build_command: v.build_command || '',
+      dist_dir: v.dist_dir || 'dist',
+      node_image: v.node_image || 'node:20-alpine',
+      nginx_image: v.nginx_image || 'nginx:1.27-alpine',
+      spa_fallback: Boolean(v.spa_fallback),
+      container_name: v.container_name || '',
+      target_port: Number(v.target_port || 80),
+      dockerfile: v.dockerfile || '',
+      nginx_config: v.nginx_config || '',
+      docker_build_args: v.docker_build_args || '',
+      docker_run_args: v.docker_run_args || '',
+    })
+    setConfig(saved)
+    applyConfigToForm(saved)
+    if (showSuccess) message.success('前端服务配置已保存')
+    return saved
+  }
+
+  const handleSaveConfig = async () => {
+    setSaving(true)
+    try {
+      await persistConfig(true)
+    } catch (e: any) {
+      if (!e?.errorFields) message.error(formatError(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const openPreview = async () => {
+    try {
+      await persistConfig(false)
+      const code = form.getFieldValue('service_code') || serviceCode
+      setPreview(await previewFrontendConfig(app.id, code))
+      setPreviewOpen(true)
+    } catch (e: any) {
+      if (!e?.errorFields) message.error(formatError(e))
+    }
+  }
+
+  const openDeploy = () => {
+    const cfg = config
+    deployForm.resetFields()
+    deployForm.setFieldsValue({
+      host_id: gatewayHostID || hosts[0]?.id,
+      service_code: cfg?.service_code || form.getFieldValue('service_code') || 'web',
+      git_ref: app.git_ref || 'main',
+      cred_id: Number(app.git_cred_id || 0),
+      domain: '',
+      https: false,
+      apply_gateway: true,
+      force_recreate_gateway: false,
+    })
+    setDeployOpen(true)
+  }
+
+  const triggerDeploy = async () => {
+    setDeploying(true)
+    try {
+      const v = await deployForm.validateFields()
+      const payload: FrontendDeployInput = {
+        host_id: Number(v.host_id),
+        service_code: v.service_code || serviceCode,
+        git_ref: v.git_ref || app.git_ref || 'main',
+        domain: v.domain,
+        https: Boolean(v.https),
+        cert_path: v.cert_path || '',
+        key_path: v.key_path || '',
+        apply_gateway: Boolean(v.apply_gateway),
+        force_recreate_gateway: Boolean(v.force_recreate_gateway),
+      }
+      if (v.cred_id && Number(v.cred_id) > 0) payload.cred_id = Number(v.cred_id)
+      const out = await deployFrontendApp(app.id, payload)
+      setDeployResult(out)
+      setGatewayHostID(out.host_id)
+      await loadGatewayState(out.host_id)
+      message.success(`部署完成：${out.domain}`)
+      setDeployOpen(false)
+    } catch (e: any) {
+      if (e?.errorFields) return
+      message.error(formatError(e))
+    } finally {
+      setDeploying(false)
+    }
+  }
+
+  const ensureGateway = async (start: boolean) => {
+    if (!gatewayHostID) {
+      message.warning('请先选择目标主机')
+      return
+    }
+    setGatewayLoading(true)
+    try {
+      const gw = await ensureFrontendGateway(gatewayHostID, { start })
+      setGateway(gw)
+      await loadGatewayState(gatewayHostID)
+      message.success(start ? '网关容器已初始化并尝试启动' : '网关配置已初始化')
+    } catch (e) {
+      message.error(formatError(e))
+    } finally {
+      setGatewayLoading(false)
+    }
+  }
+
+  const applyGateway = async (forceRecreate = false) => {
+    if (!gatewayHostID) {
+      message.warning('请先选择目标主机')
+      return
+    }
+    setGatewayLoading(true)
+    try {
+      const out = await applyFrontendGateway(gatewayHostID, forceRecreate)
+      setGateway(out.gateway)
+      setRoutes(out.routes)
+      message.success(out.message || '网关配置已应用')
+    } catch (e) {
+      message.error(formatError(e))
+    } finally {
+      setGatewayLoading(false)
+    }
+  }
+
+  const openRoutePreview = async (row: FrontendGatewayRoute) => {
+    try {
+      setRoutePreview(await previewFrontendGatewayRoute(row.id))
+      setRoutePreviewOpen(true)
+    } catch (e) {
+      message.error(formatError(e))
+    }
+  }
+
+  const renderToolbar = () => {
+    if (phase === 'services') {
+      return (
+        <>
+          <Button type="primary" loading={saving} onClick={handleSaveConfig}>保存服务配置</Button>
+          <Button loading={loading} onClick={refresh}>刷新</Button>
+        </>
+      )
+    }
+    if (phase === 'runtime') {
+      return (
+        <>
+          <Button loading={gatewayLoading} disabled={!gatewayHostID} onClick={() => ensureGateway(false)}>初始化网关</Button>
+          <Button loading={gatewayLoading} disabled={!gatewayHostID} onClick={() => ensureGateway(true)}>初始化并启动</Button>
+          <Button type="primary" loading={gatewayLoading} disabled={!gatewayHostID} onClick={() => applyGateway(false)}>Apply Gateway</Button>
+          <Button danger loading={gatewayLoading} disabled={!gatewayHostID} onClick={() => applyGateway(true)}>重建网关</Button>
+          <Button loading={loading} onClick={refresh}>刷新</Button>
+        </>
+      )
+    }
+    if (phase === 'build') {
+      return (
+        <>
+          <Button type="primary" loading={saving} onClick={handleSaveConfig}>保存构建配置</Button>
+          <Button onClick={openPreview}>预览 Dockerfile</Button>
+          <Button loading={loading} onClick={refresh}>刷新</Button>
+        </>
+      )
+    }
+    return (
+      <>
+        <Button type="primary" loading={deploying} disabled={!app.git_url || hosts.length === 0} onClick={openDeploy}>触发部署</Button>
+        <Button loading={loading} onClick={refresh}>刷新</Button>
+      </>
+    )
+  }
+
+  const phaseHint: Record<FrontendWorkbenchPhase, string> = {
+    services: '前端也先维护 service：service_code、容器名、端口与 SPA fallback，和 Java service 的入口心智保持一致。',
+    runtime: '运行页只处理目标主机、gateway container 和 domain route，不混入构建参数。',
+    build: '构建页只维护 package manager、build command、Dockerfile 与 nginx.conf，并提供模板预览。',
+    deploy: app.git_url ? '部署页负责选择目标主机、Git Ref、域名并触发发布。' : '应用未配置 Git 仓库，无法拉取 React/Vue 源码。',
+  }
+
+  const serviceRows = config ? [config] : []
+
+  const renderServiceTab = () => (
+    <>
+      <Card className="workbench-card" size="small" title="服务列表">
+        <Space style={{ marginBottom: 12, flexWrap: 'wrap' }}>
+          <Tag color="blue">前端 service</Tag>
+          <Typography.Text type="secondary">一个前端 service 对应一个静态资源容器；多个域名/服务后续按 service_code 区分。</Typography.Text>
+        </Space>
+        <Table<FrontendAppConfig>
+          rowKey="service_code"
+          size="small"
+          loading={loading}
+          dataSource={serviceRows}
+          pagination={false}
+          locale={{ emptyText: <EmptyState title="还没有前端 service" description="保存下方服务配置后，会形成一个可部署的前端 service。" /> }}
+          columns={[
+            { title: 'service_code', dataIndex: 'service_code', render: (v: string) => <code>{v}</code> },
+            { title: '容器名', dataIndex: 'container_name', render: (v: string) => v ? <code>{v}</code> : <Typography.Text type="secondary">自动生成</Typography.Text> },
+            { title: '端口', dataIndex: 'target_port', width: 90 },
+            { title: 'SPA', dataIndex: 'spa_fallback', width: 90, render: (v: boolean) => v ? <Tag color="green">fallback</Tag> : <Tag>static</Tag> },
+            { title: '包管理器', dataIndex: 'package_manager', width: 120, render: (v: string) => <Tag>{v}</Tag> },
+          ]}
+        />
+      </Card>
+
+      <Card className="workbench-card" size="small" title="服务配置">
+        <Form form={form} layout="vertical" initialValues={{ service_code: 'web', package_manager: 'auto', spa_fallback: true, target_port: 80 }}>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item
+              name="service_code"
+              label="service_code"
+              style={{ flex: 1 }}
+              rules={[{ required: true, pattern: /^[a-z][a-z0-9-]{1,49}$/, message: '小写字母开头，2-50 位，仅小写字母/数字/连字符' }]}
+              tooltip="和 Java service_code 一样，是部署与路由的最小服务标识。"
+            >
+              <Input placeholder="web / h5 / business" />
+            </Form.Item>
+            <Form.Item name="container_name" label="容器名" style={{ flex: 1 }} tooltip="留空 = sd-fe-<app_code>-<service_code>">
+              <Input placeholder={`sd-fe-${app.app_code}-web`} />
+            </Form.Item>
+          </Space>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="target_port" label="容器端口" style={{ flex: 1 }} rules={[{ required: true }]}>
+              <InputNumber min={1} max={65535} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="spa_fallback" label="SPA fallback" valuePropName="checked" style={{ flex: 1 }} tooltip="React/Vue history 路由通常需要开启。">
+              <Switch />
+            </Form.Item>
+          </Space>
+          <Form.Item name="package_manager" hidden><Input /></Form.Item>
+          <Form.Item name="install_command" hidden><Input /></Form.Item>
+          <Form.Item name="build_command" hidden><Input /></Form.Item>
+          <Form.Item name="dist_dir" hidden><Input /></Form.Item>
+          <Form.Item name="node_image" hidden><Input /></Form.Item>
+          <Form.Item name="nginx_image" hidden><Input /></Form.Item>
+          <Form.Item name="dockerfile" hidden><Input /></Form.Item>
+          <Form.Item name="nginx_config" hidden><Input /></Form.Item>
+          <Form.Item name="docker_build_args" hidden><Input /></Form.Item>
+          <Form.Item name="docker_run_args" hidden><Input /></Form.Item>
+        </Form>
+      </Card>
+    </>
+  )
+
+  const renderRuntimeTab = () => (
+    <>
+      <Card className="workbench-card" title="运行入口 Gateway" size="small">
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <Select
+            value={gatewayHostID}
+            placeholder="选择目标主机"
+            onChange={setGatewayHostID}
+            options={hosts.map((h) => ({ value: h.id, label: `${h.name} (${h.ip})${h.status === 'online' ? ' · 在线' : ''}` }))}
+          />
+          <Descriptions size="small" column={2}>
+            <Descriptions.Item label="主机"><code>{selectedHost?.ip || '-'}</code></Descriptions.Item>
+            <Descriptions.Item label="状态">{frontendGatewayStatusTag(gateway?.status)}</Descriptions.Item>
+            <Descriptions.Item label="网关容器">{gateway?.container_name ? <code>{gateway.container_name}</code> : '-'}</Descriptions.Item>
+            <Descriptions.Item label="Network">{gateway?.network_name ? <code>{gateway.network_name}</code> : 'swift-devops-gateway'}</Descriptions.Item>
+            <Descriptions.Item label="端口">{gateway ? `${gateway.http_port}/${gateway.https_port}` : '80/443'}</Descriptions.Item>
+            <Descriptions.Item label="配置目录" span={2}>{gateway?.config_dir ? <code>{gateway.config_dir}</code> : '-'}</Descriptions.Item>
+          </Descriptions>
+          <Typography.Text type="secondary">
+            同一台机器部署多个前端时，只保留一个 gateway 容器占用宿主机 80/443；业务前端容器不直接暴露宿主机端口。
+          </Typography.Text>
+        </Space>
+      </Card>
+      {renderRoutesTable()}
+    </>
+  )
+
+  const renderBuildTab = () => (
+    <Card className="workbench-card" title="构建配置" size="small">
+      <Form form={form} layout="vertical" initialValues={{ service_code: 'web', package_manager: 'auto', dist_dir: 'dist', node_image: 'node:20-alpine', nginx_image: 'nginx:1.27-alpine', spa_fallback: true, target_port: 80 }}>
+        <Form.Item name="service_code" hidden><Input /></Form.Item>
+        <Form.Item name="container_name" hidden><Input /></Form.Item>
+        <Form.Item name="target_port" hidden><Input /></Form.Item>
+        <Form.Item name="spa_fallback" hidden valuePropName="checked"><Switch /></Form.Item>
+        <Space style={{ display: 'flex' }} align="start">
+          <Form.Item name="package_manager" label="包管理器" style={{ flex: 1 }} rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 'auto', label: 'auto（按 lock 文件自动识别）' },
+                { value: 'npm', label: 'npm' },
+                { value: 'pnpm', label: 'pnpm' },
+                { value: 'yarn', label: 'yarn' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="dist_dir" label="产物目录" style={{ flex: 1 }} rules={[{ required: true }]}>
+            <Input placeholder="dist / build" />
+          </Form.Item>
+        </Space>
+        <Space style={{ display: 'flex' }} align="start">
+          <Form.Item name="build_command" label="构建命令" style={{ flex: 1 }} tooltip="留空会按包管理器默认生成，例如 npm run build">
+            <Input placeholder="npm run build / pnpm build" />
+          </Form.Item>
+          <Form.Item name="install_command" label="安装命令覆盖" style={{ flex: 1 }} tooltip="留空走 lock 文件自动识别">
+            <Input placeholder="npm ci / pnpm install --frozen-lockfile" />
+          </Form.Item>
+        </Space>
+        <Space style={{ display: 'flex' }} align="start">
+          <Form.Item name="node_image" label="Node 构建镜像" style={{ flex: 1 }} rules={[{ required: true }]}>
+            <Input placeholder="node:20-alpine" />
+          </Form.Item>
+          <Form.Item name="nginx_image" label="运行镜像" style={{ flex: 1 }} rules={[{ required: true }]}>
+            <Input placeholder="nginx:1.27-alpine" />
+          </Form.Item>
+        </Space>
+        <Form.Item name="docker_build_args" label="docker build 参数">
+          <Input placeholder="--build-arg VITE_API_BASE=/api" />
+        </Form.Item>
+        <Form.Item name="docker_run_args" label="docker run 参数" tooltip="通常留空；系统会自动加入 swift-devops-gateway network。">
+          <Input.TextArea rows={2} placeholder="一般留空；需要环境变量时可写 -e KEY=value" />
+        </Form.Item>
+        <Form.Item name="dockerfile" label="自定义 Dockerfile（可选）" tooltip="留空使用系统生成模板；支持 {{NODE_IMAGE}} / {{NGINX_IMAGE}} / {{DIST_DIR}}。">
+          <Input.TextArea rows={8} style={{ fontFamily: 'monospace' }} placeholder="留空使用默认多阶段 Dockerfile" />
+        </Form.Item>
+        <Form.Item name="nginx_config" label="自定义容器内 nginx.conf（可选）">
+          <Input.TextArea rows={8} style={{ fontFamily: 'monospace' }} placeholder="留空使用默认 SPA 静态资源配置" />
+        </Form.Item>
+      </Form>
+    </Card>
+  )
+
+  const renderDeployTab = () => (
+    <>
+      <Card className="workbench-card" size="small" title="部署入口">
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap>
+            <StatusTag tone={app.git_url ? 'success' : 'warning'}>{app.git_url ? 'Git Ready' : 'Git 未配置'}</StatusTag>
+            <StatusTag tone={hosts.length > 0 ? 'success' : 'warning'}>{hosts.length > 0 ? `${hosts.length} 台主机` : '无主机'}</StatusTag>
+            <StatusTag tone="info">service: {serviceCode}</StatusTag>
+          </Space>
+          <Typography.Text type="secondary">
+            部署会执行 Git clone、写入 Dockerfile/nginx.conf、上传目标机、docker build/run，并创建或更新 gateway route。
+          </Typography.Text>
+          <Button type="primary" loading={deploying} disabled={!app.git_url || hosts.length === 0} onClick={openDeploy}>选择主机与域名部署</Button>
+        </Space>
+      </Card>
+      {deployResult && (
+        <Card className="workbench-card" title="最近一次部署" size="small">
+          <Descriptions size="small" column={2}>
+            <Descriptions.Item label="域名"><code>{deployResult.domain}</code></Descriptions.Item>
+            <Descriptions.Item label="容器"><code>{deployResult.container_name}</code></Descriptions.Item>
+            <Descriptions.Item label="镜像" span={2}><code>{deployResult.image}</code></Descriptions.Item>
+            <Descriptions.Item label="Commit"><code>{deployResult.commit_sha?.slice(0, 12)}</code></Descriptions.Item>
+            <Descriptions.Item label="时间">{formatDateTime(deployResult.deployed_at)}</Descriptions.Item>
+            <Descriptions.Item label="远端目录" span={2}><code>{deployResult.remote_work_dir}</code></Descriptions.Item>
+          </Descriptions>
+        </Card>
+      )}
+      {renderRoutesTable()}
+    </>
+  )
+
+  const renderRoutesTable = () => (
+    <Card className="workbench-card" title="Gateway routes" size="small">
+      <Table<FrontendGatewayRoute>
+        rowKey="id"
+        loading={gatewayLoading}
+        dataSource={routes}
+        pagination={false}
+        locale={{ emptyText: <EmptyState title="还没有前端域名路由" description="部署前端项目时会自动创建或更新 route。" /> }}
+        columns={[
+          { title: '域名', dataIndex: 'domain', render: (v: string, row) => <Space><code>{v}</code>{row.https && <Tag color="blue">HTTPS</Tag>}</Space> },
+          { title: '应用', render: (_, row) => <>{row.app_name || row.app_code} <Typography.Text type="secondary">/ {row.service_code}</Typography.Text></> },
+          { title: '容器', dataIndex: 'container_name', render: (v: string, row) => <code>{v}:{row.target_port}</code> },
+          { title: '状态', width: 120, render: (_, row) => frontendRouteStatusTag(row) },
+          { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (v: string) => formatDateTime(v) },
+          { title: '操作', width: 110, render: (_, row) => <Button size="small" onClick={() => openRoutePreview(row)}>预览</Button> },
+        ]}
+      />
+    </Card>
+  )
+
+  return (
+    <section className="workbench-tab frontend-deploy-tab">
+      <div className="workbench-toolbar">
+        <div className="workbench-toolbar-main">{renderToolbar()}</div>
+        <div className="workbench-hint">{phaseHint[phase]}</div>
+      </div>
+
+      {phase === 'services' && renderServiceTab()}
+      {phase === 'runtime' && renderRuntimeTab()}
+      {phase === 'build' && renderBuildTab()}
+      {phase === 'deploy' && renderDeployTab()}
+
+      <Modal
+        title="触发部署"
+        open={deployOpen}
+        onOk={triggerDeploy}
+        onCancel={() => setDeployOpen(false)}
+        okText="开始部署"
+        cancelText="取消"
+        width={680}
+        confirmLoading={deploying}
+        maskClosable={false}
+        keyboard={false}
+      >
+        <Form form={deployForm} layout="vertical">
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="host_id" label="目标主机" style={{ flex: 1 }} rules={[{ required: true, message: '请选择目标主机' }]}>
+              <Select options={hosts.map((h) => ({ value: h.id, label: `${h.name} (${h.ip})` }))} />
+            </Form.Item>
+            <Form.Item name="service_code" label="service_code" style={{ flex: 1 }} rules={[{ required: true }]}>
+              <Input />
+            </Form.Item>
+          </Space>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="git_ref" label="Git Ref" style={{ flex: 1 }} rules={[{ required: true }]}>
+              <Select showSearch options={appBuildRefs(app).map(ref => ({ value: ref, label: ref }))} />
+            </Form.Item>
+            <Form.Item name="cred_id" label="Git 凭证 ID" style={{ flex: 1 }} tooltip="默认来自应用 git_cred_id；公网仓可留 0。">
+              <InputNumber min={0} style={{ width: '100%' }} />
+            </Form.Item>
+          </Space>
+          <Form.Item name="domain" label="访问域名" rules={[{ required: true, message: '请输入域名，例如 www.xxx.top' }]}>
+            <Input placeholder="www.xxx.top / h5.xxx.top / business.xxx.top" />
+          </Form.Item>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="https" label="HTTPS" valuePropName="checked" style={{ width: 120 }}>
+              <Switch />
+            </Form.Item>
+            <Form.Item name="apply_gateway" label="部署后 Apply Gateway" valuePropName="checked" style={{ width: 190 }}>
+              <Switch />
+            </Form.Item>
+            <Form.Item name="force_recreate_gateway" label="强制重建 Gateway" valuePropName="checked" style={{ width: 190 }}>
+              <Switch />
+            </Form.Item>
+          </Space>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="cert_path" label="证书路径" style={{ flex: 1 }} tooltip="HTTPS 开启时需要是 gateway 容器内可读路径。">
+              <Input placeholder="/etc/nginx/certs/www/fullchain.pem" />
+            </Form.Item>
+            <Form.Item name="key_path" label="私钥路径" style={{ flex: 1 }}>
+              <Input placeholder="/etc/nginx/certs/www/privkey.pem" />
+            </Form.Item>
+          </Space>
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            首次构建可能较慢。目标机器需要 Docker，且 gateway 需要能占用 80/443。
+          </Typography.Paragraph>
+        </Form>
+      </Modal>
+
+      <Modal title="生成模板预览" open={previewOpen} onCancel={() => setPreviewOpen(false)} footer={null} width={980} destroyOnClose>
+        <Tabs
+          items={[
+            { key: 'dockerfile', label: 'Dockerfile', children: <LogTerminal text={preview?.dockerfile || ''} /> },
+            { key: 'nginx', label: 'nginx.conf', children: <LogTerminal text={preview?.nginx_config || ''} /> },
+          ]}
+        />
+      </Modal>
+
+      <Modal title={routePreview?.file_name || 'Route Nginx 配置'} open={routePreviewOpen} onCancel={() => setRoutePreviewOpen(false)} footer={null} width={900} destroyOnClose>
+        <LogTerminal text={routePreview?.content || ''} />
+      </Modal>
     </section>
   )
 }
