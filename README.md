@@ -156,14 +156,26 @@ web/dist/*
 
 ## Linux 生产部署
 
-`deploy/install.sh` 适用于 Linux + systemd，需要 root 权限。
+`deploy/install.sh` 适用于 Linux + systemd，需要 root 权限。发布版可以直接从 GitHub Release 拉取安装脚本：
 
 ```bash
-sudo bash deploy/install.sh                         # 从 release 下载安装
-sudo bash deploy/install.sh --port 9090             # 指定端口
-sudo bash deploy/install.sh --version v0.1.0        # 指定版本
-sudo bash deploy/install.sh --local ./pkg.tar.gz    # 使用本地 release 包
-sudo bash deploy/install.sh --upgrade               # 升级，保留配置和数据
+curl -fsSL https://github.com/SolarPetal/swift_devops/releases/latest/download/install.sh | sudo bash
+```
+
+常见参数：
+
+```bash
+# 指定端口
+curl -fsSL https://github.com/SolarPetal/swift_devops/releases/latest/download/install.sh | sudo bash -s -- --port 9090
+
+# 指定版本
+curl -fsSL https://github.com/SolarPetal/swift_devops/releases/download/v1.0.0/install.sh | sudo bash -s -- --version v1.0.0
+
+# 升级，保留配置和数据
+curl -fsSL https://github.com/SolarPetal/swift_devops/releases/latest/download/install.sh | sudo bash -s -- --upgrade
+
+# 使用本地 release 包
+sudo bash deploy/install.sh --local ./swift-devops-linux-amd64-v1.0.0.tar.gz
 ```
 
 安装脚本会完成：

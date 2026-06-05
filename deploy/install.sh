@@ -22,7 +22,8 @@ CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 PORT="${PORT:-8088}"
 VERSION="${VERSION:-latest}"
-DOWNLOAD_BASE="${DOWNLOAD_BASE:-https://github.com/yourname/swift-devops/releases/download}"
+REPO="${REPO:-SolarPetal/swift_devops}"
+RELEASES_BASE="${RELEASES_BASE:-https://github.com/${REPO}/releases}"
 LOCAL_PKG=""
 UPGRADE=0
 
@@ -46,7 +47,7 @@ preflight() {
     command -v tar >/dev/null || fatal "需要 tar"
 
     if ! command -v docker >/dev/null; then
-        warn "未检测到 Docker，Git 源码构建（CI 模式 B）将不可用；手动上传仍可用"
+        warn "未检测到 Docker：local-docker / remote-docker / Docker 运行时将不可用；local-jar 与 systemd/nohup 不受影响"
     fi
 
     case "$(uname -m)" in
@@ -95,6 +96,18 @@ create_user_and_dirs() {
 }
 
 # ============ 下载或拷贝二进制 ============
+resolve_version() {
+    if [[ "$VERSION" != "latest" ]]; then
+        return
+    fi
+
+    local latest_url
+    latest_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "${RELEASES_BASE}/latest")"         || fatal "无法解析 latest release：${RELEASES_BASE}/latest"
+    VERSION="${latest_url##*/}"
+    [[ "$VERSION" == v* ]] || fatal "latest release 解析异常: ${latest_url}"
+    info "解析 latest release: ${VERSION}"
+}
+
 fetch_binary() {
     local tmp; tmp="$(mktemp -d)"
     trap "rm -rf $tmp" EXIT
@@ -104,7 +117,9 @@ fetch_binary() {
         info "使用本地包: $LOCAL_PKG"
         tar -xzf "$LOCAL_PKG" -C "$tmp"
     else
-        local url="${DOWNLOAD_BASE}/${VERSION}/${APP_NAME}-linux-${ARCH}-${VERSION}.tar.gz"
+        resolve_version
+        local asset="${APP_NAME}-linux-${ARCH}-${VERSION}.tar.gz"
+        local url="${RELEASES_BASE}/download/${VERSION}/${asset}"
         info "下载: $url"
         curl -fsSL "$url" -o "$tmp/pkg.tar.gz" || fatal "下载失败，可用 --local 指定本地包"
         tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
@@ -160,10 +175,10 @@ storage:
   artifact_dir: ${DATA_DIR}/artifacts
   build_workspace: ${DATA_DIR}/build
   max_history: 30
+  max_upload_mb: 256
 
 builder:
-  docker_enabled: $(command -v docker >/dev/null && echo true || echo false)
-  maven_cache_dir: ${DATA_DIR}/.m2
+  docker_enabled: false
 
 ssh:
   pool_size_per_host: 2
@@ -226,7 +241,7 @@ start_and_verify() {
 
     local i
     for i in $(seq 1 30); do
-        if curl -fsS "http://127.0.0.1:${PORT}/api/v1/health" >/dev/null 2>&1; then
+        if curl --noproxy '*' -fsS "http://127.0.0.1:${PORT}/api/v1/health" >/dev/null 2>&1; then
             info "服务已启动"
             return
         fi
