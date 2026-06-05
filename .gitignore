@@ -36,3 +36,11 @@ Thumbs.db
 # Vite 配置 tsc 编译产物（tsc -b 生成）
 web/vite.config.d.ts
 web/vite.config.js
+
+# Local/private docs not published
+docs/UI_UX_REDESIGN.md
+
+# Ignore generated web dist files; keep tracked placeholder index.html
+web/dist/*
+!web/dist/
+!web/dist/index.html

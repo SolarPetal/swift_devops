@@ -124,15 +124,3 @@ web/                前端 React + Vite（embed 进二进制）
 deploy/             config 样例 + install.sh + systemd unit
 docs/               架构与路线图
 ```
-
-## 文档
-
-- [需求文档 (PRD)](swift_devops.md) — 产品需求与技术方案
-- [架构说明](docs/ARCH.md) — 分层、包职责、数据模型、关键决策
-- [开发路线图](docs/ROADMAP.md) — Sprint 进度与缺口
-- [UI/UX 重设计方案](docs/UI_UX_REDESIGN.md) — 信息架构、状态模型、视觉系统、组件规范与落地计划
-
-## 进度
-
-总览 → 应用 / 服务 → 构建 → 部署 / 回滚 → 运行检测 / 日志 主线已贯通（Sprint 1~5 + X 系列重构）。
-**待办**：监控告警（Sprint 6，未开工）。详见 [ROADMAP](docs/ROADMAP.md)。
