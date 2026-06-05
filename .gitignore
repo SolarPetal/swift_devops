@@ -38,6 +38,8 @@ web/vite.config.d.ts
 web/vite.config.js
 
 # Local/private docs not published
+swift_devops.md
+docs/ROADMAP.md
 docs/UI_UX_REDESIGN.md
 
 # Ignore generated web dist files; keep tracked placeholder index.html
