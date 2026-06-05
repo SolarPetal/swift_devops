@@ -159,6 +159,7 @@ server:
   mode: release
 
 database:
+  # 支持 sqlite / mysql / postgres；安装脚本默认生成 sqlite 配置
   driver: sqlite
   dsn: ${DATA_DIR}/swift-devops.db
 

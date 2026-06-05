@@ -3,8 +3,15 @@ server:
   mode: release           # release / debug
 
 database:
+  # 支持 sqlite / mysql / postgres；默认推荐 sqlite，切换数据库不会自动迁移历史数据
   driver: sqlite
   dsn: ./data/swift-devops.db
+  # MySQL 示例：
+  # driver: mysql
+  # dsn: swift:password@tcp(127.0.0.1:3306)/swift_devops?charset=utf8mb4&parseTime=True&loc=Local
+  # PostgreSQL 示例：
+  # driver: postgres
+  # dsn: host=127.0.0.1 user=swift password=password dbname=swift_devops port=5432 sslmode=disable TimeZone=Asia/Shanghai
 
 security:
   # 32 字节随机 base64，丢失则历史加密数据无法解密

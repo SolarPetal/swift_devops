@@ -112,7 +112,7 @@ func serve(cfgPath string, stop <-chan struct{}) error {
 	setupLogger(cfg)
 	slog.Info("starting swift-devops", "version", Version, "config", cfgPath)
 
-	db, err := store.Open(cfg.Database.DSN)
+	db, err := store.Open(cfg.Database.Driver, cfg.Database.DSN)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}

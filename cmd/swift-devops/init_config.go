@@ -121,6 +121,7 @@ func writeInitialConfig(opts initConfigOptions) (string, error) {
   mode: release
 
 database:
+  # 支持 sqlite / mysql / postgres；init-config 默认生成 sqlite 配置
   driver: sqlite
   dsn: %q
 

@@ -1,19 +1,72 @@
 package store
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/glebarez/sqlite"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
 	"swift-devops/internal/model"
 )
 
-// Open 打开 SQLite，WAL 模式，5 秒 busy timeout，开启外键。
-func Open(dsn string) (*gorm.DB, error) {
-	conn := dsn + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
-	return gorm.Open(sqlite.Open(conn), &gorm.Config{
+const (
+	DriverSQLite   = "sqlite"
+	DriverMySQL    = "mysql"
+	DriverPostgres = "postgres"
+)
+
+// NormalizeDriver 归一化 database.driver。
+// 支持别名：sqlite3 -> sqlite, pg/postgresql -> postgres。
+func NormalizeDriver(driver string) string {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", "sqlite", "sqlite3":
+		return DriverSQLite
+	case "mysql":
+		return DriverMySQL
+	case "postgres", "postgresql", "pg":
+		return DriverPostgres
+	default:
+		return strings.ToLower(strings.TrimSpace(driver))
+	}
+}
+
+// Open 按 database.driver 打开数据库连接。
+//
+// 支持：
+//   - sqlite:    纯 Go SQLite，自动开启 WAL / foreign_keys / busy_timeout
+//   - mysql:     github.com/go-sql-driver/mysql DSN
+//   - postgres:  pgx / PostgreSQL DSN
+func Open(driver, dsn string) (*gorm.DB, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, fmt.Errorf("database.dsn is required")
+	}
+
+	cfg := &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
-	})
+	}
+
+	switch NormalizeDriver(driver) {
+	case DriverSQLite:
+		return gorm.Open(sqlite.Open(sqliteDSN(dsn)), cfg)
+	case DriverMySQL:
+		return gorm.Open(mysql.Open(dsn), cfg)
+	case DriverPostgres:
+		return gorm.Open(postgres.Open(dsn), cfg)
+	default:
+		return nil, fmt.Errorf("unsupported database.driver %q (supported: sqlite, mysql, postgres)", driver)
+	}
+}
+
+func sqliteDSN(dsn string) string {
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 }
 
 func AutoMigrate(db *gorm.DB) error {

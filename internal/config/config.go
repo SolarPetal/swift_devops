@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,7 +27,7 @@ type ServerCfg struct {
 }
 
 type DBCfg struct {
-	Driver string `yaml:"driver"` // sqlite
+	Driver string `yaml:"driver"` // sqlite / mysql / postgres
 	DSN    string `yaml:"dsn"`
 }
 
@@ -94,9 +95,7 @@ func (c *Config) applyDefaults() {
 	if c.Server.Mode == "" {
 		c.Server.Mode = "release"
 	}
-	if c.Database.Driver == "" {
-		c.Database.Driver = "sqlite"
-	}
+	c.Database.Driver = normalizeDatabaseDriver(c.Database.Driver)
 	if c.Security.JWTTTL == 0 {
 		c.Security.JWTTTL = 24 * time.Hour
 	}
@@ -127,6 +126,11 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
+	switch c.Database.Driver {
+	case "sqlite", "mysql", "postgres":
+	default:
+		return fmt.Errorf("database.driver must be one of sqlite, mysql, postgres")
+	}
 	if c.Database.DSN == "" {
 		return fmt.Errorf("database.dsn is required")
 	}
@@ -143,4 +147,17 @@ func (c *Config) validate() error {
 		return fmt.Errorf("storage.artifact_dir is required")
 	}
 	return nil
+}
+
+func normalizeDatabaseDriver(driver string) string {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", "sqlite", "sqlite3":
+		return "sqlite"
+	case "mysql":
+		return "mysql"
+	case "postgres", "postgresql", "pg":
+		return "postgres"
+	default:
+		return strings.ToLower(strings.TrimSpace(driver))
+	}
 }

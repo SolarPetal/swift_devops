@@ -37,7 +37,7 @@ func runCleanupApps(args []string) {
 	}
 	setupLogger(cfg)
 
-	db, err := store.Open(cfg.Database.DSN)
+	db, err := store.Open(cfg.Database.Driver, cfg.Database.DSN)
 	if err != nil {
 		slog.Error("open db failed", "err", err)
 		os.Exit(1)

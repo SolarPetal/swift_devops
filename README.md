@@ -233,8 +233,16 @@ server:
   mode: release
 
 database:
+  # 支持 sqlite / mysql / postgres；默认推荐 sqlite
+  # 切换数据库不会自动迁移已有 SQLite 历史数据
   driver: sqlite
   dsn: ./data/swift-devops.db
+  # MySQL 示例：
+  # driver: mysql
+  # dsn: swift:password@tcp(127.0.0.1:3306)/swift_devops?charset=utf8mb4&parseTime=True&loc=Local
+  # PostgreSQL 示例：
+  # driver: postgres
+  # dsn: host=127.0.0.1 user=swift password=password dbname=swift_devops port=5432 sslmode=disable TimeZone=Asia/Shanghai
 
 security:
   master_key: "<base64 32B>"   # 加密 SSH/Git Secret，丢失后历史密文无法解密
@@ -265,6 +273,13 @@ log:
 ```
 
 > `master_key` 是加密 SSH 主机凭证和 Git Secret 的主密钥，请务必备份。丢失后只能重录相关凭证。
+
+数据库说明：
+
+- `sqlite`：默认模式，适合单机控制台，DSN 为数据库文件路径。
+- `mysql`：使用 `github.com/go-sql-driver/mysql` DSN，建议开启 `parseTime=True`。
+- `postgres`：使用 pgx/PostgreSQL DSN，支持 URL 或 key/value 格式。
+- 切换 `database.driver` 只影响新连接，不会自动迁移已有 SQLite 数据。
 
 构建环境不再通过 `config.yaml` 配 Maven 本地仓库，登录后到 **系统设置 / 构建环境** 配置：
 
