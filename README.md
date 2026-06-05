@@ -3,6 +3,52 @@
 > 面向 Java / Spring Boot 服务的轻量级自动化运维平台。
 > 单个 Go 二进制内嵌 React 前端，用 Web 操作完成主机纳管、源码构建、制品治理、部署、回滚与运行状态检查。
 
+## 30 秒看懂
+
+| 问题 | swift-devops 的回答 |
+|---|---|
+| 适合谁 | 需要把 Java / Spring Boot 服务从 Git 构建并发布到自有 Linux 主机的小团队 |
+| 解决什么 | 减少手工 SSH、手工传 jar、手工重启、手工查日志和手工回滚 |
+| 怎么交付 | 一个内嵌前端的 Go 二进制，后端 API、Web UI、SQLite 数据库和制品目录都在一台控制机上运行 |
+| 部署到哪里 | 通过 SSH 发布到 Linux 主机，运行时可选 `systemd`、`nohup` 或 `docker` |
+| 不是什么 | 不是 Kubernetes 平台，不负责 Service Mesh / HPA / 云资源编排 |
+
+## 架构概览
+
+```mermaid
+flowchart LR
+  Browser[Browser / Web UI] --> API[Go API / Gin]
+  API --> DB[(SQLite WAL)]
+  API --> Secrets[AES-GCM Secrets]
+  API --> WS[WebSocket Ticket + Hub]
+  API --> Builder[Git + Maven + Docker Builder]
+  Builder --> Artifacts[(Artifact / Bundle)]
+  API --> SSH[SSH Client Pool]
+  SSH --> Hosts[Linux Hosts]
+  Hosts --> Systemd[systemd]
+  Hosts --> Nohup[nohup]
+  Hosts --> Docker[Docker]
+```
+
+## 发布链路
+
+```mermaid
+flowchart TD
+  A[配置构建环境] --> B[添加 Git 凭证]
+  B --> C[纳管目标主机]
+  C --> D[创建应用与 AppService]
+  D --> E[触发 Git + Maven 构建]
+  E --> F[生成 Artifact / Bundle]
+  F --> G{选择发布策略}
+  G --> H[single]
+  G --> I[rolling]
+  H --> J[systemd / nohup / docker]
+  I --> J
+  J --> K[健康检查与实时日志]
+  K --> L[成功历史]
+  L --> M[rollback]
+```
+
 ## 核心能力
 
 - **主机纳管**：通过 SSH 管理 Linux 主机，支持密码 / 私钥认证、连通性检测、TOFU host key 记录与 Docker 容器/日志查询。
@@ -23,6 +69,21 @@
 | 前端 | React 18 · TypeScript · Ant Design 5 · Vite · Zustand |
 | 构建 | Git · Maven · pnpm/npm · 可选 Docker |
 | 部署 | 单二进制静态编译 · Linux systemd · Windows Service 安装器 |
+
+## 能力矩阵
+
+| 模块 | 能力 | 说明 |
+|---|---|---|
+| 主机 | SSH 纳管、连通性检测、Docker 容器/日志查询 | 支持密码和私钥；记录 host key，降低误连风险 |
+| 凭证 | Git HTTPS Token / SSH Key 加密保存 | 使用 `master_key` 加密，配置丢失后需重录 Secret |
+| 应用 | 应用 + 多 `AppService` 模型 | 适配单服务和 multi-module Spring Boot 项目 |
+| 构建 | Git clone、Maven package、jar 提取 | 构建环境由 UI 配置 Java / Maven / Git 路径 |
+| Docker | `local-docker` / `remote-docker` | 可本机构建镜像推送，也可部署时在目标机 build/run |
+| 制品 | Artifact / Bundle / 历史清理 | Bundle 用来保证多服务同一次构建版本一致 |
+| 部署 | `single` / `rolling` / `rollback` | rolling 支持批大小；rollback 基于成功历史新建流水线 |
+| 运行时 | `systemd` / `nohup` / `docker` | 按应用或服务选择，切换时清理旧 runtime 残留 |
+| 反馈 | 构建日志、部署步骤、运行日志 | 构建和部署走 WebSocket 实时推送 |
+| 审计 | JWT、登录限流、操作审计 | 适合内网控制台的基础安全闭环 |
 
 ## 功能入口
 
