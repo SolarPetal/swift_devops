@@ -23,9 +23,9 @@ storage:
   max_history: 30
 
 builder:
-  docker_enabled: false   # 装了 docker 再开
+  docker_enabled: false   # legacy 兼容字段；Maven 容器构建镜像功能已下线，当前不生效
   # maven 本地仓库 (maven_local_repo) 不在 config 里配，
-  # 登录 UI 后到「⚙ 构建环境」页填写；留空 = 用 mvn settings.xml 里的 <localRepository>
+  # 登录 UI 后到「系统设置 / 构建环境」页填写；留空 = 用 mvn settings.xml 里的 <localRepository>
 
 ssh:
   pool_size_per_host: 2
