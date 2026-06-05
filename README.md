@@ -68,7 +68,7 @@ flowchart TD
 | 后端 | Go 1.23 · Gin · GORM · SQLite/WAL（`glebarez/sqlite` 纯 Go）· WebSocket |
 | 前端 | React 18 · TypeScript · Ant Design 5 · Vite · Zustand |
 | 构建 | Git · Maven · pnpm/npm · 可选 Docker |
-| 部署 | 单二进制静态编译 · Linux systemd · Windows Service 安装器 |
+| 部署 | 单二进制静态编译 · Linux systemd |
 
 ## 能力矩阵
 
@@ -158,7 +158,6 @@ make go-build        # 编译 Linux amd64 后端二进制，要求 web/dist/inde
 make build           # web + go-build
 make release         # Linux amd64 tar.gz + install.sh
 make release-arm64   # Linux arm64 tar.gz + install.sh
-make release-windows # Windows 主程序 + 安装器
 make fmt             # gofmt
 make vet             # go vet ./...
 make tidy            # go mod tidy
@@ -219,36 +218,10 @@ sudo bash deploy/uninstall.sh         # 保留数据 / 配置 / 日志
 sudo bash deploy/uninstall.sh --purge # 同时删除数据 / 配置 / 日志
 ```
 
-## Windows 安装器
-
-项目包含 Windows Service 安装器源码：
-
-```bash
-make release-windows
-```
-
-生成的安装器支持：
-
-```powershell
-swift-devops-setup.exe                         # 安装并启动服务
-swift-devops-setup.exe -port 9090              # 指定 HTTP 端口
-swift-devops-setup.exe -no-start               # 安装后不启动
-swift-devops-setup.exe -uninstall              # 卸载，保留数据
-swift-devops-setup.exe -uninstall -purge       # 卸载并删除数据
-```
-
-默认安装位置：
-
-```text
-C:\Program Files\Swift DevOps
-C:\ProgramData\Swift DevOps
-```
-
 ## CLI 命令
 
 ```bash
 swift-devops serve --config <path>         # 启动 HTTP 服务
-swift-devops service-run --config <path>   # Windows Service 入口
 swift-devops init-config --config <path>   # 生成初始 config.yaml
 swift-devops cleanup-apps --config <path>  # 清空应用链数据，保留主机/凭证/用户/构建环境/审计
 swift-devops hash-pwd <password>           # 生成 admin 密码 bcrypt 哈希
@@ -322,7 +295,6 @@ log:
 
 ```text
 cmd/swift-devops/          CLI 与 HTTP 服务入口
-cmd/swift-devops-setup/    Windows 安装器
 internal/api/              Gin 路由、handler、middleware、WebSocket 入口
 internal/config/           YAML 配置加载与默认值
 internal/model/            GORM 数据模型
