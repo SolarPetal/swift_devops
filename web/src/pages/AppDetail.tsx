@@ -13,7 +13,7 @@ import type {
   DeploymentRuntimeAction, DeploymentRuntimeLogs, AppServiceSuggestion,
   FrontendAppConfig, FrontendDeployInput, FrontendDeployResult, FrontendGateway,
   FrontendGatewayPreview, FrontendGatewayRoute, FrontendPackageManager,
-  FrontendTemplatePreview,
+  FrontendDeploymentState, FrontendRollbackInput, FrontendTemplatePreview,
 } from '../types'
 import { getApp, updateApp } from '../api/app'
 import { listHosts } from '../api/host'
@@ -41,9 +41,11 @@ import {
   ensureFrontendGateway,
   getFrontendConfig,
   getFrontendGateway,
+  listFrontendDeploymentStates,
   listFrontendGatewayRoutes,
   previewFrontendConfig,
   previewFrontendGatewayRoute,
+  rollbackFrontendApp,
   saveFrontendConfig,
 } from '../api/frontend'
 import { buildWSURL, issueWSTicket, type PipelineWSEvent, type BuildWSEvent } from '../api/ws'
@@ -1077,6 +1079,11 @@ type FrontendDeployFormValues = FrontendDeployInput & {
   force_recreate_gateway?: boolean
 }
 
+type FrontendRollbackFormValues = FrontendRollbackInput & {
+  apply_gateway?: boolean
+  force_recreate_gateway?: boolean
+}
+
 const frontendGatewayStatusTag = (s?: string) => {
   if (s === 'running') return <StatusTag tone="success">运行中</StatusTag>
   if (s === 'failed') return <StatusTag tone="danger">异常</StatusTag>
@@ -1096,11 +1103,16 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
   const [hosts, setHosts] = useState<Host[]>([])
   const [gateway, setGateway] = useState<FrontendGateway | null>(null)
   const [routes, setRoutes] = useState<FrontendGatewayRoute[]>([])
+  const [deploymentStates, setDeploymentStates] = useState<FrontendDeploymentState[]>([])
+  const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [deploying, setDeploying] = useState(false)
+  const [rollingBack, setRollingBack] = useState(false)
   const [deployOpen, setDeployOpen] = useState(false)
+  const [rollbackOpen, setRollbackOpen] = useState(false)
   const [deployResult, setDeployResult] = useState<FrontendDeployResult | null>(null)
+  const [pipelineDrawerRun, setPipelineDrawerRun] = useState<PipelineRun | null>(null)
   const [previewOpen, setPreviewOpen] = useState(false)
   const [preview, setPreview] = useState<FrontendTemplatePreview | null>(null)
   const [routePreview, setRoutePreview] = useState<FrontendGatewayPreview | null>(null)
@@ -1109,9 +1121,29 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
   const [gatewayLoading, setGatewayLoading] = useState(false)
   const [form] = Form.useForm<FrontendConfigFormValues>()
   const [deployForm] = Form.useForm<FrontendDeployFormValues>()
+  const [rollbackForm] = Form.useForm<FrontendRollbackFormValues>()
 
   const selectedHost = hosts.find((h) => h.id === gatewayHostID)
   const serviceCode = config?.service_code || form.getFieldValue('service_code') || 'web'
+  const isFrontendPipeline = (r: PipelineRun) => r.strategy === 'frontend' || r.strategy === 'frontend_rollback'
+  const deployDomain = Form.useWatch('domain', deployForm)
+  const rollbackDomain = Form.useWatch('domain', rollbackForm)
+  const deployHasDomain = Boolean(String(deployDomain || '').trim())
+  const rollbackHasDomain = Boolean(String(rollbackDomain || '').trim())
+  const frontendDomainText = (domain?: string) => String(domain || '').trim() || '无域名 / 直连'
+  const frontendDomainNode = (domain?: string) => {
+    const d = String(domain || '').trim()
+    return d ? <code>{d}</code> : <Typography.Text type="secondary">无域名 / 直连</Typography.Text>
+  }
+  const versionText = (image?: string, commit?: string) => {
+    if (!image) return <Typography.Text type="secondary">暂无</Typography.Text>
+    return (
+      <Space direction="vertical" size={0}>
+        <Tooltip title={image}><code>{image}</code></Tooltip>
+        {commit ? <Typography.Text type="secondary">{commit.slice(0, 12)}</Typography.Text> : null}
+      </Space>
+    )
+  }
 
   const loadGatewayState = async (hostID?: number) => {
     const id = Number(hostID || gatewayHostID || 0)
@@ -1160,16 +1192,33 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
     })
   }
 
+  const refreshFrontendPipelineRuns = async () => {
+    const runs = await listPipelines(app.id)
+    const rows = runs.filter(isFrontendPipeline)
+    setPipelineRuns(rows)
+    return rows
+  }
+
+  const refreshFrontendDeploymentStates = async () => {
+    const rows = await listFrontendDeploymentStates(app.id)
+    setDeploymentStates(rows)
+    return rows
+  }
+
   const refresh = async () => {
     setLoading(true)
     try {
       const requestedServiceCode = form.getFieldValue('service_code') || config?.service_code || 'web'
-      const [cfg, hostRows] = await Promise.all([
+      const [cfg, hostRows, runs, states] = await Promise.all([
         getFrontendConfig(app.id, requestedServiceCode),
         listHosts(),
+        listPipelines(app.id),
+        listFrontendDeploymentStates(app.id),
       ])
       setConfig(cfg)
       setHosts(hostRows)
+      setPipelineRuns(runs.filter(isFrontendPipeline))
+      setDeploymentStates(states)
       applyConfigToForm(cfg)
       const nextHostID = gatewayHostID || hostRows[0]?.id
       if (nextHostID && !gatewayHostID) setGatewayHostID(nextHostID)
@@ -1187,6 +1236,26 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
     if (!gatewayHostID) return
     loadGatewayState(gatewayHostID)
   }, [gatewayHostID])
+
+  useEffect(() => {
+    const hasRunning = pipelineRuns.some((r) => r.status === 'running')
+    if (!hasRunning) return
+    const t = setInterval(async () => {
+      try {
+        await Promise.all([
+          refreshFrontendPipelineRuns(),
+          refreshFrontendDeploymentStates(),
+        ])
+        if (gatewayHostID) await loadGatewayState(gatewayHostID)
+        if (pipelineDrawerRun?.id) {
+          setPipelineDrawerRun(await getPipeline(pipelineDrawerRun.id))
+        }
+      } catch {
+        // 轮询只是 WS 兜底，失败时不打扰用户当前操作。
+      }
+    }, 3000)
+    return () => clearInterval(t)
+  }, [app.id, gatewayHostID, pipelineRuns, pipelineDrawerRun?.id])
 
   const persistConfig = async (showSuccess = false) => {
     const v = await form.validateFields()
@@ -1244,39 +1313,133 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
       cred_id: Number(app.git_cred_id || 0),
       domain: '',
       https: false,
-      apply_gateway: true,
+      apply_gateway: false,
       force_recreate_gateway: false,
     })
     setDeployOpen(true)
+  }
+
+  const onDeployValuesChange = (changed: Partial<FrontendDeployFormValues>) => {
+    if (!Object.prototype.hasOwnProperty.call(changed, 'domain')) return
+    const hasDomain = Boolean(String(changed.domain || '').trim())
+    deployForm.setFieldsValue({
+      https: hasDomain ? deployForm.getFieldValue('https') : false,
+      apply_gateway: hasDomain,
+      force_recreate_gateway: hasDomain ? deployForm.getFieldValue('force_recreate_gateway') : false,
+    })
   }
 
   const triggerDeploy = async () => {
     setDeploying(true)
     try {
       const v = await deployForm.validateFields()
+      const domain = String(v.domain || '').trim()
+      const hasDomain = Boolean(domain)
       const payload: FrontendDeployInput = {
         host_id: Number(v.host_id),
         service_code: v.service_code || serviceCode,
         git_ref: v.git_ref || app.git_ref || 'main',
-        domain: v.domain,
-        https: Boolean(v.https),
-        cert_path: v.cert_path || '',
-        key_path: v.key_path || '',
-        apply_gateway: Boolean(v.apply_gateway),
-        force_recreate_gateway: Boolean(v.force_recreate_gateway),
+        domain: domain || undefined,
+        https: hasDomain ? Boolean(v.https) : false,
+        cert_path: hasDomain ? v.cert_path || '' : '',
+        key_path: hasDomain ? v.key_path || '' : '',
+        apply_gateway: hasDomain && Boolean(v.apply_gateway),
+        force_recreate_gateway: hasDomain && Boolean(v.force_recreate_gateway),
       }
       if (v.cred_id && Number(v.cred_id) > 0) payload.cred_id = Number(v.cred_id)
       const out = await deployFrontendApp(app.id, payload)
       setDeployResult(out)
       setGatewayHostID(out.host_id)
-      await loadGatewayState(out.host_id)
-      message.success(`部署完成：${out.domain}`)
+      await Promise.all([
+        refreshFrontendPipelineRuns(),
+        refreshFrontendDeploymentStates(),
+      ])
+      try {
+        setPipelineDrawerRun(await getPipeline(out.pipeline_run_id))
+      } catch {
+        // 已拿到 pipeline_run_id；详情读取失败时仍保留历史轮询。
+      }
+      message.success(`已触发前端部署：#${out.pipeline_run_id}（${frontendDomainText(out.domain)}）`)
       setDeployOpen(false)
     } catch (e: any) {
       if (e?.errorFields) return
       message.error(formatError(e))
+      try {
+        await Promise.all([
+          refreshFrontendPipelineRuns(),
+          refreshFrontendDeploymentStates(),
+        ])
+      } catch {
+        // 部署接口失败时仍尽量刷新失败历史；刷新失败不覆盖原错误提示。
+      }
     } finally {
       setDeploying(false)
+    }
+  }
+
+  const openRollback = (target?: FrontendDeploymentState) => {
+    const matchedRoute = routes.find((r) => r.app_id === app.id && r.service_code === serviceCode)
+    const domain = target?.domain || matchedRoute?.domain || ''
+    rollbackForm.resetFields()
+    rollbackForm.setFieldsValue({
+      host_id: target?.host_id || gatewayHostID || matchedRoute?.host_id || hosts[0]?.id,
+      service_code: target?.service_code || serviceCode,
+      domain,
+      apply_gateway: Boolean(domain),
+      force_recreate_gateway: false,
+    })
+    setRollbackOpen(true)
+  }
+
+  const onRollbackValuesChange = (changed: Partial<FrontendRollbackFormValues>) => {
+    if (!Object.prototype.hasOwnProperty.call(changed, 'domain')) return
+    const hasDomain = Boolean(String(changed.domain || '').trim())
+    rollbackForm.setFieldsValue({
+      apply_gateway: hasDomain,
+      force_recreate_gateway: hasDomain ? rollbackForm.getFieldValue('force_recreate_gateway') : false,
+    })
+  }
+
+  const triggerRollback = async () => {
+    setRollingBack(true)
+    try {
+      const v = await rollbackForm.validateFields()
+      const domain = String(v.domain || '').trim()
+      const hasDomain = Boolean(domain)
+      const payload: FrontendRollbackInput = {
+        host_id: Number(v.host_id),
+        service_code: v.service_code || serviceCode,
+        domain: domain || undefined,
+        apply_gateway: hasDomain && Boolean(v.apply_gateway),
+        force_recreate_gateway: hasDomain && Boolean(v.force_recreate_gateway),
+      }
+      const out = await rollbackFrontendApp(app.id, payload)
+      setDeployResult(out)
+      setGatewayHostID(out.host_id)
+      await Promise.all([
+        refreshFrontendPipelineRuns(),
+        refreshFrontendDeploymentStates(),
+      ])
+      try {
+        setPipelineDrawerRun(await getPipeline(out.pipeline_run_id))
+      } catch {
+        // 已拿到 pipeline_run_id；详情读取失败时仍保留历史轮询。
+      }
+      message.success(`已触发前端回滚：#${out.pipeline_run_id}（${frontendDomainText(out.domain)}）`)
+      setRollbackOpen(false)
+    } catch (e: any) {
+      if (e?.errorFields) return
+      message.error(formatError(e))
+      try {
+        await Promise.all([
+          refreshFrontendPipelineRuns(),
+          refreshFrontendDeploymentStates(),
+        ])
+      } catch {
+        // 回滚接口失败时仍尽量刷新失败历史；刷新失败不覆盖原错误提示。
+      }
+    } finally {
+      setRollingBack(false)
     }
   }
 
@@ -1357,6 +1520,7 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
     return (
       <>
         <Button type="primary" loading={deploying} disabled={!app.git_url || hosts.length === 0} onClick={openDeploy}>触发部署</Button>
+        <Button danger loading={rollingBack} disabled={hosts.length === 0} onClick={() => openRollback()}>回滚到上一版</Button>
         <Button loading={loading} onClick={refresh}>刷新</Button>
       </>
     )
@@ -1366,7 +1530,7 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
     services: '前端也先维护 service：service_code、容器名、端口与 SPA fallback，和 Java service 的入口心智保持一致。',
     runtime: '运行页只处理目标主机、gateway container 和 domain route，不混入构建参数。',
     build: '构建页只维护 package manager、build command、Dockerfile 与 nginx.conf，并提供模板预览。',
-    deploy: app.git_url ? '部署页负责选择目标主机、Git Ref、域名并触发发布。' : '应用未配置 Git 仓库，无法拉取 React/Vue 源码。',
+    deploy: app.git_url ? '部署页负责选择目标主机、Git Ref、域名触发发布；回滚会重启上一版 Docker image 并更新 route。' : '应用未配置 Git 仓库，无法拉取 React/Vue 源码。',
   }
 
   const serviceRows = config ? [config] : []
@@ -1525,23 +1689,34 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
             <StatusTag tone="info">service: {serviceCode}</StatusTag>
           </Space>
           <Typography.Text type="secondary">
-            部署会执行 Git clone、写入 Dockerfile/nginx.conf、上传目标机、docker build/run，并创建或更新 gateway route。
+            部署会执行 Git clone、写入 Dockerfile/nginx.conf、上传目标机、docker build/run；填写域名时才创建或更新 gateway route。
           </Typography.Text>
-          <Button type="primary" loading={deploying} disabled={!app.git_url || hosts.length === 0} onClick={openDeploy}>选择主机与域名部署</Button>
+          <Space wrap>
+            <Button type="primary" loading={deploying} disabled={!app.git_url || hosts.length === 0} onClick={openDeploy}>选择主机部署</Button>
+            <Button danger loading={rollingBack} disabled={hosts.length === 0} onClick={() => openRollback()}>回滚到上一版</Button>
+          </Space>
         </Space>
       </Card>
       {deployResult && (
-        <Card className="workbench-card" title="最近一次部署" size="small">
+        <Card className="workbench-card" title="最近一次触发" size="small">
           <Descriptions size="small" column={2}>
-            <Descriptions.Item label="域名"><code>{deployResult.domain}</code></Descriptions.Item>
+            <Descriptions.Item label="访问入口">{frontendDomainNode(deployResult.domain)}</Descriptions.Item>
             <Descriptions.Item label="容器"><code>{deployResult.container_name}</code></Descriptions.Item>
-            <Descriptions.Item label="镜像" span={2}><code>{deployResult.image}</code></Descriptions.Item>
-            <Descriptions.Item label="Commit"><code>{deployResult.commit_sha?.slice(0, 12)}</code></Descriptions.Item>
-            <Descriptions.Item label="时间">{formatDateTime(deployResult.deployed_at)}</Descriptions.Item>
-            <Descriptions.Item label="远端目录" span={2}><code>{deployResult.remote_work_dir}</code></Descriptions.Item>
+            <Descriptions.Item label="Pipeline">
+              <Space size={6}>
+                <code>#{deployResult.pipeline_run_id}</code>
+                {pipeStatusTag(deployResult.pipeline_status)}
+              </Space>
+            </Descriptions.Item>
+            <Descriptions.Item label="Service"><code>{deployResult.service_code}</code></Descriptions.Item>
+            <Descriptions.Item label="镜像" span={2}>{deployResult.image ? <code>{deployResult.image}</code> : <Typography.Text type="secondary">异步构建中</Typography.Text>}</Descriptions.Item>
+            <Descriptions.Item label="Commit">{deployResult.commit_sha ? <code>{deployResult.commit_sha.slice(0, 12)}</code> : '-'}</Descriptions.Item>
+            <Descriptions.Item label="触发时间">{formatDateTime(deployResult.deployed_at)}</Descriptions.Item>
+            <Descriptions.Item label="远端目录" span={2}>{deployResult.remote_work_dir ? <code>{deployResult.remote_work_dir}</code> : '-'}</Descriptions.Item>
           </Descriptions>
         </Card>
       )}
+      {renderDeploymentStateTable()}
       {renderRoutesTable()}
     </>
   )
@@ -1566,6 +1741,97 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
     </Card>
   )
 
+  const renderDeploymentStateTable = () => (
+    <Card className="workbench-card" title="前端版本账本" size="small">
+      <Table<FrontendDeploymentState>
+        rowKey="id"
+        loading={loading}
+        dataSource={deploymentStates}
+        pagination={deploymentStates.length > 6 ? { pageSize: 6, size: 'small' } : false}
+        locale={{ emptyText: <EmptyState title="还没有部署状态" description="第一次前端部署成功后，这里会记录 current / previous 镜像。" /> }}
+        columns={[
+          {
+            title: '域名 / 主机',
+            width: 260,
+            render: (_, row) => (
+              <Space direction="vertical" size={0}>
+                {frontendDomainNode(row.domain)}
+                <Typography.Text type="secondary">{row.host_name || row.host_ip} · {row.service_code}</Typography.Text>
+              </Space>
+            ),
+          },
+          {
+            title: '当前版本',
+            render: (_, row) => versionText(row.current_image, row.current_commit_sha),
+          },
+          {
+            title: '上一版',
+            render: (_, row) => versionText(row.previous_image, row.previous_commit_sha),
+          },
+          {
+            title: '当前 Pipeline',
+            width: 130,
+            render: (_, row) => row.current_pipeline_run_id
+              ? <Button size="small" onClick={() => getPipeline(row.current_pipeline_run_id).then(setPipelineDrawerRun).catch((e) => message.error(formatError(e)))}>
+                  #{row.current_pipeline_run_id}
+                </Button>
+              : '-',
+          },
+          {
+            title: '部署时间',
+            dataIndex: 'current_deployed_at',
+            width: 180,
+            render: (v: string) => formatDateTime(v),
+          },
+          {
+            title: '操作',
+            width: 130,
+            render: (_, row) => (
+              <Button
+                danger
+                size="small"
+                disabled={!row.previous_image}
+                onClick={() => openRollback(row)}
+              >
+                回滚此版本
+              </Button>
+            ),
+          },
+        ]}
+      />
+    </Card>
+  )
+
+  const renderFrontendPipelineHistory = () => (
+    <Card className="workbench-card" title="前端部署历史" size="small">
+      <Table<PipelineRun>
+        rowKey="id"
+        loading={loading}
+        dataSource={pipelineRuns}
+        pagination={pipelineRuns.length > 8 ? { pageSize: 8, size: 'small' } : false}
+        locale={{ emptyText: <EmptyState title="还没有前端部署历史" description="触发部署后，会在这里记录 PipelineRun 状态和错误快照。" /> }}
+        columns={[
+          { title: '#', dataIndex: 'id', width: 70 },
+          {
+            title: '类型',
+            dataIndex: 'strategy',
+            width: 110,
+            render: (s: string) => s === 'frontend_rollback' ? <Tag color="orange">回滚</Tag> : <Tag color="blue">部署</Tag>,
+          },
+          { title: '状态', dataIndex: 'status', width: 110, render: (s: string) => pipeStatusTag(s) },
+          { title: '触发人', dataIndex: 'triggered_by', width: 110 },
+          { title: '开始', dataIndex: 'started_at', width: 170, render: (s: string) => formatDateTime(s) },
+          { title: '结束', dataIndex: 'finished_at', width: 170, render: (s: string) => formatDateTime(s) },
+          {
+            title: '操作',
+            width: 90,
+            render: (_, r) => <Button size="small" onClick={() => setPipelineDrawerRun(r)}>详情</Button>,
+          },
+        ]}
+      />
+    </Card>
+  )
+
   return (
     <section className="workbench-tab frontend-deploy-tab">
       <div className="workbench-toolbar">
@@ -1577,6 +1843,7 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
       {phase === 'runtime' && renderRuntimeTab()}
       {phase === 'build' && renderBuildTab()}
       {phase === 'deploy' && renderDeployTab()}
+      {phase === 'deploy' && renderFrontendPipelineHistory()}
 
       <Modal
         title="触发部署"
@@ -1590,7 +1857,7 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
         maskClosable={false}
         keyboard={false}
       >
-        <Form form={deployForm} layout="vertical">
+        <Form form={deployForm} layout="vertical" onValuesChange={onDeployValuesChange}>
           <Space style={{ display: 'flex' }} align="start">
             <Form.Item name="host_id" label="目标主机" style={{ flex: 1 }} rules={[{ required: true, message: '请选择目标主机' }]}>
               <Select options={hosts.map((h) => ({ value: h.id, label: `${h.name} (${h.ip})` }))} />
@@ -1607,18 +1874,22 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
               <InputNumber min={0} style={{ width: '100%' }} />
             </Form.Item>
           </Space>
-          <Form.Item name="domain" label="访问域名" rules={[{ required: true, message: '请输入域名，例如 www.xxx.top' }]}>
-            <Input placeholder="www.xxx.top / h5.xxx.top / business.xxx.top" />
+          <Form.Item
+            name="domain"
+            label="访问域名（可选）"
+            tooltip="测试环境没有域名可以留空；留空时只启动容器并记录版本账本，不创建 Gateway route。"
+          >
+            <Input placeholder="可留空；有域名时填写 www.xxx.top / h5.xxx.top" />
           </Form.Item>
           <Space style={{ display: 'flex' }} align="start">
             <Form.Item name="https" label="HTTPS" valuePropName="checked" style={{ width: 120 }}>
-              <Switch />
+              <Switch disabled={!deployHasDomain} />
             </Form.Item>
             <Form.Item name="apply_gateway" label="部署后 Apply Gateway" valuePropName="checked" style={{ width: 190 }}>
-              <Switch />
+              <Switch disabled={!deployHasDomain} />
             </Form.Item>
             <Form.Item name="force_recreate_gateway" label="强制重建 Gateway" valuePropName="checked" style={{ width: 190 }}>
-              <Switch />
+              <Switch disabled={!deployHasDomain} />
             </Form.Item>
           </Space>
           <Space style={{ display: 'flex' }} align="start">
@@ -1630,7 +1901,50 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
             </Form.Item>
           </Space>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            首次构建可能较慢。目标机器需要 Docker，且 gateway 需要能占用 80/443。
+            首次构建可能较慢。目标机器需要 Docker；不填域名会跳过 Gateway。若测试环境要用 IP 直连，请在运行配置的 docker run 参数里配置{' '}
+            <code>-p 主机端口:容器端口</code>，例如 <code>-p 18080:80</code>。
+          </Typography.Paragraph>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="回滚到上一版"
+        open={rollbackOpen}
+        onOk={triggerRollback}
+        onCancel={() => setRollbackOpen(false)}
+        okText="开始回滚"
+        cancelText="取消"
+        width={620}
+        confirmLoading={rollingBack}
+        maskClosable={false}
+        keyboard={false}
+      >
+        <Form form={rollbackForm} layout="vertical" onValuesChange={onRollbackValuesChange}>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="host_id" label="目标主机" style={{ flex: 1 }} rules={[{ required: true, message: '请选择目标主机' }]}>
+              <Select options={hosts.map((h) => ({ value: h.id, label: `${h.name} (${h.ip})` }))} />
+            </Form.Item>
+            <Form.Item name="service_code" label="service_code" style={{ flex: 1 }} rules={[{ required: true }]}>
+              <Input />
+            </Form.Item>
+          </Space>
+          <Form.Item
+            name="domain"
+            label="访问域名（可选）"
+            tooltip="留空会回滚同一主机 / service_code 下的无域名测试部署。"
+          >
+            <Input placeholder="留空回滚无域名部署；有域名时填写 www.xxx.top" />
+          </Form.Item>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="apply_gateway" label="回滚后 Apply Gateway" valuePropName="checked" style={{ width: 190 }}>
+              <Switch disabled={!rollbackHasDomain} />
+            </Form.Item>
+            <Form.Item name="force_recreate_gateway" label="强制重建 Gateway" valuePropName="checked" style={{ width: 190 }}>
+              <Switch disabled={!rollbackHasDomain} />
+            </Form.Item>
+          </Space>
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            回滚会使用该访问入口在这台主机上的上一版 Docker image，重启当前容器并把 current/previous 互换；无域名部署会跳过 Gateway。
           </Typography.Paragraph>
         </Form>
       </Modal>
@@ -1647,6 +1961,10 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
       <Modal title={routePreview?.file_name || 'Route Nginx 配置'} open={routePreviewOpen} onCancel={() => setRoutePreviewOpen(false)} footer={null} width={900} destroyOnClose>
         <LogTerminal text={routePreview?.content || ''} />
       </Modal>
+
+      {phase === 'deploy' && (
+        <PipelineDetailDrawer run={pipelineDrawerRun} onClose={() => setPipelineDrawerRun(null)} />
+      )}
     </section>
   )
 }
@@ -2773,6 +3091,14 @@ const stageLabel: Record<PipelineStage, string> = {
   restart: '重启服务',
   health: '健康探针',
   nginx_apply: '历史切流步骤',
+  frontend_prepare: '前端部署准备',
+  git_clone: '拉取 Git 仓库',
+  frontend_package: '打包前端上下文',
+  docker_build: '构建 Docker 镜像',
+  docker_image_check: '检查 Docker 镜像',
+  docker_run: '启动前端容器',
+  gateway_route: '更新域名路由',
+  gateway_apply: '应用 Gateway 配置',
 }
 
 function stageTitle(step: StepResult): string {

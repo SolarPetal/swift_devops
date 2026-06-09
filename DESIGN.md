@@ -46,6 +46,16 @@ GORM(SQLite) + filesystem + SSH/builder/deploy packages
 | 部署 runtime | systemd / nohup / Docker 抽象 | 适配 root 与非 root、进程与容器场景 | 各 runtime 行为差异需测试覆盖 |
 | 实时反馈 | WebSocket + 一次性 ticket | 浏览器 WS 无法带 Authorization header，用短票降低泄露窗口 | ticket 生命周期和主题绑定需要严格校验 |
 | 发布策略 | single / rolling / blue-green | 覆盖常见 Java 服务发布方式 | 蓝绿依赖 Nginx upstream 配置约定 |
+| 回滚保护 | 目标版本预检先于停止当前服务 | 避免 previous artifact / image 被清理或 registry 不可用时先中断线上实例 | Docker 只能预检镜像可达；端口、run args、健康探针仍需在启动后验证 |
+
+## 部署与回滚不变量
+
+- **后端 jar（systemd/nohup）**：上传 previous artifact 之前先检查本地制品文件是否存在且不是目录。若制品被手工删除或清理，回滚在 `upload` 阶段失败，不进入 `restart`。
+- **后端 Docker runtime**：`RestartAndWait` 必须先确认目标镜像可用，再执行 `docker stop` / `docker rm`：
+  - `local-docker`：先 `docker pull <image>`，失败时保留当前容器。
+  - `remote-docker`：先 `docker image inspect <image>`，失败时保留当前容器。
+- **前端回滚**：读取 `FrontendDeploymentState.previous_image` 后，先在目标主机执行 `docker image inspect`，流水线记录 `docker_image_check`；只有镜像存在才允许重建前端容器。`domain` 为空时跳过 Gateway route / apply。
+- **账本语义**：后端以 `Deployment.current/previous_artifact(_item)_id` 形成回滚链；前端以 `(app_id, host_id, service_code, domain)` 维度的 `FrontendDeploymentState` 保存 current/previous image 与 commit，其中 `domain=""` 表示无域名测试部署。成功回滚后 current/previous 互换。
 
 ## 安全考量
 
@@ -72,3 +82,4 @@ GORM(SQLite) + filesystem + SSH/builder/deploy packages
 - Sprint X.12：应用新增表单轻量化；新增阶段只完成应用建档与代码源配置，构建模块、Jar 匹配、Dockerfile 模板和镜像参数统一在应用详情 / AppService 层维护。
 - Sprint X.13：AppService 编辑表单只保留 Dockerfile 模板绑定与必要运行参数，删除重复的构建/镜像覆盖入口；Dockerfile 参数以模板编辑为唯一入口。
 - Sprint X.14：应用管理新增/编辑表单只保留应用档案与代码源；运行时、部署方式和蓝绿发布配置统一迁移到应用详情的“运行与发布配置”入口。
+- Sprint X.15：前端部署改为异步 PipelineRun + `FrontendDeploymentState` 版本账本；前端与后端回滚统一补齐“目标版本预检先于停止当前服务”的保护链路。

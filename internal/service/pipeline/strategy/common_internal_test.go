@@ -1,6 +1,9 @@
 package strategy
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"swift-devops/internal/model"
@@ -113,5 +116,24 @@ func TestResolveServiceConfigDockerBuildModeForcesDockerRuntime(t *testing.T) {
 	_, _, _, _, _, _, _, deployMode := resolveServiceConfig(plan, app, &model.Deployment{})
 	if deployMode != "docker" {
 		t.Fatalf("deployMode = %q, want docker for docker build mode", deployMode)
+	}
+}
+
+func TestValidateLocalArtifactFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "app.jar")
+	if err := os.WriteFile(file, []byte("jar"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLocalArtifactFile(&model.Artifact{FilePath: file}); err != nil {
+		t.Fatalf("existing file should pass: %v", err)
+	}
+	if err := validateLocalArtifactFile(&model.Artifact{FilePath: filepath.Join(dir, "missing.jar")}); err == nil {
+		t.Fatal("missing file should fail")
+	} else if !strings.Contains(err.Error(), "本地制品文件不存在") {
+		t.Fatalf("unexpected missing file error: %v", err)
+	}
+	if err := validateLocalArtifactFile(&model.Artifact{FilePath: dir}); err == nil {
+		t.Fatal("directory path should fail")
 	}
 }

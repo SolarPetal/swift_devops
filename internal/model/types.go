@@ -314,6 +314,38 @@ type FrontendAppConfig struct {
 	UpdatedAt       time.Time
 }
 
+// FrontendDeploymentState 记录前端服务在某台主机某个访问入口上的当前/上一版镜像。
+//
+// 前端源码部署没有 jar Artifact；可回滚能力依赖目标机本地 Docker image。
+// 因此这里用 current/previous image 形成一跳回滚链：部署成功时 current -> previous，
+// 回滚成功时 previous -> current，同时把原 current 反向保存为 previous，支持来回切换。
+// Domain 为空表示无域名测试部署：只启动容器并记录账本，不创建 Gateway route。
+type FrontendDeploymentState struct {
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	AppID         uint   `gorm:"uniqueIndex:idx_frontend_state_app_host_service_domain;not null;index" json:"app_id"`
+	HostID        uint   `gorm:"uniqueIndex:idx_frontend_state_app_host_service_domain;not null;index" json:"host_id"`
+	ServiceCode   string `gorm:"uniqueIndex:idx_frontend_state_app_host_service_domain;size:50;not null" json:"service_code"`
+	Domain        string `gorm:"uniqueIndex:idx_frontend_state_app_host_service_domain;size:255;not null" json:"domain"`
+	ContainerName string `gorm:"size:128;not null" json:"container_name"`
+	TargetPort    int    `gorm:"not null;default:80" json:"target_port"`
+
+	CurrentImage         string    `gorm:"size:255" json:"current_image"`
+	CurrentCommitSHA     string    `gorm:"size:64" json:"current_commit_sha"`
+	CurrentRemoteWorkDir string    `gorm:"size:255" json:"current_remote_work_dir"`
+	CurrentPipelineRunID uint      `gorm:"index" json:"current_pipeline_run_id"`
+	CurrentDeployedAt    time.Time `json:"current_deployed_at"`
+
+	PreviousImage         string    `gorm:"size:255" json:"previous_image"`
+	PreviousCommitSHA     string    `gorm:"size:64" json:"previous_commit_sha"`
+	PreviousRemoteWorkDir string    `gorm:"size:255" json:"previous_remote_work_dir"`
+	PreviousPipelineRunID uint      `gorm:"index" json:"previous_pipeline_run_id"`
+	PreviousDeployedAt    time.Time `json:"previous_deployed_at"`
+
+	Status    string `gorm:"size:20;default:'active'" json:"status"` // active / rollbacked / failed
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // PipelineRun 一次发布或构建任务。
 //
 // Sprint X.1：新增 BundleID / PreviousBundleID（指向 [ArtifactBundle]）；

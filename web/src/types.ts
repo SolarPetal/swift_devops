@@ -446,10 +446,18 @@ export type FrontendDeployInput = {
   service_code?: string
   git_ref?: string
   cred_id?: number
-  domain: string
+  domain?: string
   https?: boolean
   cert_path?: string
   key_path?: string
+  apply_gateway?: boolean
+  force_recreate_gateway?: boolean
+}
+
+export type FrontendRollbackInput = {
+  host_id: number
+  service_code?: string
+  domain?: string
   apply_gateway?: boolean
   force_recreate_gateway?: boolean
 }
@@ -459,6 +467,8 @@ export type FrontendDeployResult = {
   app_code: string
   service_code: string
   host_id: number
+  pipeline_run_id: number
+  pipeline_status: string
   domain: string
   container_name: string
   image: string
@@ -467,6 +477,33 @@ export type FrontendDeployResult = {
   gateway_route: FrontendGatewayRoute
   gateway_apply?: FrontendGatewayApply
   deployed_at: string
+}
+
+export type FrontendDeploymentState = {
+  id: number
+  app_id: number
+  app_code: string
+  app_name: string
+  host_id: number
+  host_name: string
+  host_ip: string
+  service_code: string
+  domain: string
+  container_name: string
+  target_port: number
+  current_image: string
+  current_commit_sha: string
+  current_remote_work_dir: string
+  current_pipeline_run_id: number
+  current_deployed_at: string
+  previous_image: string
+  previous_commit_sha: string
+  previous_remote_work_dir: string
+  previous_pipeline_run_id: number
+  previous_deployed_at: string
+  status: string
+  created_at: string
+  updated_at: string
 }
 
 // --- 制品 ---
@@ -537,7 +574,22 @@ export type ArtifactBundle = {
 
 // --- 流水线 ---
 
-export type PipelineStage = 'dial' | 'env_check' | 'upload' | 'write_unit' | 'restart' | 'health' | 'nginx_apply'
+export type PipelineStage =
+  | 'dial'
+  | 'env_check'
+  | 'upload'
+  | 'write_unit'
+  | 'restart'
+  | 'health'
+  | 'nginx_apply'
+  | 'frontend_prepare'
+  | 'git_clone'
+  | 'frontend_package'
+  | 'docker_build'
+  | 'docker_image_check'
+  | 'docker_run'
+  | 'gateway_route'
+  | 'gateway_apply'
 
 export type StepResult = {
   host_id: number
@@ -568,7 +620,7 @@ export type PipelineRun = {
   previous_bundle_id: number
   is_current?: boolean
   current_partial?: boolean
-  strategy: string // 'single' | 'rolling' | 'rollback'
+  strategy: string // 'single' | 'rolling' | 'rollback' | 'frontend' | 'frontend_rollback'
   status: 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
   state_snapshot: string // JSON 字符串，前端 JSON.parse 成 RunSnapshot
   triggered_by: string

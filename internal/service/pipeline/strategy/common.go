@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -223,6 +224,9 @@ echo "RESOLVED=$RESOLVED"
 		emit(mkStepTimed(host.ID, host.Name, host.IP, StageUpload, true,
 			fmt.Sprintf("skip jar upload; image=%s", spec.DockerImage), "", upStart))
 	} else {
+		if err := validateLocalArtifactFile(art); err != nil {
+			return fail(StageUpload, err.Error(), upStart, host.Name, host.IP, "")
+		}
 		md5sum, err := dispatcher.Upload(art.FilePath, spec.JarPath())
 		if err != nil {
 			return fail(StageUpload, err.Error(), upStart, host.Name, host.IP, "")
@@ -493,6 +497,27 @@ func dockerfileForDeployment(plan *Plan, dep *model.Deployment) (string, string)
 		}
 	}
 	return "", ""
+}
+
+func validateLocalArtifactFile(art *model.Artifact) error {
+	if art == nil {
+		return fmt.Errorf("制品信息为空，无法上传")
+	}
+	filePath := strings.TrimSpace(art.FilePath)
+	if filePath == "" {
+		return fmt.Errorf("制品文件路径为空，无法上传")
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("本地制品文件不存在，无法部署/回滚：%s；可能已被手工删除或清理", filePath)
+		}
+		return fmt.Errorf("检查本地制品文件失败：%s：%w", filePath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("本地制品路径是目录，无法上传：%s", filePath)
+	}
+	return nil
 }
 
 func healthProbeDisabled(health string) bool {

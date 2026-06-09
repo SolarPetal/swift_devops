@@ -9,9 +9,13 @@ import (
 	sshpkg "swift-devops/internal/pkg/ssh"
 )
 
+type dockerCommandRunner interface {
+	Exec(ctx context.Context, cmd string) (sshpkg.ExecResult, error)
+}
+
 // dockerRuntime Docker 容器部署模式（Sprint X.11）
 type dockerRuntime struct {
-	client *sshpkg.Client
+	client dockerCommandRunner
 }
 
 func newDockerRuntime(client *sshpkg.Client) Runtime {
@@ -60,7 +64,7 @@ func (r *dockerRuntime) UnitArtifactPath(spec AppSpec) string {
 	return fmt.Sprintf("docker container: %s", spec.ContainerName())
 }
 
-// RestartAndWait 停止旧容器 → docker pull → docker run → 健康检查
+// RestartAndWait 先确认目标镜像可用，再停止旧容器 → docker run → 健康检查。
 func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeout time.Duration) (time.Duration, error) {
 	start := time.Now()
 	containerName := spec.ContainerName()
@@ -69,7 +73,14 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 	}
 	quotedContainerName := ShellQuote(containerName)
 
-	// 1. 停止并删除旧容器（如果存在）
+	// 1. 镜像预检必须发生在停止旧容器之前。
+	//    这样 rollback 目标镜像被清理 / registry 不可用时，不会先把当前服务打掉。
+	imageName := strings.TrimSpace(spec.DockerImage)
+	if err := r.ensureImageAvailable(ctx, spec, imageName); err != nil {
+		return 0, err
+	}
+
+	// 2. 停止并删除旧容器（如果存在）
 	stopCmd := fmt.Sprintf("docker stop %s 2>/dev/null || true", quotedContainerName)
 	if _, err := r.client.Exec(ctx, stopCmd); err != nil {
 		return 0, fmt.Errorf("停止旧容器失败: %w", err)
@@ -78,19 +89,6 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 	rmCmd := fmt.Sprintf("docker rm %s 2>/dev/null || true", quotedContainerName)
 	if _, err := r.client.Exec(ctx, rmCmd); err != nil {
 		return 0, fmt.Errorf("删除旧容器失败: %w", err)
-	}
-
-	// 2. docker pull（local-docker 从镜像仓库拉取；remote-docker 已在目标机 build，跳过 pull）
-	imageName := spec.DockerImage
-	if imageName == "" {
-		return 0, fmt.Errorf("DockerImage 为空，无法部署")
-	}
-
-	if !spec.RemoteDockerBuild {
-		pullCmd := fmt.Sprintf("docker pull %s", ShellQuote(imageName))
-		if _, err := r.client.Exec(ctx, pullCmd); err != nil {
-			return 0, fmt.Errorf("拉取镜像失败: %w", err)
-		}
 	}
 
 	// 3. docker run
@@ -108,8 +106,12 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 	}
 
 	runCmd := fmt.Sprintf("docker run --name %s %s %s", quotedContainerName, runArgs, ShellQuote(imageName))
-	if _, err := r.client.Exec(ctx, runCmd); err != nil {
+	runRes, err := r.client.Exec(ctx, runCmd)
+	if err != nil {
 		return 0, fmt.Errorf("启动容器失败: %w", err)
+	}
+	if runRes.ExitCode != 0 {
+		return 0, dockerCommandError("启动容器失败", runRes)
 	}
 
 	// 4. 等待容器进入 running 状态
@@ -124,6 +126,44 @@ func (r *dockerRuntime) RestartAndWait(ctx context.Context, spec AppSpec, timeou
 	}
 
 	return time.Since(start), fmt.Errorf("容器启动超时（%v）", timeout)
+}
+
+func (r *dockerRuntime) ensureImageAvailable(ctx context.Context, spec AppSpec, imageName string) error {
+	if strings.TrimSpace(imageName) == "" {
+		return fmt.Errorf("DockerImage 为空，无法部署")
+	}
+	if spec.RemoteDockerBuild {
+		inspectCmd := fmt.Sprintf("docker image inspect %s >/dev/null 2>&1", ShellQuote(imageName))
+		res, err := r.client.Exec(ctx, inspectCmd)
+		if err != nil {
+			return fmt.Errorf("检查远端镜像失败: %w", err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("目标镜像不可用，尚未停止当前容器：%s。请检查 remote-docker 构建是否成功，或确认镜像未被清理", imageName)
+		}
+		return nil
+	}
+
+	pullCmd := fmt.Sprintf("docker pull %s", ShellQuote(imageName))
+	res, err := r.client.Exec(ctx, pullCmd)
+	if err != nil {
+		return fmt.Errorf("拉取镜像失败，尚未停止当前容器: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return dockerCommandError("拉取镜像失败，尚未停止当前容器", res)
+	}
+	return nil
+}
+
+func dockerCommandError(label string, res sshpkg.ExecResult) error {
+	msg := strings.TrimSpace(res.Stderr)
+	if msg == "" {
+		msg = strings.TrimSpace(res.Stdout)
+	}
+	if msg == "" {
+		msg = fmt.Sprintf("exit=%d", res.ExitCode)
+	}
+	return fmt.Errorf("%s（exit=%d）：%s", label, res.ExitCode, msg)
 }
 
 func shellJoinFields(s string) string {

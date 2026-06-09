@@ -75,6 +75,7 @@
 | 多 service 一致性 | 一次构建 = `ArtifactBundle` + N×`ArtifactItem`，`git_commit_sha` 锚定（Sprint X.2） | 微服务整组同源；回滚以 Bundle 为粒度 |
 | 实时推送 | WebSocket Hub 广播 + 一次性 Ticket（pipeline 步骤 / build 日志） | 浏览器原生 WS 不带 header，5s 一次性票替代 JWT 进 query |
 | 蓝绿切流 | Nginx upstream 重写 + `nginx -s reload` | 毫秒级无损切换，无需 K8s |
+| 回滚保护 | 目标版本预检必须早于停止当前实例 | previous jar / image 缺失时应失败在预检或上传阶段，而不是先中断线上服务 |
 
 ## 5. 数据模型概览
 
@@ -94,3 +95,12 @@
 ```
 
 详见 `internal/model/types.go`。回滚以 Bundle 为粒度；`PipelineRun.previous_bundle_id` 与 `Deployment.*_artifact_item_id` 构成回滚链（制品清理时受保护）。
+
+## 6. 部署 / 回滚执行约束
+
+回滚链路遵循一个跨后端与前端的安全不变量：**目标版本可用性确认必须发生在停止当前服务之前**。
+
+- 后端 jar runtime（systemd/nohup）：先确认 previous artifact 的本地文件存在且可上传；制品缺失时停在 `upload` 阶段，不进入 `restart`。
+- 后端 Docker runtime：`local-docker` 先 `docker pull`，`remote-docker` 先 `docker image inspect`；成功后才允许 `docker stop` / `docker rm` 旧容器。
+- 前端回滚：按 `(app_id, host_id, service_code, domain)` 读取 `FrontendDeploymentState.previous_image`，其中 `domain=""` 表示无域名测试部署；在目标主机通过 `docker image inspect` 记录 `docker_image_check`，成功后才重建容器。有域名才更新 Gateway route，无域名则跳过 Gateway。
+- 成功回滚后，账本的 current / previous 指针互换，保证下一次回滚仍能找到反向目标。

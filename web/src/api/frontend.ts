@@ -4,6 +4,8 @@ import type {
   FrontendAppConfigInput,
   FrontendDeployInput,
   FrontendDeployResult,
+  FrontendDeploymentState,
+  FrontendRollbackInput,
   FrontendGateway,
   FrontendGatewayApply,
   FrontendGatewayEnsureInput,
@@ -34,6 +36,23 @@ export async function previewFrontendConfig(appId: number, serviceCode = 'web'):
 export async function deployFrontendApp(appId: number, input: FrontendDeployInput): Promise<FrontendDeployResult> {
   const r = await api.post<FrontendDeployResult>(`/apps/${appId}/frontend-deploy`, input, {
     timeout: 15 * 60_000,
+  })
+  return r.data
+}
+
+export async function listFrontendDeploymentStates(
+  appId: number,
+  params: { host_id?: number; service_code?: string; domain?: string } = {},
+): Promise<FrontendDeploymentState[]> {
+  const r = await api.get<{ items: FrontendDeploymentState[] }>(`/apps/${appId}/frontend-states`, {
+    params,
+  })
+  return r.data.items ?? []
+}
+
+export async function rollbackFrontendApp(appId: number, input: FrontendRollbackInput): Promise<FrontendDeployResult> {
+  const r = await api.post<FrontendDeployResult>(`/apps/${appId}/frontend-rollback`, input, {
+    timeout: 120_000,
   })
   return r.data
 }

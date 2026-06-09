@@ -1,9 +1,37 @@
 package deploy
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	sshpkg "swift-devops/internal/pkg/ssh"
 )
+
+type fakeDockerRunner struct {
+	commands []string
+	results  []sshpkg.ExecResult
+	errs     []error
+}
+
+func (f *fakeDockerRunner) Exec(_ context.Context, cmd string) (sshpkg.ExecResult, error) {
+	f.commands = append(f.commands, cmd)
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return sshpkg.ExecResult{ExitCode: -1}, err
+		}
+	}
+	if len(f.results) > 0 {
+		res := f.results[0]
+		f.results = f.results[1:]
+		return res, nil
+	}
+	return sshpkg.ExecResult{}, nil
+}
 
 // TestRenderStartScript_Systemd 验证 systemd 模式下 unit 文件保持原行为。
 // 不调用 nohup runtime，只对 RenderUnit 做回归（Sprint X.10 重构后行为应零变化）。
@@ -197,5 +225,106 @@ func TestNohupRuntime_HumanizeError(t *testing.T) {
 				t.Errorf("HumanizeError missing %q, got: %q", c.mustHave, got)
 			}
 		})
+	}
+}
+
+func TestDockerRuntimePullFailureDoesNotStopCurrentContainer(t *testing.T) {
+	runner := &fakeDockerRunner{
+		results: []sshpkg.ExecResult{{ExitCode: 1, Stderr: "manifest not found"}},
+	}
+	r := &dockerRuntime{client: runner}
+	_, err := r.RestartAndWait(context.Background(), AppSpec{
+		AppCode:     "demo",
+		ServiceName: "demo",
+		DeployPath:  "/opt/demo",
+		Port:        8080,
+		DockerImage: "registry.example.com/demo:old",
+	}, 0)
+	if err == nil {
+		t.Fatal("expected pull failure")
+	}
+	if !strings.Contains(err.Error(), "尚未停止当前容器") {
+		t.Fatalf("error should mention current container not stopped: %v", err)
+	}
+	if len(runner.commands) != 1 || !strings.HasPrefix(runner.commands[0], "docker pull ") {
+		t.Fatalf("expected only docker pull before failure, got: %#v", runner.commands)
+	}
+	for _, cmd := range runner.commands {
+		if strings.HasPrefix(cmd, "docker stop ") || strings.HasPrefix(cmd, "docker rm ") {
+			t.Fatalf("must not stop/remove before image preflight succeeds: %#v", runner.commands)
+		}
+	}
+}
+
+func TestDockerRuntimePullBeforeStopOnSuccess(t *testing.T) {
+	runner := &fakeDockerRunner{
+		results: []sshpkg.ExecResult{
+			{ExitCode: 0},                 // docker pull
+			{ExitCode: 0},                 // docker stop
+			{ExitCode: 0},                 // docker rm
+			{ExitCode: 0},                 // docker run
+			{ExitCode: 0, Stdout: "true"}, // docker inspect running
+		},
+	}
+	r := &dockerRuntime{client: runner}
+	_, err := r.RestartAndWait(context.Background(), AppSpec{
+		AppCode:     "demo",
+		ServiceName: "demo",
+		DeployPath:  "/opt/demo",
+		Port:        8080,
+		DockerImage: "registry.example.com/demo:ok",
+	}, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("restart should pass: %v", err)
+	}
+	if len(runner.commands) < 5 {
+		t.Fatalf("unexpected command count: %#v", runner.commands)
+	}
+	if !strings.HasPrefix(runner.commands[0], "docker pull ") ||
+		!strings.HasPrefix(runner.commands[1], "docker stop ") ||
+		!strings.HasPrefix(runner.commands[2], "docker rm ") ||
+		!strings.HasPrefix(runner.commands[3], "docker run ") {
+		t.Fatalf("unexpected command order: %#v", runner.commands)
+	}
+}
+
+func TestDockerRuntimeRemoteImageInspectBeforeStop(t *testing.T) {
+	runner := &fakeDockerRunner{
+		results: []sshpkg.ExecResult{{ExitCode: 1}},
+	}
+	r := &dockerRuntime{client: runner}
+	_, err := r.RestartAndWait(context.Background(), AppSpec{
+		AppCode:           "demo",
+		ServiceName:       "demo",
+		DeployPath:        "/opt/demo",
+		Port:              8080,
+		DockerImage:       "swift-devops/demo:old",
+		RemoteDockerBuild: true,
+	}, 0)
+	if err == nil {
+		t.Fatal("expected remote image inspect failure")
+	}
+	if len(runner.commands) != 1 || !strings.HasPrefix(runner.commands[0], "docker image inspect ") {
+		t.Fatalf("expected only image inspect before failure, got: %#v", runner.commands)
+	}
+}
+
+func TestDockerRuntimeExecNetworkErrorDoesNotStop(t *testing.T) {
+	runner := &fakeDockerRunner{
+		errs: []error{errors.New("ssh down")},
+	}
+	r := &dockerRuntime{client: runner}
+	_, err := r.RestartAndWait(context.Background(), AppSpec{
+		AppCode:     "demo",
+		ServiceName: "demo",
+		DeployPath:  "/opt/demo",
+		Port:        8080,
+		DockerImage: "registry.example.com/demo:old",
+	}, 0)
+	if err == nil || !strings.Contains(err.Error(), "尚未停止当前容器") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(runner.commands) != 1 || !strings.HasPrefix(runner.commands[0], "docker pull ") {
+		t.Fatalf("expected only docker pull on network error, got: %#v", runner.commands)
 	}
 }

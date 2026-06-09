@@ -48,10 +48,12 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 	appServiceSvc := service.NewAppServiceService(db,
 		service.WithAppServiceDiscovery(gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace)) // Sprint X.4：可部署服务 CRUD + Maven discover
 	buildSvc := service.NewBuildService(db, artSvc, gitCredSvc, builderEnvSvc, cfg.Storage.BuildWorkspace, cfg.Storage.MaxHistory, cfg.Builder.DockerEnabled)
-	frontendDeploySvc := service.NewFrontendDeployService(db, hostSvc, gitCredSvc, builderEnvSvc, frontendGatewaySvc, cfg.Storage.BuildWorkspace, cfg.SSH.ConnectTimeout)
 	pipeSvc := service.NewPipelineService(db, hostSvc, artSvc, cfg.SSH.ConnectTimeout)
-	pipeSvc.SetPublisher(wsHub)  // 异步推送 step/status 到 hub
-	buildSvc.SetPublisher(wsHub) // Sprint 5.5：构建日志实时推 hub
+	frontendDeploySvc := service.NewFrontendDeployService(db, hostSvc, gitCredSvc, builderEnvSvc, frontendGatewaySvc, cfg.Storage.BuildWorkspace, cfg.SSH.ConnectTimeout)
+	pipeSvc.SetPublisher(wsHub)           // 异步推送 step/status 到 hub
+	buildSvc.SetPublisher(wsHub)          // Sprint 5.5：构建日志实时推 hub
+	frontendDeploySvc.SetPublisher(wsHub) // 前端源码部署也走 pipeline:<id> WS 主题
+	frontendDeploySvc.SetPipelineCoordinator(pipeSvc)
 
 	// --- 受保护 API（JWT + 审计）---
 	v1 := r.Group("/api/v1")
@@ -101,7 +103,9 @@ func NewRouter(cfg *config.Config, db *gorm.DB, aes *crypto.AESGCM, distFS fs.FS
 		v1.GET("/apps/:id/frontend-config", fdH.GetConfig)
 		v1.PUT("/apps/:id/frontend-config", fdH.SaveConfig)
 		v1.GET("/apps/:id/frontend-config/preview", fdH.Preview)
+		v1.GET("/apps/:id/frontend-states", fdH.ListStates)
 		v1.POST("/apps/:id/frontend-deploy", fdH.Deploy)
+		v1.POST("/apps/:id/frontend-rollback", fdH.Rollback)
 
 		// 可部署服务 AppService（Sprint X.4）
 		asH := handler.NewAppServiceHandler(appServiceSvc)

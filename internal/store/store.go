@@ -87,6 +87,7 @@ func AutoMigrate(db *gorm.DB, driver string) error {
 		&model.FrontendGatewayInstance{},
 		&model.FrontendGatewayRoute{},
 		&model.FrontendAppConfig{},
+		&model.FrontendDeploymentState{},
 		&model.PipelineRun{},
 		&model.PipelineRunHost{},
 		&model.GitCredential{},

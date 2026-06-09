@@ -110,6 +110,36 @@ func NewPipelineService(db *gorm.DB, hostSvc *HostService, artSvc *ArtifactServi
 
 func (s *PipelineService) SetPublisher(p Publisher) { s.pub = p }
 
+// TryLockAppForExternalRun 为非 PipelineService 执行器复用同一 app 互斥闸。
+//
+// 例如前端源码部署由 FrontendDeployService 执行，但仍写 PipelineRun；
+// 它必须和 Java 部署 / rollback 共用同一把 app 锁，避免同一应用同时跑两条发布链。
+func (s *PipelineService) TryLockAppForExternalRun(appID uint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, busy := s.runningAppIDs[appID]; busy {
+		return apperr.New("CONFLICT",
+			fmt.Sprintf("应用 %d 已有流水线在跑，请等待结束", appID), 409)
+	}
+	s.runningAppIDs[appID] = struct{}{}
+	return nil
+}
+
+// ReleaseAppForExternalRun 释放 TryLockAppForExternalRun 获取的 app 锁。
+func (s *PipelineService) ReleaseAppForExternalRun(appID uint) {
+	s.releaseLock(appID)
+}
+
+// RegisterCancelForExternalRun 让外部执行器接入 /pipelines/:id/cancel。
+func (s *PipelineService) RegisterCancelForExternalRun(runID uint, cancel context.CancelFunc) {
+	s.registerCancel(runID, cancel)
+}
+
+// UnregisterCancelForExternalRun 移除外部执行器的 cancel hook。
+func (s *PipelineService) UnregisterCancelForExternalRun(runID uint) {
+	s.unregisterCancel(runID)
+}
+
 // TriggerOptions Trigger 的可选参数容器。
 type TriggerOptions struct {
 	Strategy  string // "single" / "rolling" / "rollback"（"" 默认 single）
