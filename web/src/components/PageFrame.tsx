@@ -7,11 +7,13 @@ type PageHeaderProps = {
   description?: ReactNode
   actions?: ReactNode
   meta?: ReactNode
+  /** 紧凑模式：日常工作页用，压缩 hero 高度把纵向空间还给数据 */
+  compact?: boolean
 }
 
-export function PageHeader({ eyebrow, title, description, actions, meta }: PageHeaderProps) {
+export function PageHeader({ eyebrow, title, description, actions, meta, compact }: PageHeaderProps) {
   return (
-    <header className="page-hero">
+    <header className={`page-hero${compact ? ' page-hero--compact' : ''}`}>
       <div className="page-hero-copy">
         <div className="page-eyebrow">{eyebrow}</div>
         <h1 className="page-title">{title}</h1>

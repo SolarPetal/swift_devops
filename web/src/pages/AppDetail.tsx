@@ -470,7 +470,22 @@ export default function AppDetail() {
   useEffect(() => { refresh() }, [appId])
 
   if (loadingApp && !app) return <Skeleton active />
-  if (!app) return <Typography.Text type="danger">应用不存在</Typography.Text>
+  if (!app) {
+    return (
+      <section className="page-shell">
+        <Card className="surface-card">
+          <EmptyState
+            title="应用不存在或加载失败"
+            description="它可能已被删除，或链接中的应用 ID 不正确。"
+          />
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 12, paddingBottom: 8 }}>
+            <Button type="primary" onClick={() => nav('/apps')}>返回应用列表</Button>
+            <Button onClick={refresh}>重试加载</Button>
+          </div>
+        </Card>
+      </section>
+    )
+  }
   const isFrontendApp = app.app_type === 'frontend'
   const dockerEnabled = isFrontendApp || app.build_mode === 'local-docker' || app.build_mode === 'remote-docker' || app.deploy_mode === 'docker'
   const serviceSummary = isFrontendApp
@@ -542,6 +557,7 @@ export default function AppDetail() {
   return (
     <section className="page-shell app-detail-page">
       <PageHeader
+        compact
         eyebrow="Application Detail"
         title={app.name}
         description={(
@@ -721,6 +737,9 @@ export default function AppDetail() {
         <Tabs
           activeKey={activeTab}
           onChange={setActiveTab}
+          // 切走即销毁、切回重挂载重拉数据：避免「在构建 Tab 触发构建、回到概览还是旧状态」的跨 Tab 过期。
+          // 前端工作台不受影响（单实例渲染在 Tabs 外部，编辑态跨 Tab 保留）。
+          destroyInactiveTabPane
           items={[
             {
               key: 'overview',
@@ -735,10 +754,12 @@ export default function AppDetail() {
             },
             ...(isFrontendApp
               ? [
-                  { key: 'services', label: '服务', children: <FrontendDeployTab app={app} phase="services" /> },
-                  { key: 'runtime', label: '运行', children: <FrontendDeployTab app={app} phase="runtime" /> },
-                  { key: 'build', label: '构建', children: <FrontendDeployTab app={app} phase="build" /> },
-                  { key: 'deploy', label: '部署', children: <FrontendDeployTab app={app} phase="deploy" /> },
+                  // 前端工作台单实例渲染在 Tabs 下方（见后），四个阶段共享同一份表单与网关状态，
+                  // 避免多实例 hidden 字段互相覆盖刚保存的配置。
+                  { key: 'services', label: '服务' },
+                  { key: 'runtime', label: '运行' },
+                  { key: 'build', label: '构建' },
+                  { key: 'deploy', label: '部署' },
                 ]
               : [
                   { key: 'services', label: '服务', children: <ServicesTab appId={appId} app={app} onServicesChange={setAppServices} /> },
@@ -748,6 +769,15 @@ export default function AppDetail() {
                 ]),
           ]}
         />
+        {isFrontendApp && (
+          // 始终保持挂载、仅在概览页隐藏：切去概览再回来不丢未保存的表单编辑。
+          <div style={{ display: activeTab === 'overview' ? 'none' : undefined }}>
+            <FrontendDeployTab
+              app={app}
+              phase={(activeTab === 'overview' ? 'services' : activeTab) as FrontendWorkbenchPhase}
+            />
+          </div>
+        )}
       </Card>
     </section>
   )
@@ -1230,7 +1260,8 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
     }
   }
 
-  useEffect(() => { refresh() }, [app.id, phase])
+  // 单实例工作台：只在应用切换时全量加载；phase 切换不重拉，避免覆盖未保存的表单编辑。
+  useEffect(() => { refresh() }, [app.id])
 
   useEffect(() => {
     if (!gatewayHostID) return
@@ -1539,7 +1570,7 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
     <>
       <Card className="workbench-card" size="small" title="服务列表">
         <Space style={{ marginBottom: 12, flexWrap: 'wrap' }}>
-          <Tag color="blue">前端 service</Tag>
+          <Tag color="cyan">前端 service</Tag>
           <Typography.Text type="secondary">一个前端 service 对应一个静态资源容器；多个域名/服务后续按 service_code 区分。</Typography.Text>
         </Space>
         <Table<FrontendAppConfig>
@@ -2198,7 +2229,7 @@ function HostBindTab({ appId, app }: { appId: number; app: App }) {
             dataIndex: 'service_code',
             width: 170,
             render: (v: string) => v
-              ? <Tag color="blue">{v}</Tag>
+              ? <Tag color="cyan">{v}</Tag>
               : <Tag>default</Tag>,
           },
           { title: '主机状态', dataIndex: 'host_status', width: 100, render: (s) => hostStatusTag(s) },
@@ -2380,9 +2411,27 @@ function ArtifactTab({ app }: { app: App }) {
   const [builderEnv, setBuilderEnv] = useState<BuilderEnv | null>(null)
   const [logText, setLogText] = useState('')
   const [logLoading, setLogLoading] = useState(false)
+  const buildLogTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const buildLogWSRef = useRef<WebSocket | null>(null)
 
-  const refresh = async () => {
-    setLoading(true)
+  const stopLogStream = () => {
+    if (buildLogTimerRef.current) {
+      clearInterval(buildLogTimerRef.current)
+      buildLogTimerRef.current = null
+    }
+    const ws = buildLogWSRef.current
+    if (ws) {
+      try { ws.onerror = null; ws.onmessage = null; ws.close() } catch {}
+      buildLogWSRef.current = null
+    }
+  }
+
+  // 路由跳转等卸载场景必须停掉日志轮询与 WS，否则会在后台一直跑
+  useEffect(() => stopLogStream, [])
+
+  // silent：轮询 / 后台收尾用，不触发表格 loading，避免 spinner 闪烁
+  const refresh = async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       // Sprint X.6 修复：构建成功后落 ArtifactBundle 表，旧上传/注册落 Artifact 表。
       // 两路并行拉，否则「从仓库构建」产出的 Bundle 在制品 Tab 里会完全看不见。
@@ -2392,14 +2441,14 @@ function ArtifactTab({ app }: { app: App }) {
       ])
       setList(as)
       setBundles(bs)
-    } catch (e) { message.error(formatError(e)) }
-    finally { setLoading(false) }
+    } catch (e) { if (!silent) message.error(formatError(e)) }
+    finally { if (!silent) setLoading(false) }
   }
-  const refreshBuilds = async () => {
-    setBuildsLoading(true)
+  const refreshBuilds = async (silent = false) => {
+    if (!silent) setBuildsLoading(true)
     try { setBuilds(await listBuilds(appId)) }
-    catch (e) { message.error(formatError(e)) }
-    finally { setBuildsLoading(false) }
+    catch (e) { if (!silent) message.error(formatError(e)) }
+    finally { if (!silent) setBuildsLoading(false) }
   }
   useEffect(() => {
     refresh()
@@ -2407,11 +2456,11 @@ function ArtifactTab({ app }: { app: App }) {
     getBuilderEnv().then(setBuilderEnv).catch(() => {})
   }, [appId])
 
-  // 有构建在 running → 每 3s 轮询刷新
+  // 有构建在 running → 每 3s 静默轮询刷新
   useEffect(() => {
     const hasBuilding = builds.some((b) => b.status === 'building')
     if (!hasBuilding) return
-    const t = setInterval(() => { refreshBuilds(); refresh() }, 3000)
+    const t = setInterval(() => { refreshBuilds(true); refresh(true) }, 3000)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [builds])
@@ -2497,22 +2546,25 @@ function ArtifactTab({ app }: { app: App }) {
 
   // 查看构建日志（Sprint 5.5：building 中优先 WS 实时推，连不上回退 2s 轮询）
   const startLogPolling = (id: number) => {
-    const t = setInterval(async () => {
+    stopLogStream()
+    buildLogTimerRef.current = setInterval(async () => {
       try {
         const [fresh, freshLog] = await Promise.all([getBuild(id), getBuildLog(id)])
         setLogText(freshLog)
         setLogTarget(fresh)
         if (fresh.status !== 'building') {
-          clearInterval(t)
-          ;(window as any).__buildLogTimer = null
-          refreshBuilds()
-          refresh()
+          if (buildLogTimerRef.current) {
+            clearInterval(buildLogTimerRef.current)
+            buildLogTimerRef.current = null
+          }
+          refreshBuilds(true)
+          refresh(true)
         }
       } catch {}
     }, 2000)
-    ;(window as any).__buildLogTimer = t
   }
   const openLog = async (b: BuildRun) => {
+    stopLogStream() // 防多开：切换日志目标前先停掉旧的轮询 / WS
     setLogTarget(b)
     setLogLoading(true)
     setLogText('')
@@ -2524,7 +2576,7 @@ function ArtifactTab({ app }: { app: App }) {
       try {
         const { ticket } = await issueWSTicket(`build:${b.id}`)
         const ws = new WebSocket(buildWSURL(`/api/v1/ws/builds/${b.id}`, ticket))
-        ;(window as any).__buildLogWS = ws
+        buildLogWSRef.current = ws
         ws.onmessage = (ev) => {
           try {
             const e = JSON.parse(ev.data) as BuildWSEvent
@@ -2536,15 +2588,15 @@ function ArtifactTab({ app }: { app: App }) {
               Promise.all([getBuild(b.id), getBuildLog(b.id)])
                 .then(([fresh, freshLog]) => { setLogTarget(fresh); setLogText(freshLog) })
                 .catch(() => {})
-              refreshBuilds(); refresh()
+              refreshBuilds(true); refresh(true)
               try { ws.close() } catch {}
-              ;(window as any).__buildLogWS = null
+              if (buildLogWSRef.current === ws) buildLogWSRef.current = null
             }
           } catch {}
         }
         ws.onerror = () => {
           try { ws.close() } catch {}
-          ;(window as any).__buildLogWS = null
+          if (buildLogWSRef.current === ws) buildLogWSRef.current = null
           startLogPolling(b.id) // 连不上 → 回退轮询
         }
       } catch {
@@ -2555,10 +2607,7 @@ function ArtifactTab({ app }: { app: App }) {
     } finally { setLogLoading(false) }
   }
   const closeLog = () => {
-    const t = (window as any).__buildLogTimer
-    if (t) { clearInterval(t); (window as any).__buildLogTimer = null }
-    const ws = (window as any).__buildLogWS
-    if (ws) { try { ws.onerror = null; ws.onmessage = null; ws.close() } catch {}; (window as any).__buildLogWS = null }
+    stopLogStream()
     setLogTarget(null)
     setLogText('')
   }
@@ -2645,7 +2694,8 @@ function ArtifactTab({ app }: { app: App }) {
         <Card className="workbench-card" size="small"
           title={`整组制品 Bundle（从仓库构建产出 · 共 ${bundles.length} 组）`}>
           <Table<ArtifactBundle>
-            rowKey="id" size="small" pagination={false}
+            rowKey="id" size="small"
+            pagination={bundles.length > 8 ? { pageSize: 8, size: 'small' } : false}
             dataSource={bundles}
             expandable={{
               expandedRowRender: (b) => (
@@ -2654,7 +2704,7 @@ function ArtifactTab({ app }: { app: App }) {
                   dataSource={b.items ?? []}
                   columns={[
                     { title: 'Service', dataIndex: 'service_code', width: 140,
-                      render: (v) => <Tag color="purple">{v}</Tag> },
+                      render: (v) => <Tag color="cyan">{v}</Tag> },
                     { title: '文件', dataIndex: 'file_name' },
                     { title: '路径', dataIndex: 'file_path', ellipsis: true,
                       render: (v) => <code>{v}</code> },
@@ -2663,7 +2713,7 @@ function ArtifactTab({ app }: { app: App }) {
                     { title: 'Dockerfile', dataIndex: 'dockerfile_name', width: 160,
                       render: (v) => v ? <Tag>{v}</Tag> : '—' },
                     { title: 'MD5', dataIndex: 'file_md5', width: 280,
-                      render: (v) => <code style={{ fontSize: 11 }}>{v}</code> },
+                      render: (v) => <code style={{ fontSize: 12 }}>{v}</code> },
                     { title: '大小', dataIndex: 'file_size', width: 100,
                       render: (n) => `${(n/1024).toFixed(1)} KB` },
                   ]}
@@ -2689,14 +2739,15 @@ function ArtifactTab({ app }: { app: App }) {
       )}
 
       <Table<Artifact>
-        rowKey="id" loading={loading} dataSource={list} pagination={false}
+        rowKey="id" loading={loading} dataSource={list}
+        pagination={list.length > 10 ? { pageSize: 10, size: 'small' } : false}
         locale={{ emptyText: <EmptyState title="还没有制品" description="可以从仓库构建、上传 jar 文件，或者注册本地 jar 路径。" /> }}
         columns={[
           { title: 'ID', dataIndex: 'id', width: 60 },
           { title: '版本', dataIndex: 'version_tag', width: 180, render: (v) => <Tag>{v}</Tag> },
           { title: '文件', dataIndex: 'file_name' },
           { title: '路径', dataIndex: 'file_path', ellipsis: true, render: (v) => <code>{v}</code> },
-          { title: 'MD5', dataIndex: 'file_md5', width: 280, render: (v) => <code style={{ fontSize: 11 }}>{v}</code> },
+          { title: 'MD5', dataIndex: 'file_md5', width: 280, render: (v) => <code style={{ fontSize: 12 }}>{v}</code> },
           { title: '大小', dataIndex: 'file_size', width: 100, render: (n) => `${(n/1024).toFixed(1)} KB` },
           { title: '创建', dataIndex: 'created_at', width: 170, render: (s) => new Date(s).toLocaleString() },
           { title: '操作', width: 100, render: (_, a) => <Button danger size="small" onClick={() => handleDelete(a)}>删除</Button> },
@@ -2762,9 +2813,7 @@ function ArtifactTab({ app }: { app: App }) {
                 <Typography.Text type="danger">{logTarget.error}</Typography.Text>
               </Card>
             )}
-            <pre className="runtime-log-box build-log-box">
-              {logText || '(空)'}
-            </pre>
+            <LogTerminal className="build-log-box" text={logText || '(空)'} loading={logTarget.status === 'building' && !logText} />
           </>
         )}
       </Modal>
@@ -2792,6 +2841,7 @@ function ArtifactTab({ app }: { app: App }) {
         okText={uploading ? '上传中…' : '开始上传'}
         cancelText="取消"
         confirmLoading={uploading}
+        cancelButtonProps={{ disabled: uploading }}
         maskClosable={false}
         keyboard={false}
         closable={!uploading}
@@ -2811,7 +2861,13 @@ function ArtifactTab({ app }: { app: App }) {
               fileList={upFile ? [{ uid: '-1', name: upFile.name, status: 'done', size: upFile.size } as any] : []}
               disabled={uploading}
             >
-              <p className="ant-upload-drag-icon upload-mark">⬆</p>
+              <p className="ant-upload-drag-icon upload-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 17V5" />
+                  <path d="m6 11 6-6 6 6" />
+                  <path d="M4 19h16" />
+                </svg>
+              </p>
               <p className="ant-upload-text">点击或拖拽 jar 文件到此区域</p>
               <p className="ant-upload-hint">单文件，最大受服务端 storage.max_upload_mb 限制</p>
             </Upload.Dragger>
@@ -2836,8 +2892,9 @@ function PipelineTab({ app }: { app: App }) {
   const [form] = Form.useForm()
   const [drawerRun, setDrawerRun] = useState<PipelineRun | null>(null)
 
-  const refresh = async () => {
-    setLoading(true)
+  // silent：轮询用，不触发表格 loading，避免每 3s spinner 闪烁
+  const refresh = async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const [ps, as, bs] = await Promise.all([
         listPipelines(app.id),
@@ -2846,16 +2903,16 @@ function PipelineTab({ app }: { app: App }) {
       ])
       setList(ps); setArts(as); setBundles(bs)
     } catch (e) {
-      message.error(formatError(e))
-    } finally { setLoading(false) }
+      if (!silent) message.error(formatError(e))
+    } finally { if (!silent) setLoading(false) }
   }
   useEffect(() => { refresh() }, [app.id])
 
-  // 简单轮询：有 running 的 pipeline 时每 3s 刷一次
+  // 简单轮询：有 running 的 pipeline 时每 3s 静默刷一次
   useEffect(() => {
     const hasRunning = list.some((r) => r.status === 'running')
     if (!hasRunning) return
-    const t = setInterval(refresh, 3000)
+    const t = setInterval(() => refresh(true), 3000)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [list])
@@ -2946,7 +3003,7 @@ function PipelineTab({ app }: { app: App }) {
             }}>
             触发部署
           </Button>
-          <Button onClick={refresh}>刷新</Button>
+          <Button onClick={() => refresh()}>刷新</Button>
         </div>
         <div className="workbench-hint">
           {arts.length === 0 && bundles.length === 0
@@ -2955,7 +3012,8 @@ function PipelineTab({ app }: { app: App }) {
         </div>
       </div>
       <Table<PipelineRun>
-        rowKey="id" loading={loading} dataSource={list} pagination={false}
+        rowKey="id" loading={loading} dataSource={list}
+        pagination={list.length > 10 ? { pageSize: 10, size: 'small' } : false}
         locale={{ emptyText: <EmptyState title="还没有部署记录" description="先选择一个 Bundle 或 Artifact 触发部署，成功记录才能作为回滚目标。" /> }}
         columns={[
           { title: '#', dataIndex: 'id', width: 60 },
@@ -2966,7 +3024,7 @@ function PipelineTab({ app }: { app: App }) {
               const version = r.bundle_id
                 ? <Tag color="blue">Bundle #{r.bundle_id}</Tag>
                 : r.previous_bundle_id
-                  ? <Tag color="purple">目标 Bundle #{r.previous_bundle_id}</Tag>
+                  ? <Tag color="blue">目标 Bundle #{r.previous_bundle_id}</Tag>
                   : r.artifact_id
                     ? <Tag>Art #{r.artifact_id}</Tag>
                     : null
@@ -3280,7 +3338,7 @@ function PipelineDetailDrawer({ run, onClose }: { run: PipelineRun | null; onClo
               {run.bundle_id
                 ? <Tag color="blue">Bundle #{run.bundle_id}</Tag>
                 : run.previous_bundle_id
-                  ? <Tag color="purple">Prev Bundle #{run.previous_bundle_id}</Tag>
+                  ? <Tag color="blue">Prev Bundle #{run.previous_bundle_id}</Tag>
                   : run.artifact_id
                     ? <Tag>Art #{run.artifact_id}</Tag>
                     : '-'}
@@ -3686,6 +3744,8 @@ function ServicesTab({
         onOk={onSubmit}
         okText={editing ? '保存' : '创建'}
         width={680}
+        maskClosable={false}
+        keyboard={false}
       >
         <Form form={form} layout="vertical" size="small">
           <Form.Item
@@ -3740,12 +3800,12 @@ function ServicesTab({
           </Space>
           <Space style={{ display: 'flex' }}>
             <Form.Item name="optional" label="Optional" valuePropName="checked" style={{ flex: 1 }}
-              tooltip="勾上则该 service 失败不阻塞整组部署"
+              tooltip="开启后该 service 失败不阻塞整组部署"
             >
-              <Input type="checkbox" />
+              <Switch />
             </Form.Item>
             <Form.Item name="enabled" label="Enabled" valuePropName="checked" style={{ flex: 1 }}>
-              <Input type="checkbox" />
+              <Switch />
             </Form.Item>
           </Space>
         </Form>
@@ -3762,7 +3822,7 @@ function ServicesTab({
         destroyOnClose
       >
         <Typography.Paragraph type="secondary">
-          姐姐会从 Git 仓库读取 <code>pom.xml</code>、Spring Boot 入口和 <code>server.port</code>，
+          系统会从 Git 仓库读取 <code>pom.xml</code>、Spring Boot 入口和 <code>server.port</code>，
           自动推断 <code>service_code</code>、<code>build_module</code> 和 <code>build_jar_pattern</code>。
           导入非 default 服务后会自动停用占位的 <code>default</code> service；如果只启用一个 service，它就是单服务部署。
         </Typography.Paragraph>
@@ -3792,7 +3852,7 @@ function ServicesTab({
                     <Tag color={row.confidence === 'high' ? 'green' : row.confidence === 'medium' ? 'blue' : 'orange'}>
                       {row.confidence}
                     </Tag>
-                    {row.existing && <Tag color="purple">已存在</Tag>}
+                    {row.existing && <Tag>已存在</Tag>}
                   </Space>
                 </Space>
               ),
@@ -3859,7 +3919,7 @@ function ServicesTab({
           ]}
         />
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          小宝，导入只是写 service 配置；之后还要在「运行」里选择这些 service 要部署到哪台主机。
+          提示：导入只是写 service 配置；之后还要在「运行」里选择这些 service 要部署到哪台主机。
         </Typography.Paragraph>
       </Modal>
 
@@ -3870,6 +3930,8 @@ function ServicesTab({
         onOk={submitDockerfile}
         okText={dfEditing ? '保存' : '创建'}
         width={760}
+        maskClosable={false}
+        keyboard={false}
       >
         <Form form={dfForm} layout="vertical" size="small">
           <Form.Item
@@ -3939,14 +4001,14 @@ function ServicesTab({
               <Input.TextArea rows={3} style={{ fontFamily: 'monospace' }} placeholder={'ENV TZ=Asia/Shanghai\n# USER 10001'} />
             </Form.Item>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              小宝，字段区只负责生成预览；下面的 Dockerfile 预览仍可高级编辑，最终保存的是预览内容。
+              字段区只负责生成预览；下面的 Dockerfile 预览仍可高级编辑，最终保存的是预览内容。
             </Typography.Text>
           </Card>
           <Form.Item name="content" label="Dockerfile 预览 / 高级编辑" rules={[{ required: true, message: '请先生成 Dockerfile 预览' }]}>
             <Input.TextArea rows={12} style={{ fontFamily: 'monospace' }} />
           </Form.Item>
           <Form.Item name="is_default" label="设为默认" valuePropName="checked">
-            <Input type="checkbox" />
+            <Switch />
           </Form.Item>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             变量：<code>{'{{JAR_FILE}}'}</code>、<code>{'{{PORT}}'}</code>、<code>{'{{APP_CODE}}'}</code>、<code>{'{{SERVICE_CODE}}'}</code>。

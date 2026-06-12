@@ -51,27 +51,27 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             darkItemSelectedBg: 'rgba(47, 127, 200, 0.28)',
             darkItemSelectedColor: '#ffffff',
             darkItemDisabledColor: 'rgba(157, 180, 199, 0.38)',
-            itemBorderRadius: 15,
+            itemBorderRadius: 14,
           },
           Card: {
             colorBgContainer: '#0d1b2e',
-            borderRadiusLG: 22,
+            borderRadiusLG: 20,
             headerBg: 'transparent',
           },
           Button: {
-            borderRadius: 13,
+            borderRadius: 14,
             controlHeight: 38,
             controlHeightLG: 46,
-            fontWeight: 700,
+            fontWeight: 600,
           },
           Input: {
-            borderRadius: 13,
+            borderRadius: 14,
             controlHeight: 38,
             controlHeightLG: 46,
             activeShadow: '0 0 0 3px rgba(47, 127, 200, 0.12)',
           },
           Select: {
-            borderRadius: 13,
+            borderRadius: 14,
             controlHeight: 38,
           },
           Table: {

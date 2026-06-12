@@ -1,9 +1,17 @@
-/* Swift DevOps visual system */
+/* Swift DevOps visual system
+   令牌契约（全文件只允许这些档位）：
+   - 字重：400 正文 / 600 semibold（按钮、卡片标题、tag、label）/ 700 bold（页面标题、数值）
+     —— 600/700 是雅黑、苹方、Segoe 都真实存在的档位；中间值在非可变字体上会坍缩。
+   - 圆角：10 sm（code/chip/avatar/glyph）/ 14 md（控件、内嵌面板、表格）/
+     20 lg（卡片、toolbar）/ 28 xl（hero、页面壳）/ 999 胶囊
+   - 阴影：sm 卡片 / md sticky 框架 / lg 浮层；inset 高光只用 --swift-inset-hl；
+     glow 只给主 CTA 与选中导航 */
 :root {
   --swift-bg: #07111f;
   --swift-bg-deep: #040914;
   --swift-surface: rgba(13, 27, 46, 0.76);
   --swift-surface-solid: #0d1b2e;
+  --swift-surface-raised: #10233a;
   --swift-surface-soft: rgba(19, 39, 64, 0.72);
   --swift-border: rgba(139, 180, 216, 0.18);
   --swift-border-strong: rgba(124, 190, 214, 0.28);
@@ -16,11 +24,14 @@
   --swift-text-soft: #c8d7e6;
   --swift-danger: #ff6b6b;
   --swift-success: #40d692;
-  --swift-radius-xl: 28px;
-  --swift-radius-lg: 20px;
+  --swift-radius-sm: 10px;
   --swift-radius-md: 14px;
-  --swift-shadow-lg: 0 24px 80px rgba(0, 18, 43, 0.42);
+  --swift-radius-lg: 20px;
+  --swift-radius-xl: 28px;
+  --swift-shadow-sm: 0 8px 24px rgba(2, 12, 27, 0.24);
   --swift-shadow-md: 0 16px 42px rgba(2, 12, 27, 0.34);
+  --swift-shadow-lg: 0 24px 70px rgba(0, 8, 18, 0.44);
+  --swift-inset-hl: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   --swift-shadow-glow: 0 0 0 1px rgba(124, 190, 214, 0.14), 0 18px 48px rgba(31, 95, 153, 0.16);
   font-family: "HarmonyOS Sans SC", "Microsoft YaHei UI", "PingFang SC", "Segoe UI", system-ui, -apple-system, sans-serif;
   color-scheme: dark;
@@ -117,11 +128,11 @@ a,
 
 .ant-btn-primary {
   background: linear-gradient(135deg, #256aa8 0%, #3a8fc3 100%) !important;
-  box-shadow: 0 10px 22px rgba(31, 95, 153, 0.18) !important;
+  box-shadow: var(--swift-shadow-glow) !important;
 }
 
 .ant-btn-primary:hover {
-  box-shadow: 0 14px 28px rgba(31, 95, 153, 0.24) !important;
+  box-shadow: var(--swift-shadow-glow) !important;
   transform: translateY(-1px);
 }
 
@@ -142,7 +153,7 @@ a,
 .ant-picker {
   border-color: rgba(139, 180, 216, 0.18) !important;
   background: rgba(5, 15, 29, 0.48) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  box-shadow: var(--swift-inset-hl);
 }
 
 .ant-input:hover,
@@ -163,9 +174,8 @@ a,
 .ant-card {
   overflow: hidden;
   border: 1px solid var(--swift-border) !important;
-  background:
-    linear-gradient(180deg, rgba(17, 35, 58, 0.9) 0%, rgba(10, 23, 39, 0.86) 100%) !important;
-  box-shadow: var(--swift-shadow-md);
+  background: var(--swift-surface-solid) !important;
+  box-shadow: var(--swift-shadow-sm);
 }
 
 .ant-card-head {
@@ -174,7 +184,7 @@ a,
 
 .ant-table-wrapper .ant-table {
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: 14px;
   background: rgba(11, 25, 42, 0.82) !important;
 }
 
@@ -182,7 +192,7 @@ a,
   border-bottom: 1px solid rgba(139, 180, 216, 0.12) !important;
   background: rgba(16, 35, 58, 0.92) !important;
   color: #d8e9fa !important;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .ant-table-wrapper .ant-table-tbody > tr > td {
@@ -206,6 +216,10 @@ a,
   border: 1px solid var(--swift-border) !important;
   background: rgba(10, 23, 39, 0.94) !important;
   box-shadow: var(--swift-shadow-lg) !important;
+}
+
+/* backdrop-filter 是 GPU 大户：全站只留 header 和 modal 两处 */
+.ant-modal-content {
   backdrop-filter: blur(18px);
 }
 
@@ -277,8 +291,7 @@ a,
   border: 1px solid rgba(139, 180, 216, 0.16);
   border-radius: 999px;
   background: rgba(9, 24, 42, 0.54);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(14px);
+  box-shadow: var(--swift-inset-hl);
 }
 
 .brand-mark {
@@ -289,10 +302,10 @@ a,
   place-items: center;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.78);
-  border-radius: 17px;
+  border-radius: 14px;
   background: linear-gradient(145deg, #ffffff 0%, #eaf7ff 100%);
   box-shadow:
-    0 14px 34px rgba(31, 95, 153, 0.16),
+    var(--swift-shadow-sm),
     inset 0 1px 0 rgba(255, 255, 255, 0.96);
 }
 
@@ -312,7 +325,7 @@ a,
 .login-hero-brand span:last-child {
   color: #c9e9ff;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -322,9 +335,10 @@ a,
   margin: 28px 0 18px !important;
   color: #f5fbff !important;
   font-size: clamp(42px, 7vw, 76px) !important;
-  font-weight: 800 !important;
-  letter-spacing: -0.065em;
-  line-height: 0.95 !important;
+  font-weight: 700 !important;
+  /* CJK 标题：不用负字距，行高 ≥1.15 防满框字截断 */
+  letter-spacing: 0;
+  line-height: 1.15 !important;
   text-wrap: balance;
 }
 
@@ -355,10 +369,9 @@ a,
   min-height: 108px;
   padding: 18px;
   border: 1px solid rgba(139, 180, 216, 0.15);
-  border-radius: 22px;
+  border-radius: 20px;
   background: rgba(8, 22, 38, 0.48);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055);
-  backdrop-filter: blur(12px);
+  box-shadow: var(--swift-inset-hl);
 }
 
 .login-metric strong {
@@ -377,7 +390,7 @@ a,
 
 .login-card.ant-card {
   border-color: rgba(173, 220, 255, 0.2) !important;
-  border-radius: 30px !important;
+  border-radius: 28px !important;
   background:
     linear-gradient(180deg, rgba(18, 39, 64, 0.84) 0%, rgba(8, 20, 36, 0.92) 100%) !important;
   box-shadow: var(--swift-shadow-lg), var(--swift-shadow-glow);
@@ -402,7 +415,7 @@ a,
 .login-card-brand .brand-mark {
   width: 66px;
   height: 66px;
-  border-radius: 22px;
+  border-radius: 20px;
 }
 
 .login-kicker {
@@ -410,7 +423,7 @@ a,
   margin-bottom: 2px;
   color: var(--swift-cyan) !important;
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
@@ -419,8 +432,8 @@ a,
   margin: 0 0 6px !important;
   color: #f6fbff !important;
   font-size: 28px !important;
-  font-weight: 760 !important;
-  letter-spacing: -0.04em;
+  font-weight: 700 !important;
+  letter-spacing: 0;
 }
 
 .login-card-desc.ant-typography {
@@ -439,14 +452,14 @@ a,
 .login-form .ant-input,
 .login-form .ant-input-affix-wrapper {
   min-height: 44px;
-  border-radius: 13px !important;
+  border-radius: 14px !important;
 }
 
 .login-submit.ant-btn {
   height: 46px;
   margin-top: 6px;
   border-radius: 14px;
-  font-weight: 750;
+  font-weight: 600;
   letter-spacing: 0.04em;
 }
 
@@ -460,9 +473,8 @@ a,
 /* Application shell */
 .app-shell.ant-layout {
   min-height: 100dvh;
-  background:
-    radial-gradient(circle at 25% -10%, rgba(47, 127, 200, 0.13), transparent 32rem),
-    linear-gradient(135deg, #07111f 0%, #081523 52%, #050914 100%);
+  /* 环境光统一由 body 提供，框架层不再叠渐变 */
+  background: transparent;
 }
 
 .app-sider.ant-layout-sider {
@@ -474,7 +486,7 @@ a,
   background:
     radial-gradient(circle at 30% 0%, rgba(47, 127, 200, 0.16), transparent 16rem),
     linear-gradient(180deg, rgba(9, 24, 42, 0.98) 0%, rgba(5, 12, 24, 0.98) 100%) !important;
-  box-shadow: 18px 0 56px rgba(0, 11, 26, 0.26);
+  box-shadow: var(--swift-shadow-md);
 }
 
 .app-sider .ant-layout-sider-children {
@@ -499,7 +511,7 @@ a,
 .sider-brand .brand-mark {
   width: 48px;
   height: 48px;
-  border-radius: 17px;
+  border-radius: 14px;
 }
 
 .brand-copy {
@@ -509,7 +521,7 @@ a,
 .brand-title {
   color: #f3faff;
   font-size: 17px;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: -0.03em;
   line-height: 1.1;
 }
@@ -518,8 +530,8 @@ a,
   margin-top: 4px;
   overflow: hidden;
   color: #87a5bd;
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
   letter-spacing: 0.09em;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -546,9 +558,9 @@ a,
   width: auto;
   height: 44px;
   margin: 6px 0;
-  border-radius: 15px;
+  border-radius: 14px;
   color: #9fb8cf;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .nav-menu.ant-menu-dark .ant-menu-item:hover {
@@ -560,7 +572,7 @@ a,
   color: #ffffff !important;
   background:
     linear-gradient(135deg, rgba(47, 127, 200, 0.28), rgba(124, 198, 220, 0.12)) !important;
-  box-shadow: inset 0 0 0 1px rgba(124, 198, 220, 0.14), 0 10px 26px rgba(31, 95, 153, 0.14);
+  box-shadow: var(--swift-shadow-glow);
 }
 
 .nav-menu.ant-menu-dark .ant-menu-item-disabled {
@@ -577,9 +589,13 @@ a,
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.055);
   color: #bfe5ff;
-  font-size: 11px;
-  font-weight: 800;
+  font-size: 12px;
+  font-weight: 700;
   letter-spacing: -0.02em;
+}
+
+.nav-glyph .anticon {
+  font-size: 14px;
 }
 
 .nav-menu.ant-menu-dark .ant-menu-item-selected .nav-glyph {
@@ -612,7 +628,7 @@ a,
   border-bottom: 1px solid rgba(139, 180, 216, 0.12);
   background: rgba(6, 17, 31, 0.72) !important;
   backdrop-filter: blur(18px) saturate(120%);
-  box-shadow: 0 12px 40px rgba(0, 13, 31, 0.18);
+  box-shadow: var(--swift-shadow-md);
   padding-inline: 28px;
 }
 
@@ -625,8 +641,8 @@ a,
 
 .header-eyebrow {
   color: #8ed0e0;
-  font-size: 11px;
-  font-weight: 800;
+  font-size: 12px;
+  font-weight: 600;
   letter-spacing: 0.16em;
   line-height: 1.2;
   text-transform: uppercase;
@@ -637,8 +653,8 @@ a,
   margin-top: 4px;
   color: #eef8ff;
   font-size: 18px;
-  font-weight: 760;
-  letter-spacing: -0.02em;
+  font-weight: 700;
+  letter-spacing: 0;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -661,7 +677,7 @@ a,
   background: rgba(9, 24, 42, 0.58);
   color: #cbe4f8;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .user-avatar {
@@ -669,19 +685,16 @@ a,
   width: 24px;
   height: 24px;
   place-items: center;
-  border-radius: 9px;
+  border-radius: 10px;
   background: linear-gradient(135deg, rgba(47, 127, 200, 0.92), rgba(124, 198, 220, 0.64));
   color: #042034;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .app-content.ant-layout-content {
   min-height: calc(100dvh - 72px);
   padding: clamp(18px, 1.4vw, 28px);
-  background:
-    radial-gradient(circle at 72% 0%, rgba(124, 198, 220, 0.07), transparent 26rem),
-    radial-gradient(circle at 12% 20%, rgba(47, 127, 200, 0.07), transparent 24rem);
 }
 
 .app-content > * {
@@ -825,7 +838,7 @@ a,
     radial-gradient(circle at 12% 0%, rgba(47, 127, 200, 0.16), transparent 24rem),
     radial-gradient(circle at 88% 20%, rgba(124, 198, 220, 0.08), transparent 22rem),
     linear-gradient(135deg, rgba(17, 36, 60, 0.88) 0%, rgba(8, 22, 39, 0.9) 100%);
-  box-shadow: var(--swift-shadow-md);
+  box-shadow: var(--swift-shadow-sm);
   padding: clamp(22px, 3vw, 30px);
 }
 
@@ -853,8 +866,8 @@ a,
 .page-eyebrow {
   margin-bottom: 10px;
   color: var(--swift-cyan);
-  font-size: 11px;
-  font-weight: 850;
+  font-size: 12px;
+  font-weight: 600;
   letter-spacing: 0.17em;
   line-height: 1.2;
   text-transform: uppercase;
@@ -864,9 +877,9 @@ a,
   margin: 0;
   color: #f5fbff;
   font-size: clamp(28px, 3vw, 42px);
-  font-weight: 820;
-  letter-spacing: -0.055em;
-  line-height: 1.06;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.2;
   text-wrap: balance;
 }
 
@@ -893,6 +906,30 @@ a,
   gap: 10px;
 }
 
+/* 紧凑 hero：日常工作页（列表 / 详情 / 设置）用，门面页（登录 / 总览）保留舒展版 */
+.page-hero--compact {
+  min-height: 96px;
+  padding: 16px 22px;
+}
+
+.page-hero--compact .page-eyebrow {
+  margin-bottom: 6px;
+}
+
+.page-hero--compact .page-title {
+  font-size: clamp(20px, 2vw, 26px);
+}
+
+.page-hero--compact .page-description {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.page-hero--compact .page-meta {
+  margin-top: 10px;
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -904,11 +941,9 @@ a,
   overflow: hidden;
   min-height: 112px;
   border: 1px solid rgba(139, 180, 216, 0.14);
-  border-radius: 22px;
-  background:
-    radial-gradient(circle at 100% 0%, rgba(47, 127, 200, 0.10), transparent 12rem),
-    rgba(9, 24, 42, 0.58);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  border-radius: 20px;
+  background: rgba(9, 24, 42, 0.58);
+  box-shadow: var(--swift-inset-hl);
   padding: 18px;
 }
 
@@ -950,7 +985,7 @@ a,
 .stat-label {
   color: #7f9ab3;
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 600;
   letter-spacing: 0.09em;
   text-transform: uppercase;
 }
@@ -959,9 +994,9 @@ a,
   margin-top: 12px;
   color: #f2f9ff;
   font-size: clamp(24px, 2.4vw, 34px);
-  font-weight: 820;
-  letter-spacing: -0.045em;
-  line-height: 1.05;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.15;
 }
 
 .stat-value .ant-tag {
@@ -989,7 +1024,7 @@ a,
   align-items: center;
   gap: 6px;
   border: 1px solid rgba(139, 180, 216, 0.14);
-  border-radius: 12px;
+  border-radius: 10px;
   background: rgba(5, 15, 29, 0.34);
   color: #cfe4f8;
   padding: 5px 8px;
@@ -1002,7 +1037,7 @@ a,
 .service-chip-name {
   color: #8fdcff;
   font-size: 12px;
-  font-weight: 760;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -1013,7 +1048,7 @@ a,
 }
 
 .surface-card.ant-card {
-  border-radius: 24px !important;
+  border-radius: 20px !important;
 }
 
 .surface-card .ant-card-body {
@@ -1055,7 +1090,7 @@ a,
 .empty-title {
   margin-top: 2px;
   color: #cfe4f8;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .empty-description {
@@ -1070,7 +1105,7 @@ a,
 code,
 .ant-typography code {
   border: 1px solid rgba(124, 198, 220, 0.12);
-  border-radius: 8px;
+  border-radius: 10px;
   background: rgba(4, 13, 25, 0.56);
   color: #bfeaff;
   font-family: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
@@ -1080,7 +1115,7 @@ code,
 
 .ant-descriptions .ant-descriptions-item-label {
   color: #8fa9c1 !important;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .ant-descriptions .ant-descriptions-item-content {
@@ -1093,7 +1128,7 @@ code,
 
 .ant-tabs .ant-tabs-tab {
   color: #8fa9c1;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .ant-tabs .ant-tabs-tab:hover,
@@ -1120,17 +1155,15 @@ code,
 
 .runtime-action-confirm .ant-modal-content {
   border: 1px solid rgba(139, 180, 216, 0.16) !important;
-  background:
-    radial-gradient(circle at 16% 0%, rgba(47, 127, 200, 0.12), transparent 18rem),
-    linear-gradient(180deg, rgba(12, 29, 49, 0.98), rgba(5, 15, 29, 0.98)) !important;
+  background: linear-gradient(180deg, rgba(12, 29, 49, 0.98), rgba(5, 15, 29, 0.98)) !important;
   box-shadow:
-    0 24px 70px rgba(0, 8, 18, 0.44),
-    inset 0 1px 0 rgba(255, 255, 255, 0.045) !important;
+    var(--swift-shadow-lg),
+    var(--swift-inset-hl) !important;
 }
 
 .runtime-action-confirm .ant-modal-confirm-title {
   color: #eaf7ff !important;
-  font-weight: 760;
+  font-weight: 600;
   letter-spacing: 0.01em;
 }
 
@@ -1190,11 +1223,9 @@ code,
   border-radius: 14px !important;
   background:
     linear-gradient(180deg, rgba(12, 29, 49, 0.82), rgba(5, 15, 29, 0.72)) !important;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.045),
-    0 8px 22px rgba(0, 10, 24, 0.14);
+  box-shadow: var(--swift-inset-hl);
   color: #b8ccdf !important;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 40px;
   padding-inline: 18px 36px;
   transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
@@ -1217,10 +1248,9 @@ code,
     linear-gradient(180deg, rgba(18, 40, 62, 0.88), rgba(8, 23, 39, 0.84)) !important;
   box-shadow:
     inset 2px 0 0 rgba(139, 180, 216, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.055),
-    0 6px 16px rgba(0, 10, 24, 0.12);
+    var(--swift-inset-hl);
   color: #dbe8f4 !important;
-  font-weight: 720;
+  font-weight: 600;
 }
 
 .runtime-config-form .ant-radio-button-wrapper-checked::after {
@@ -1237,15 +1267,13 @@ code,
   box-shadow: inset 0 0 0 1px rgba(139, 180, 216, 0.18);
   color: #b8ccdf;
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 600;
   line-height: 1;
   transform: translateY(-50%);
 }
 
 .runtime-config-form .ant-radio-button-wrapper:focus-within {
-  box-shadow:
-    0 0 0 2px rgba(139, 180, 216, 0.1),
-    0 6px 16px rgba(0, 10, 24, 0.12);
+  box-shadow: 0 0 0 2px rgba(139, 180, 216, 0.18);
 }
 
 .ant-upload-wrapper .ant-upload-drag {
@@ -1258,7 +1286,7 @@ pre {
   border: 1px solid rgba(139, 180, 216, 0.14);
   border-radius: 14px !important;
   background: #06101f !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow: var(--swift-inset-hl);
 }
 
 @media (max-width: 1100px) {
@@ -1318,10 +1346,8 @@ pre {
   gap: 14px;
   border: 1px solid rgba(139, 180, 216, 0.12);
   border-radius: 20px;
-  background:
-    radial-gradient(circle at 100% 0%, rgba(47, 127, 200, 0.09), transparent 14rem),
-    rgba(6, 17, 31, 0.42);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  background: rgba(6, 17, 31, 0.42);
+  box-shadow: var(--swift-inset-hl);
   padding: 14px;
 }
 
@@ -1348,9 +1374,9 @@ pre {
 }
 
 .workbench-card.ant-card {
-  border-radius: 22px !important;
-  background:
-    linear-gradient(180deg, rgba(14, 31, 52, 0.86), rgba(8, 20, 36, 0.9)) !important;
+  border-radius: 20px !important;
+  /* 嵌套在 detail-tabs-card 内 → 用 raised 色阶区分层级 */
+  background: var(--swift-surface-raised) !important;
 }
 
 .workbench-card + .workbench-card,
@@ -1365,8 +1391,8 @@ pre {
 
 .workbench-card .ant-card-head-title {
   color: #edf7ff;
-  font-weight: 760;
-  letter-spacing: -0.02em;
+  font-weight: 600;
+  letter-spacing: 0;
 }
 
 .host-bind-tab .ant-table-wrapper,
@@ -1375,7 +1401,7 @@ pre {
 .services-tab .ant-table-wrapper {
   overflow: hidden;
   border: 1px solid rgba(139, 180, 216, 0.12);
-  border-radius: 18px;
+  border-radius: 14px;
   background: rgba(8, 20, 36, 0.72);
 }
 
@@ -1393,12 +1419,10 @@ pre {
   max-height: 68vh;
   overflow: auto;
   border: 1px solid rgba(124, 198, 220, 0.11);
-  border-radius: 18px !important;
+  border-radius: 14px !important;
   background:
     linear-gradient(180deg, rgba(3, 9, 18, 0.96), rgba(5, 15, 29, 0.96)) !important;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.045),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  box-shadow: var(--swift-inset-hl);
   color: #d8e9fa !important;
   font-family: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
@@ -1443,7 +1467,7 @@ pre {
   border: 1px solid rgba(139, 180, 216, 0.14);
   border-radius: 14px;
   background: rgba(4, 13, 25, 0.68);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow: var(--swift-inset-hl);
   color: #cfe4f8 !important;
   font-family: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   line-height: 1.65;
@@ -1458,18 +1482,18 @@ pre {
 
 .pipeline-host-card.ant-card {
   margin-bottom: 14px;
-  border-radius: 18px !important;
+  border-radius: 14px !important;
   background: rgba(7, 19, 34, 0.72) !important;
 }
 
 .pipeline-host-card .ant-card-head-title {
   color: #dff1ff;
-  font-weight: 740;
+  font-weight: 600;
 }
 
 .pipeline-detail-drawer .ant-steps-item-title {
   color: #e7f5ff !important;
-  font-weight: 680;
+  font-weight: 600;
 }
 
 .pipeline-detail-drawer .ant-steps-item-description {
@@ -1478,32 +1502,26 @@ pre {
 
 .runtime-log-drawer .ant-drawer-body,
 .pipeline-detail-drawer .ant-drawer-body {
-  background:
-    radial-gradient(circle at 100% 0%, rgba(47, 127, 200, 0.08), transparent 22rem),
-    rgba(5, 13, 25, 0.92);
+  background: rgba(5, 13, 25, 0.92);
 }
 
 .upload-mark {
   margin-bottom: 8px !important;
   color: var(--swift-cyan) !important;
-  font-size: 40px !important;
   line-height: 1 !important;
-  text-shadow: 0 0 18px rgba(124, 198, 220, 0.26);
+}
+
+.upload-mark svg {
+  filter: drop-shadow(0 0 10px rgba(124, 198, 220, 0.26));
 }
 
 .ant-upload-wrapper .ant-upload-drag .ant-upload-text {
   color: #e8f6ff !important;
-  font-weight: 720;
+  font-weight: 600;
 }
 
 .ant-upload-wrapper .ant-upload-drag .ant-upload-hint {
   color: #8fa9c1 !important;
-}
-
-.services-tab .ant-input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--swift-primary);
 }
 
 .services-tab .workbench-card .workbench-card {
@@ -1533,7 +1551,7 @@ pre {
   gap: 6px;
   min-height: 24px;
   border-radius: 999px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .status-tag-dot {
@@ -1584,14 +1602,14 @@ pre {
   gap: 10px;
   align-items: start;
   border: 1px solid rgba(139, 180, 216, 0.12);
-  border-radius: 16px;
+  border-radius: 14px;
   background: rgba(5, 15, 29, 0.42);
   padding: 12px;
 }
 
 .action-item-title {
   color: #e7f5ff;
-  font-weight: 760;
+  font-weight: 600;
 }
 
 .action-item-desc {
@@ -1607,7 +1625,7 @@ pre {
 
 .action-item-desc a {
   color: #8fdcff;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .action-item-desc a:hover {
@@ -1623,9 +1641,8 @@ pre {
 
 .host-metrics-summary-item {
   border: 1px solid rgba(139, 180, 216, 0.12);
-  border-radius: 16px;
-  background:
-    linear-gradient(135deg, rgba(17, 42, 68, 0.72), rgba(7, 18, 34, 0.52));
+  border-radius: 14px;
+  background: rgba(13, 30, 51, 0.62);
   padding: 12px;
 }
 
@@ -1641,7 +1658,7 @@ pre {
   margin-top: 6px;
   color: #e7f5ff;
   font-size: 18px;
-  font-weight: 820;
+  font-weight: 700;
   letter-spacing: -0.02em;
 }
 
@@ -1676,9 +1693,9 @@ pre {
   border-radius: 999px;
   background: rgba(54, 144, 206, 0.12);
   color: #8fdcff;
-  font-size: 11px;
+  font-size: 12px;
   font-style: normal;
-  font-weight: 760;
+  font-weight: 600;
   line-height: 1;
   padding: 3px 7px;
 }
@@ -1692,7 +1709,7 @@ pre {
   justify-content: flex-end;
   color: #d8efff;
   font-size: 12px;
-  font-weight: 760;
+  font-weight: 600;
 }
 
 @media (max-width: 1120px) {
@@ -1714,7 +1731,7 @@ pre {
 .app-overview-tab .ant-table-wrapper {
   overflow: hidden;
   border: 1px solid rgba(139, 180, 216, 0.12);
-  border-radius: 18px;
+  border-radius: 14px;
   background: rgba(8, 20, 36, 0.72);
 }
 

@@ -44,7 +44,7 @@ export default function Login() {
           <p className="login-subtitle">
             统一接入远端 Git、Maven 模块扫描、Docker 构建与主机部署，把构建、发布、回滚和运行态观测收在一个控制台里。
           </p>
-          <div className="login-metrics" aria-hidden="true">
+          <div className="login-metrics">
             <div className="login-metric">
               <strong>Git → Build</strong>
               <span>代码拉取、模块识别、构建命令统一编排。</span>
@@ -80,7 +80,6 @@ export default function Login() {
             className="login-form"
             layout="vertical"
             onFinish={handle}
-            initialValues={{ username: 'admin' }}
             requiredMark={false}
           >
             <Form.Item name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]}>

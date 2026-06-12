@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Alert, Button, Card, Descriptions, Form, Input, Typography, message } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
 
 import type { BuilderEnv, BuilderEnvInput } from '../types'
 import { detectBuilderEnv, getBuilderEnv, updateBuilderEnv } from '../api/builderEnv'
@@ -58,6 +59,7 @@ export default function BuilderEnvPage() {
   return (
     <section className="page-shell">
       <PageHeader
+        compact
         eyebrow="Builder Environment"
         title="构建环境"
         description="这里配置 swift-devops 服务器本机的 Java / Maven / Git 路径，用于从远端 Git 拉代码并执行 Maven 构建。"
@@ -82,7 +84,7 @@ export default function BuilderEnvPage() {
         className="surface-card"
         loading={loading}
         title="路径配置"
-        extra={<Button onClick={refresh} loading={loading}>刷新当前配置</Button>}
+        extra={<Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>刷新当前配置</Button>}
       >
         <Alert
           type="info" showIcon style={{ marginBottom: 16 }}

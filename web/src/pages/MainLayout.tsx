@@ -1,4 +1,12 @@
 import { Layout, Menu, Button } from 'antd'
+import {
+  AppstoreOutlined,
+  CloudServerOutlined,
+  DashboardOutlined,
+  KeyOutlined,
+  LogoutOutlined,
+  SettingOutlined,
+} from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 
 import { useAuth } from '../store/auth'
@@ -7,11 +15,11 @@ const { Sider, Header, Content } = Layout
 const logoSrc = '/swift_devops_logo.png'
 
 const menuItems = [
-  { key: '/overview', icon: <span className="nav-glyph">总</span>, label: '总览' },
-  { key: '/apps', icon: <span className="nav-glyph">应</span>, label: '应用' },
-  { key: '/hosts', icon: <span className="nav-glyph">主</span>, label: '主机' },
-  { key: '/credentials', icon: <span className="nav-glyph">凭</span>, label: '凭证' },
-  { key: '/settings/build-env', icon: <span className="nav-glyph">设</span>, label: '系统设置' },
+  { key: '/overview', icon: <span className="nav-glyph"><DashboardOutlined /></span>, label: '总览' },
+  { key: '/apps', icon: <span className="nav-glyph"><AppstoreOutlined /></span>, label: '应用' },
+  { key: '/hosts', icon: <span className="nav-glyph"><CloudServerOutlined /></span>, label: '主机' },
+  { key: '/credentials', icon: <span className="nav-glyph"><KeyOutlined /></span>, label: '凭证' },
+  { key: '/settings/build-env', icon: <span className="nav-glyph"><SettingOutlined /></span>, label: '系统设置' },
 ]
 
 const pageTitles: Record<string, string> = {
@@ -70,7 +78,7 @@ export default function MainLayout() {
               <span className="user-avatar">{(user || 'U').slice(0, 1).toUpperCase()}</span>
               <span>{user}</span>
             </span>
-            <Button onClick={() => { logout(); nav('/login', { replace: true }) }}>退出</Button>
+            <Button icon={<LogoutOutlined />} onClick={() => { logout(); nav('/login', { replace: true }) }}>退出</Button>
           </div>
         </Header>
         <Content className="app-content">

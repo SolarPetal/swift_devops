@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Table, Button, Space, Tag, Modal, message, Card } from 'antd'
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import type { Host, TestResult } from '../types'
 import { deleteHost, listHosts, testHost } from '../api/host'
@@ -74,13 +75,14 @@ export default function HostList() {
   return (
     <section className="page-shell">
       <PageHeader
+        compact
         eyebrow="Hosts"
         title="主机资源"
         description="管理用于部署 Java 服务的目标主机，连通性、SSH 凭证和运行实例数量会直接影响发布成功率。"
         actions={(
           <>
-            <Button type="primary" onClick={() => { setEditing(null); setFormOpen(true) }}>新增主机</Button>
-            <Button onClick={refresh} loading={loading}>刷新</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditing(null); setFormOpen(true) }}>新增主机</Button>
+            <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>刷新</Button>
           </>
         )}
       />
@@ -94,17 +96,13 @@ export default function HostList() {
 
       <Card className="surface-card">
         <div className="table-toolbar">
-          <div className="table-toolbar-main">
-            <Button type="primary" onClick={() => { setEditing(null); setFormOpen(true) }}>新增主机</Button>
-            <Button onClick={refresh} loading={loading}>刷新列表</Button>
-          </div>
           <div className="toolbar-hint">建议新增后先测连；凭证变更会触发重新 TOFU。</div>
         </div>
         <Table<Host>
           rowKey="id"
           loading={loading}
           dataSource={data}
-          pagination={false}
+          pagination={data.length > 20 ? { pageSize: 20, size: 'small' } : false}
           locale={{
             emptyText: <EmptyState title="还没有主机" description="先新增一台部署目标主机，再绑定到应用服务。" />,
           }}

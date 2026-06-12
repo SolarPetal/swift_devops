@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Table, Button, Space, Modal, message, Card } from 'antd'
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import type { App } from '../types'
 import { deleteApp, listApps } from '../api/app'
@@ -53,13 +54,14 @@ export default function AppList() {
   return (
     <section className="page-shell">
       <PageHeader
+        compact
         eyebrow="Applications"
         title="应用服务"
         description="应用按远端 Git 仓库建档，进入详情后扫描 Maven 模块、配置 service、构建制品并绑定部署主机。"
         actions={(
           <>
-            <Button type="primary" onClick={() => { setEditing(null); setFormOpen(true) }}>新增应用</Button>
-            <Button onClick={refresh} loading={loading}>刷新</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditing(null); setFormOpen(true) }}>新增应用</Button>
+            <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>刷新</Button>
           </>
         )}
       />
@@ -73,17 +75,13 @@ export default function AppList() {
 
       <Card className="surface-card">
         <div className="table-toolbar">
-          <div className="table-toolbar-main">
-            <Button type="primary" onClick={() => { setEditing(null); setFormOpen(true) }}>新增应用</Button>
-            <Button onClick={refresh} loading={loading}>刷新列表</Button>
-          </div>
           <div className="toolbar-hint">创建后进入详情页继续配置服务、制品和部署历史。</div>
         </div>
         <Table<App>
           rowKey="id"
           loading={loading}
           dataSource={data}
-          pagination={false}
+          pagination={data.length > 20 ? { pageSize: 20, size: 'small' } : false}
           locale={{
             emptyText: <EmptyState title="还没有应用" description="先创建一个 Git 仓库应用，然后扫描 Maven 模块生成 service。" />,
           }}

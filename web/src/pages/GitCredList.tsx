@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Button, Card, Modal, Form, Input, Radio, Space, Table, Typography, message } from 'antd'
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import type { GitCredential, GitCredentialInput } from '../types'
 import { createGitCred, deleteGitCred, listGitCreds, updateGitCred } from '../api/gitcred'
@@ -80,13 +81,14 @@ export default function GitCredList() {
   return (
     <section className="page-shell">
       <PageHeader
+        compact
         eyebrow="Git Credentials"
         title="Git 凭证"
         description="集中管理私有仓库访问凭证。页面不回显 Secret，构建时由服务端解密后临时使用。"
         actions={(
           <>
-            <Button type="primary" onClick={openNew}>新增凭证</Button>
-            <Button onClick={refresh} loading={loading}>刷新</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openNew}>新增凭证</Button>
+            <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>刷新</Button>
           </>
         )}
       />
@@ -100,17 +102,13 @@ export default function GitCredList() {
 
       <Card className="surface-card">
         <div className="table-toolbar">
-          <div className="table-toolbar-main">
-            <Button type="primary" onClick={openNew}>新增凭证</Button>
-            <Button onClick={refresh} loading={loading}>刷新列表</Button>
-          </div>
           <div className="toolbar-hint">删除凭证不会影响历史构建记录，但新构建无法再选择它。</div>
         </div>
         <Table<GitCredential>
           rowKey="id"
           dataSource={list}
           loading={loading}
-          pagination={false}
+          pagination={list.length > 20 ? { pageSize: 20, size: 'small' } : false}
           locale={{
             emptyText: <EmptyState title="还没有 Git 凭证" description="公网仓库可以不配；私有仓库建议先新增 Token 或 SSH Key。" />,
           }}

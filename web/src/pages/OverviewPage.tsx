@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Alert, Button, Card, Progress, Skeleton, Table, Typography } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
 
 import { listApps } from '../api/app'
 import { listBuilds } from '../api/build'
@@ -260,7 +261,7 @@ export default function OverviewPage() {
         actions={(
           <>
             <Button type="primary" onClick={() => nav('/apps')}>进入应用</Button>
-            <Button onClick={refresh} loading={loading}>刷新状态</Button>
+            <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>刷新状态</Button>
           </>
         )}
         meta={(
