@@ -74,6 +74,7 @@ type FrontendDeployInput struct {
 	GitRef               string `json:"git_ref,omitempty"`
 	CredID               uint   `json:"cred_id,omitempty"`
 	Domain               string `json:"domain,omitempty"`
+	HostPort             int    `json:"host_port,omitempty"`
 	HTTPS                *bool  `json:"https,omitempty"`
 	CertPath             string `json:"cert_path,omitempty"`
 	KeyPath              string `json:"key_path,omitempty"`
@@ -608,11 +609,15 @@ func (s *FrontendDeployService) executeDeploy(ctx context.Context, rec *frontend
 		return
 	}
 	stepStarted = time.Now()
-	if err := s.remoteRun(ctx, client, imageName, cfg); err != nil {
+	if err := s.remoteRun(ctx, client, imageName, cfg, in.HostPort); err != nil {
 		rec.FailOrCancel(ctx, FrontendStageDockerRun, stepStarted, fmt.Sprintf("container=%s image=%s", cfg.ContainerName, imageName), err)
 		return
 	}
-	rec.Step(FrontendStageDockerRun, stepStarted, true, fmt.Sprintf("container=%s network=%s", cfg.ContainerName, defaultFrontendGatewayNetwork), nil)
+	if in.HostPort > 0 {
+		rec.Step(FrontendStageDockerRun, stepStarted, true, fmt.Sprintf("container=%s port=%d:%d (无域名模式)", cfg.ContainerName, in.HostPort, cfg.TargetPort), nil)
+	} else {
+		rec.Step(FrontendStageDockerRun, stepStarted, true, fmt.Sprintf("container=%s network=%s", cfg.ContainerName, defaultFrontendGatewayNetwork), nil)
+	}
 
 	stepStarted = time.Now()
 	if domain != "" {
@@ -690,7 +695,14 @@ func (s *FrontendDeployService) executeRollback(ctx context.Context, rec *fronte
 		return
 	}
 	stepStarted = time.Now()
-	if err := s.remoteRun(ctx, client, previousImage, cfg); err != nil {
+	// 回滚时从 state 推断 hostPort（如果 domain 为空则为无域名部署）
+	hostPort := 0
+	if strings.TrimSpace(state.Domain) == "" && state.TargetPort > 0 {
+		// 无域名回滚：尝试从 state 恢复端口映射（但 state 没记录 host_port，只能用 target_port 猜测）
+		// 这是个已知限制：无域名部署的 host_port 需要在 FrontendDeploymentState 里额外存储
+		hostPort = 0 // 暂时不支持无域名回滚的端口自动恢复
+	}
+	if err := s.remoteRun(ctx, client, previousImage, cfg, hostPort); err != nil {
 		rec.FailOrCancel(ctx, FrontendStageDockerRun, stepStarted, fmt.Sprintf("rollback container=%s image=%s", cfg.ContainerName, previousImage), err)
 		return
 	}
@@ -1297,11 +1309,11 @@ func (s *FrontendDeployService) uploadAndExtract(ctx context.Context, client *ss
 	return runRemoteChecked(ctx, client, cmd, "解压前端构建上下文失败")
 }
 
-func (s *FrontendDeployService) remoteBuildAndRun(ctx context.Context, client *sshpkg.Client, remoteRelease, imageName string, cfg *model.FrontendAppConfig) error {
+func (s *FrontendDeployService) remoteBuildAndRun(ctx context.Context, client *sshpkg.Client, remoteRelease, imageName string, cfg *model.FrontendAppConfig, hostPort int) error {
 	if err := s.remoteBuild(ctx, client, remoteRelease, imageName, cfg); err != nil {
 		return err
 	}
-	return s.remoteRun(ctx, client, imageName, cfg)
+	return s.remoteRun(ctx, client, imageName, cfg, hostPort)
 }
 
 func (s *FrontendDeployService) remoteBuild(ctx context.Context, client *sshpkg.Client, remoteRelease, imageName string, cfg *model.FrontendAppConfig) error {
@@ -1316,8 +1328,35 @@ func (s *FrontendDeployService) remoteBuild(ctx context.Context, client *sshpkg.
 	return nil
 }
 
-func (s *FrontendDeployService) remoteRun(ctx context.Context, client *sshpkg.Client, imageName string, cfg *model.FrontendAppConfig) error {
+func (s *FrontendDeployService) remoteRun(ctx context.Context, client *sshpkg.Client, imageName string, cfg *model.FrontendAppConfig, hostPort int) error {
 	runArgs := frontendShellJoinFields(cfg.DockerRunArgs)
+
+	// 无域名部署模式：hostPort > 0 时使用端口映射，不加入 gateway network
+	if hostPort > 0 {
+		portMapping := fmt.Sprintf("-p %d:%d", hostPort, cfg.TargetPort)
+		if runArgs == "" {
+			runArgs = fmt.Sprintf("-d --restart=unless-stopped %s", portMapping)
+		} else if !strings.Contains(runArgs, fmt.Sprintf("-p %d:", hostPort)) {
+			runArgs = fmt.Sprintf("%s %s", runArgs, portMapping)
+		}
+		cmd := fmt.Sprintf("docker rm -f %s >/dev/null 2>&1 || true\n"+
+			"docker run --name %s %s %s\n"+
+			"docker inspect -f '{{.State.Running}}' %s",
+			deploy.ShellQuote(cfg.ContainerName), deploy.ShellQuote(cfg.ContainerName), runArgs, deploy.ShellQuote(imageName), deploy.ShellQuote(cfg.ContainerName))
+		out, err := client.Exec(ctx, cmd)
+		if err != nil {
+			return apperr.Wrap(err, "INTERNAL", "启动前端容器（无域名模式）", 500)
+		}
+		if out.ExitCode != 0 {
+			return remoteCommandError("启动前端容器失败（无域名模式）", out)
+		}
+		if !strings.Contains(out.Stdout, "true") {
+			return apperr.New("BAD_REQUEST", "前端容器未进入 running 状态", 400)
+		}
+		return nil
+	}
+
+	// 有域名部署模式：使用 gateway network
 	if runArgs == "" {
 		runArgs = fmt.Sprintf("-d --restart=unless-stopped --network %s", deploy.ShellQuote(defaultFrontendGatewayNetwork))
 	} else if !strings.Contains(runArgs, "--network") && !strings.Contains(runArgs, "--net") {

@@ -447,6 +447,7 @@ export type FrontendDeployInput = {
   git_ref?: string
   cred_id?: number
   domain?: string
+  host_port?: number
   https?: boolean
   cert_path?: string
   key_path?: string

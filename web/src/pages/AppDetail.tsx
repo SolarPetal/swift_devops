@@ -58,6 +58,8 @@ import {
   statusToneFromBuild,
   statusToneFromPipeline,
 } from '../components/StatusTag'
+import { FrontendConfigForm } from '../components/FrontendConfigForm'
+import { FrontendDeployWizard } from '../components/FrontendDeployWizard'
 
 // 状态色
 const hostStatusTag = (s: string) => {
@@ -1150,16 +1152,11 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
   const [gatewayHostID, setGatewayHostID] = useState<number | undefined>()
   const [gatewayLoading, setGatewayLoading] = useState(false)
   const [form] = Form.useForm<FrontendConfigFormValues>()
-  const [deployForm] = Form.useForm<FrontendDeployFormValues>()
   const [rollbackForm] = Form.useForm<FrontendRollbackFormValues>()
 
   const selectedHost = hosts.find((h) => h.id === gatewayHostID)
   const serviceCode = config?.service_code || form.getFieldValue('service_code') || 'web'
   const isFrontendPipeline = (r: PipelineRun) => r.strategy === 'frontend' || r.strategy === 'frontend_rollback'
-  const deployDomain = Form.useWatch('domain', deployForm)
-  const rollbackDomain = Form.useWatch('domain', rollbackForm)
-  const deployHasDomain = Boolean(String(deployDomain || '').trim())
-  const rollbackHasDomain = Boolean(String(rollbackDomain || '').trim())
   const frontendDomainText = (domain?: string) => String(domain || '').trim() || '无域名 / 直连'
   const frontendDomainNode = (domain?: string) => {
     const d = String(domain || '').trim()
@@ -1335,50 +1332,13 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
   }
 
   const openDeploy = () => {
-    const cfg = config
-    deployForm.resetFields()
-    deployForm.setFieldsValue({
-      host_id: gatewayHostID || hosts[0]?.id,
-      service_code: cfg?.service_code || form.getFieldValue('service_code') || 'web',
-      git_ref: app.git_ref || 'main',
-      cred_id: Number(app.git_cred_id || 0),
-      domain: '',
-      https: false,
-      apply_gateway: false,
-      force_recreate_gateway: false,
-    })
     setDeployOpen(true)
   }
 
-  const onDeployValuesChange = (changed: Partial<FrontendDeployFormValues>) => {
-    if (!Object.prototype.hasOwnProperty.call(changed, 'domain')) return
-    const hasDomain = Boolean(String(changed.domain || '').trim())
-    deployForm.setFieldsValue({
-      https: hasDomain ? deployForm.getFieldValue('https') : false,
-      apply_gateway: hasDomain,
-      force_recreate_gateway: hasDomain ? deployForm.getFieldValue('force_recreate_gateway') : false,
-    })
-  }
-
-  const triggerDeploy = async () => {
+  const triggerDeploy = async (input: FrontendDeployInput) => {
     setDeploying(true)
     try {
-      const v = await deployForm.validateFields()
-      const domain = String(v.domain || '').trim()
-      const hasDomain = Boolean(domain)
-      const payload: FrontendDeployInput = {
-        host_id: Number(v.host_id),
-        service_code: v.service_code || serviceCode,
-        git_ref: v.git_ref || app.git_ref || 'main',
-        domain: domain || undefined,
-        https: hasDomain ? Boolean(v.https) : false,
-        cert_path: hasDomain ? v.cert_path || '' : '',
-        key_path: hasDomain ? v.key_path || '' : '',
-        apply_gateway: hasDomain && Boolean(v.apply_gateway),
-        force_recreate_gateway: hasDomain && Boolean(v.force_recreate_gateway),
-      }
-      if (v.cred_id && Number(v.cred_id) > 0) payload.cred_id = Number(v.cred_id)
-      const out = await deployFrontendApp(app.id, payload)
+      const out = await deployFrontendApp(app.id, input)
       setDeployResult(out)
       setGatewayHostID(out.host_id)
       await Promise.all([
@@ -1390,7 +1350,8 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
       } catch {
         // 已拿到 pipeline_run_id；详情读取失败时仍保留历史轮询。
       }
-      message.success(`已触发前端部署：#${out.pipeline_run_id}（${frontendDomainText(out.domain)}）`)
+      const domainText = input.domain ? input.domain : input.host_port ? `${selectedHost?.ip || 'host'}:${input.host_port}` : '未知'
+      message.success(`已触发前端部署：#${out.pipeline_run_id}（${domainText}）`)
       setDeployOpen(false)
     } catch (e: any) {
       if (e?.errorFields) return
@@ -1876,67 +1837,15 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
       {phase === 'deploy' && renderDeployTab()}
       {phase === 'deploy' && renderFrontendPipelineHistory()}
 
-      <Modal
-        title="触发部署"
+      <FrontendDeployWizard
+        app={app}
+        config={config}
+        hosts={hosts}
         open={deployOpen}
-        onOk={triggerDeploy}
         onCancel={() => setDeployOpen(false)}
-        okText="开始部署"
-        cancelText="取消"
-        width={680}
-        confirmLoading={deploying}
-        maskClosable={false}
-        keyboard={false}
-      >
-        <Form form={deployForm} layout="vertical" onValuesChange={onDeployValuesChange}>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item name="host_id" label="目标主机" style={{ flex: 1 }} rules={[{ required: true, message: '请选择目标主机' }]}>
-              <Select options={hosts.map((h) => ({ value: h.id, label: `${h.name} (${h.ip})` }))} />
-            </Form.Item>
-            <Form.Item name="service_code" label="service_code" style={{ flex: 1 }} rules={[{ required: true }]}>
-              <Input />
-            </Form.Item>
-          </Space>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item name="git_ref" label="Git Ref" style={{ flex: 1 }} rules={[{ required: true }]}>
-              <Select showSearch options={appBuildRefs(app).map(ref => ({ value: ref, label: ref }))} />
-            </Form.Item>
-            <Form.Item name="cred_id" label="Git 凭证 ID" style={{ flex: 1 }} tooltip="默认来自应用 git_cred_id；公网仓可留 0。">
-              <InputNumber min={0} style={{ width: '100%' }} />
-            </Form.Item>
-          </Space>
-          <Form.Item
-            name="domain"
-            label="访问域名（可选）"
-            tooltip="测试环境没有域名可以留空；留空时只启动容器并记录版本账本，不创建 Gateway route。"
-          >
-            <Input placeholder="可留空；有域名时填写 www.xxx.top / h5.xxx.top" />
-          </Form.Item>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item name="https" label="HTTPS" valuePropName="checked" style={{ width: 120 }}>
-              <Switch disabled={!deployHasDomain} />
-            </Form.Item>
-            <Form.Item name="apply_gateway" label="部署后 Apply Gateway" valuePropName="checked" style={{ width: 190 }}>
-              <Switch disabled={!deployHasDomain} />
-            </Form.Item>
-            <Form.Item name="force_recreate_gateway" label="强制重建 Gateway" valuePropName="checked" style={{ width: 190 }}>
-              <Switch disabled={!deployHasDomain} />
-            </Form.Item>
-          </Space>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item name="cert_path" label="证书路径" style={{ flex: 1 }} tooltip="HTTPS 开启时需要是 gateway 容器内可读路径。">
-              <Input placeholder="/etc/nginx/certs/www/fullchain.pem" />
-            </Form.Item>
-            <Form.Item name="key_path" label="私钥路径" style={{ flex: 1 }}>
-              <Input placeholder="/etc/nginx/certs/www/privkey.pem" />
-            </Form.Item>
-          </Space>
-          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            首次构建可能较慢。目标机器需要 Docker；不填域名会跳过 Gateway。若测试环境要用 IP 直连，请在运行配置的 docker run 参数里配置{' '}
-            <code>-p 主机端口:容器端口</code>，例如 <code>-p 18080:80</code>。
-          </Typography.Paragraph>
-        </Form>
-      </Modal>
+        onSubmit={triggerDeploy}
+        deploying={deploying}
+      />
 
       <Modal
         title="回滚到上一版"
@@ -1968,10 +1877,10 @@ function FrontendDeployTab({ app, phase }: { app: App; phase: FrontendWorkbenchP
           </Form.Item>
           <Space style={{ display: 'flex' }} align="start">
             <Form.Item name="apply_gateway" label="回滚后 Apply Gateway" valuePropName="checked" style={{ width: 190 }}>
-              <Switch disabled={!rollbackHasDomain} />
+              <Switch />
             </Form.Item>
             <Form.Item name="force_recreate_gateway" label="强制重建 Gateway" valuePropName="checked" style={{ width: 190 }}>
-              <Switch disabled={!rollbackHasDomain} />
+              <Switch />
             </Form.Item>
           </Space>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
